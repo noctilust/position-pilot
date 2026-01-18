@@ -3,6 +3,7 @@
 from datetime import datetime
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
+from textual.widget import Widget
 from textual.widgets import (
     Header,
     Footer,
@@ -14,15 +15,16 @@ from textual.widgets import (
 )
 from textual.binding import Binding
 from textual.reactive import reactive
-from textual import work
+from textual import work, events
 
 from rich.text import Text
 from rich.panel import Panel
 from rich.table import Table
 
 from ..client import get_client
+from ..config import get_default_account, get_watchlist
 from ..models import Account, Position
-from ..analysis import get_position_analyzer, get_analyzer, RiskLevel
+from ..analysis import get_position_analyzer, get_analyzer, RiskLevel, detect_strategies, StrategyGroup
 
 
 class AccountPanel(Static):
@@ -46,58 +48,271 @@ class AccountPanel(Static):
         return Panel(table, title=f"[bold]{self.account.display_name}[/bold]", border_style="blue")
 
 
-class PositionsTable(Static):
-    """Displays positions in a table."""
+class PositionsTable(DataTable):
+    """Displays positions or strategies in a table."""
 
     positions: reactive[list[Position]] = reactive(list)
+    show_strategies: reactive[bool] = reactive(True)
+    _initialized: bool = False
+    # Track expanded strategies: key = (symbol, strategy_type, strikes_tuple), value = bool
+    _expanded_strategies: set[tuple] = set()
+    # Map row indices to strategy data for enter key handling
+    _row_to_strategy: dict[int, tuple[str, StrategyGroup]] = {}
 
-    def compose(self) -> ComposeResult:
-        yield DataTable(id="positions-table")
+    BINDINGS = []
+
+    def _handle_toggle_expand(self) -> None:
+        """Toggle expansion of the currently selected strategy row."""
+        if not self.show_strategies:
+            return
+
+        cursor_row = self.cursor_row
+
+        if cursor_row in self._row_to_strategy:
+            symbol, strategy = self._row_to_strategy[cursor_row]
+            # Create a unique key for this strategy
+            strikes = tuple(sorted([
+                p.strike_price for p in strategy.positions
+                if p.strike_price is not None
+            ]))
+            strategy_key = (symbol, strategy.strategy_type, strikes)
+
+            # Toggle expansion state
+            if strategy_key in self._expanded_strategies:
+                self._expanded_strategies.remove(strategy_key)
+            else:
+                self._expanded_strategies.add(strategy_key)
+
+            # Repopulate table
+            self._populate_table()
+
+    def _toggle_all_strategies(self) -> None:
+        """Toggle expand/collapse state of all strategy rows."""
+        if not self.show_strategies:
+            return
+
+        # Get all strategies
+        strategies = detect_strategies(self.positions)
+
+        # Group strategies by underlying symbol
+        by_symbol: dict[str, list[StrategyGroup]] = {}
+        for strat in strategies:
+            if strat.underlying not in by_symbol:
+                by_symbol[strat.underlying] = []
+            by_symbol[strat.underlying].append(strat)
+
+        # Check if all are currently expanded
+        all_expanded = True
+        all_strategy_keys = []
+        for symbol, symbol_strategies in by_symbol.items():
+            for strat in symbol_strategies:
+                strikes = tuple(sorted([
+                    p.strike_price for p in strat.positions
+                    if p.strike_price is not None
+                ]))
+                strategy_key = (symbol, strat.strategy_type, strikes)
+                all_strategy_keys.append(strategy_key)
+                if strategy_key not in self._expanded_strategies:
+                    all_expanded = False
+
+        if all_expanded:
+            # Collapse all
+            self._expanded_strategies.clear()
+        else:
+            # Expand all
+            for strategy_key in all_strategy_keys:
+                self._expanded_strategies.add(strategy_key)
+
+        self._populate_table()
 
     def on_mount(self) -> None:
-        table = self.query_one(DataTable)
-        table.add_columns("Symbol", "Qty", "DTE", "Price", "P/L", "P/L %", "Delta")
-        table.cursor_type = "row"
+        """Set up table columns when widget is mounted."""
+        self._initialized = True
+        self.cursor_type = "row"
+        self.show_header = True
+        self.fixed_header = False
+        self.z_stripes = True
 
-    def watch_positions(self, positions: list[Position]) -> None:
-        table = self.query_one(DataTable)
-        table.clear()
+        # Set up initial columns
+        self.add_columns("Strategy", "Strikes", "Qty", "DTE", "P/L", "P/L %", "Delta")
 
-        for pos in sorted(positions, key=lambda p: (not p.is_option, p.underlying_symbol)):
-            # Format symbol
+    def set_positions(self, positions: list[Position]) -> None:
+        """Set positions and trigger table update via reactive system."""
+        self.positions = positions
+
+    def watch_show_strategies(self, old_value: bool, new_value: bool) -> None:
+        """React to view mode change."""
+        if not self._initialized:
+            return
+
+        # Clear and rebuild columns
+        self.clear(columns=True)
+
+        if self.show_strategies:
+            self.add_columns("Strategy", "Strikes", "Qty", "DTE", "P/L", "P/L %", "Delta")
+        else:
+            self.add_columns("Symbol", "Qty", "DTE", "Price", "P/L", "P/L %", "Delta")
+
+        self._populate_table()
+
+    def watch_positions(self, old_value: list[Position], new_value: list[Position]) -> None:
+        """React to positions change."""
+        if not self._initialized:
+            return
+        self._populate_table()
+
+    def _populate_table(self) -> None:
+        """Populate table with current data."""
+        self.clear()
+        self._row_to_strategy.clear()
+
+        if not self.positions:
+            return
+
+        if self.show_strategies:
+            self._populate_strategies()
+        else:
+            self._populate_positions()
+
+    def _populate_strategies(self) -> None:
+        """Populate table with strategies, grouped by symbol."""
+        strategies = detect_strategies(self.positions)
+
+        # Group strategies by underlying symbol
+        by_symbol: dict[str, list[StrategyGroup]] = {}
+        for strat in strategies:
+            if strat.underlying not in by_symbol:
+                by_symbol[strat.underlying] = []
+            by_symbol[strat.underlying].append(strat)
+
+        # Sort symbols
+        sorted_symbols = sorted(by_symbol.keys())
+        for i, symbol in enumerate(sorted_symbols):
+            symbol_strategies = by_symbol[symbol]
+            total_pnl = sum(s.unrealized_pnl for s in symbol_strategies)
+            pnl_style = "green" if total_pnl >= 0 else "red"
+
+            # Add symbol summary row
+            self.add_row(
+                Text(f" {symbol}", style="bold magenta"),
+                Text(f"{len(symbol_strategies)} strategies", style="dim"),
+                "",
+                "",
+                Text(f"${total_pnl:+,.2f}", style=f"bold {pnl_style}"),
+                "",
+                "",
+            )
+
+            # Add strategies for this symbol
+            for strat in symbol_strategies:
+                # Create unique key for this strategy
+                strikes = tuple(sorted([
+                    p.strike_price for p in strat.positions
+                    if p.strike_price is not None
+                ]))
+                strategy_key = (symbol, strat.strategy_type, strikes)
+                is_expanded = strategy_key in self._expanded_strategies
+
+                # Expand/collapse indicator
+                indicator = "▼" if is_expanded else "▶"
+                name = Text(f"  {indicator} {strat.strategy_type.value}", style="")
+
+                strikes_display = strat.strikes_display or "-"
+                qty = str(strat.total_quantity)
+                dte = f"{strat.days_to_expiration}" if strat.days_to_expiration is not None else "-"
+
+                pnl_style = "green" if strat.unrealized_pnl >= 0 else "red"
+                pnl = Text(f"${strat.unrealized_pnl:+,.2f}", style=pnl_style)
+
+                pnl_pct = "-"
+                if strat.unrealized_pnl_percent is not None:
+                    pnl_pct = Text(f"{strat.unrealized_pnl_percent:+.1f}%", style=pnl_style)
+
+                delta = f"{strat.total_delta:.0f}" if strat.total_delta else "-"
+
+                self.add_row(name, strikes_display, qty, dte, pnl, pnl_pct, delta)
+
+                # Track row index for this strategy (current row count after adding)
+                row_index = len(self.rows) - 1
+                self._row_to_strategy[row_index] = (symbol, strat)
+
+                # Show legs if expanded
+                if is_expanded:
+                    for pos in strat.positions:
+                        # Format position as a leg
+                        if pos.is_option:
+                            exp = pos.expiration_date.strftime("%m/%d") if pos.expiration_date else "?"
+                            opt = "C" if pos.option_type == "C" else "P"
+                            strike = f"${pos.strike_price:.0f}" if pos.strike_price else "?"
+                            pos_symbol = f"    └─ {exp} {strike}{opt}"
+                        else:
+                            pos_symbol = f"    └─ {pos.symbol}"
+
+                        # Quantity with style
+                        qty_style = "red" if pos.is_short else "green"
+                        pos_qty = Text(pos.display_quantity, style=qty_style)
+
+                        pos_dte = str(pos.days_to_expiration) if pos.days_to_expiration is not None else "-"
+
+                        pos_price = pos.mark_price or pos.close_price
+                        pos_price_str = f"${pos_price:.2f}" if pos_price else "-"
+
+                        pos_pnl_style = "green" if pos.unrealized_pnl >= 0 else "red"
+                        pos_pnl = Text(f"${pos.unrealized_pnl:+,.2f}", style=pos_pnl_style)
+
+                        pos_pnl_pct = "-"
+                        if pos.unrealized_pnl_percent is not None:
+                            pos_pnl_pct = Text(f"{pos.unrealized_pnl_percent:+.1f}%", style=pos_pnl_style)
+
+                        pos_delta = "-"
+                        if pos.greeks and pos.greeks.delta is not None:
+                            pos_delta = f"{pos.greeks.delta:.2f}"
+
+                        self.add_row(
+                            Text(pos_symbol, style="dim"),
+                            "",  # Empty for strikes column
+                            pos_qty,
+                            pos_dte,
+                            pos_price_str,
+                            pos_pnl,
+                            Text(pos_delta if pos_delta != "-" else "", style="dim"),
+                        )
+
+            # Add blank row after each symbol group (except last)
+            if i < len(sorted_symbols) - 1:
+                self.add_row("", "", "", "", "", "", "")
+
+    def _populate_positions(self) -> None:
+        """Populate table with individual positions."""
+        for pos in sorted(self.positions, key=lambda p: (not p.is_option, p.underlying_symbol)):
             if pos.is_option:
                 exp = pos.expiration_date.strftime("%m/%d") if pos.expiration_date else "?"
                 opt = "C" if pos.option_type == "C" else "P"
-                symbol = f"{pos.underlying_symbol} {exp} ${pos.strike_price:.0f}{opt}"
+                strike = f"${pos.strike_price:.0f}" if pos.strike_price else "?"
+                symbol = f"{pos.underlying_symbol} {exp} {strike}{opt}"
             else:
                 symbol = pos.symbol
 
-            # Format quantity
             qty_style = "red" if pos.is_short else "green"
             qty = Text(pos.display_quantity, style=qty_style)
 
-            # DTE
             dte = str(pos.days_to_expiration) if pos.days_to_expiration is not None else "-"
 
-            # Price
             price = pos.mark_price or pos.close_price
             price_str = f"${price:.2f}" if price else "-"
 
-            # P/L
             pnl_style = "green" if pos.unrealized_pnl >= 0 else "red"
             pnl = Text(f"${pos.unrealized_pnl:+,.2f}", style=pnl_style)
 
-            # P/L %
             pnl_pct = "-"
             if pos.unrealized_pnl_percent is not None:
                 pnl_pct = Text(f"{pos.unrealized_pnl_percent:+.1f}%", style=pnl_style)
 
-            # Delta
             delta = "-"
             if pos.greeks and pos.greeks.delta is not None:
                 delta = f"{pos.greeks.delta:.2f}"
 
-            table.add_row(symbol, qty, dte, price_str, pnl, pnl_pct, delta)
+            self.add_row(symbol, qty, dte, price_str, pnl, pnl_pct, delta)
 
 
 class RecommendationsPanel(Static):
@@ -127,7 +342,8 @@ class RecommendationsPanel(Static):
             pos = rec.position
             if pos.is_option:
                 exp = pos.expiration_date.strftime("%m/%d") if pos.expiration_date else "?"
-                name = f"{pos.underlying_symbol} {exp} ${pos.strike_price:.0f}"
+                strike = f"${pos.strike_price:.0f}" if pos.strike_price else "?"
+                name = f"{pos.underlying_symbol} {exp} {strike}"
             else:
                 name = pos.symbol
 
@@ -233,6 +449,7 @@ class PilotDashboard(App):
 
     TITLE = "Position Pilot"
     SUB_TITLE = "Market Analysis & Position Guidance"
+    ENABLE_COMMAND_PALETTE = False
 
     CSS = """
     Screen {
@@ -257,7 +474,11 @@ class PilotDashboard(App):
     }
 
     #positions-container {
-        height: 100%;
+        height: 1fr;
+    }
+
+    PositionsTable {
+        height: 1fr;
     }
 
     #side-panels {
@@ -281,7 +502,7 @@ class PilotDashboard(App):
         padding: 0 1;
     }
 
-    DataTable {
+    #positions-table-widget {
         height: 100%;
     }
     """
@@ -290,6 +511,9 @@ class PilotDashboard(App):
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
         Binding("a", "analyze", "Analyze"),
+        Binding("g", "toggle_group", "Group"),
+        Binding("enter", "toggle_expand", "Expand/Collapse", show=False),
+        Binding("e", "toggle_all_strategies", "Collapse All"),
     ]
 
     def __init__(self):
@@ -298,9 +522,6 @@ class PilotDashboard(App):
         self.analyzer = get_position_analyzer()
         self.market_analyzer = get_analyzer()
         self.account: Account | None = None
-
-        # Load watchlist from config
-        from ..config import get_watchlist
         self.watchlist = get_watchlist()
 
     def compose(self) -> ComposeResult:
@@ -310,7 +531,7 @@ class PilotDashboard(App):
             yield AccountPanel(id="account-panel")
             yield PortfolioSummary(id="portfolio-panel")
 
-        with ScrollableContainer(id="positions-container"):
+        with Container(id="positions-container"):
             yield PositionsTable(id="positions-table-widget")
 
         with Vertical(id="side-panels"):
@@ -334,7 +555,15 @@ class PilotDashboard(App):
             # Fetch accounts
             accounts = self.client.get_accounts()
             if accounts:
-                self.account = accounts[0]
+                # Use default account from config, or fall back to first
+                default_account_num = get_default_account()
+                if default_account_num:
+                    self.account = next(
+                        (a for a in accounts if a.account_number == default_account_num),
+                        accounts[0]
+                    )
+                else:
+                    self.account = accounts[0]
 
                 # Fetch balances
                 balances = self.client.get_account_balances(self.account.account_number)
@@ -346,10 +575,8 @@ class PilotDashboard(App):
                 # Fetch positions
                 positions = self.client.get_positions(self.account.account_number)
 
-                # Enrich with Greeks
-                for i, pos in enumerate(positions):
-                    if pos.is_option:
-                        positions[i] = self.client.enrich_position_greeks(pos)
+                # Enrich with Greeks (batch - much faster!)
+                positions = self.client.enrich_positions_greeks_batch(positions)
 
                 self.account.positions = positions
 
@@ -359,7 +586,7 @@ class PilotDashboard(App):
 
                 # Update positions table
                 positions_widget = self.query_one(PositionsTable)
-                positions_widget.positions = positions
+                positions_widget.set_positions(positions)
 
                 # Analyze portfolio
                 analysis = self.analyzer.analyze_portfolio(positions)
@@ -399,6 +626,33 @@ class PilotDashboard(App):
     def action_analyze(self) -> None:
         """Run full analysis."""
         self.load_data()
+
+    def action_toggle_group(self) -> None:
+        """Toggle between strategies and positions view."""
+        positions_widget = self.query_one(PositionsTable)
+        positions_widget.show_strategies = not positions_widget.show_strategies
+
+    def action_toggle_expand(self) -> None:
+        """Toggle expansion of the currently selected strategy row."""
+        positions_widget = self.query_one(PositionsTable)
+        positions_widget._handle_toggle_expand()
+
+    def action_toggle_all_strategies(self) -> None:
+        """Toggle expand/collapse state of all strategy rows."""
+        positions_widget = self.query_one(PositionsTable)
+        positions_widget._toggle_all_strategies()
+
+    async def on_event(self, event: events.Event) -> None:
+        """Handle all events at the app level."""
+        if isinstance(event, events.Key):
+            if event.key == "enter":
+                positions_widget = self.query_one(PositionsTable)
+                if positions_widget.show_strategies:
+                    positions_widget._handle_toggle_expand()
+                    event.stop()
+                    return
+
+        await super().on_event(event)
 
 
 def run_dashboard():

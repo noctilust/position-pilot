@@ -8,6 +8,7 @@ from rich.text import Text
 from rich import box
 
 from .client import get_client
+from .config import get_default_account, set_default_account
 from .models import Position
 
 app = typer.Typer(
@@ -16,6 +17,23 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+
+def resolve_account(account_flag: str | None = None) -> tuple[str | None, str]:
+    """
+    Resolve which account to use.
+
+    Priority: CLI flag > config default > first account
+    Returns: (account_number, source) where source describes how it was resolved
+    """
+    if account_flag:
+        return account_flag, "flag"
+
+    default = get_default_account()
+    if default:
+        return default, "config"
+
+    return None, "first"
 
 
 def format_pnl(value: float, percent: float | None = None) -> Text:
@@ -34,7 +52,8 @@ def format_position_row(pos: Position) -> list:
     if pos.is_option:
         exp = pos.expiration_date.strftime("%m/%d") if pos.expiration_date else "?"
         opt_type = "C" if pos.option_type == "C" else "P"
-        symbol = f"{pos.underlying_symbol} {exp} ${pos.strike_price:.0f}{opt_type}"
+        strike = f"${pos.strike_price:.0f}" if pos.strike_price else "?"
+        symbol = f"{pos.underlying_symbol} {exp} {strike}{opt_type}"
         dte = f"{pos.days_to_expiration}d" if pos.days_to_expiration is not None else "-"
     else:
         symbol = pos.symbol
@@ -58,12 +77,49 @@ def format_position_row(pos: Position) -> list:
     return [symbol, qty, dte, price_str, pnl, delta, theta]
 
 
+def format_strategy_row(strategy) -> list:
+    """Format a strategy as a table row."""
+    from .analysis import StrategyGroup
+
+    # Strategy name with underlying and expiration
+    exp_str = ""
+    if strategy.expiration:
+        exp_str = strategy.expiration.strftime("%m/%d")
+    elif strategy.days_to_expiration is not None:
+        exp_str = f"{strategy.days_to_expiration}d"
+
+    name = f"{strategy.underlying} {strategy.strategy_type.value}"
+
+    # Strikes
+    strikes = strategy.strikes_display
+
+    # Quantity
+    qty = str(strategy.total_quantity)
+
+    # DTE
+    dte = f"{strategy.days_to_expiration}d" if strategy.days_to_expiration is not None else "-"
+
+    # P/L
+    pnl = format_pnl(strategy.unrealized_pnl, strategy.unrealized_pnl_percent)
+
+    # Delta
+    delta = f"{strategy.total_delta:.0f}" if strategy.total_delta else "-"
+
+    # Theta
+    theta = f"${strategy.total_theta:.0f}" if strategy.total_theta else "-"
+
+    return [name, strikes, qty, dte, pnl, delta, theta]
+
+
 @app.command()
 def positions(
-    account: str = typer.Option(None, "--account", "-a", help="Account number (uses first if not specified)"),
+    account: str = typer.Option(None, "--account", "-a", help="Account number (uses default if not specified)"),
     enrich: bool = typer.Option(False, "--enrich", "-e", help="Fetch live Greeks (slower)"),
+    group: bool = typer.Option(False, "--group", "-g", help="Group positions by strategy"),
 ):
     """Show current positions."""
+    from .analysis import detect_strategies
+
     client = get_client()
 
     if not client.is_enabled:
@@ -72,20 +128,22 @@ def positions(
         raise typer.Exit(1)
 
     with console.status("Fetching accounts..."):
-        accounts = client.get_accounts()
+        accts = client.get_accounts()
 
-    if not accounts:
+    if not accts:
         console.print("[yellow]No accounts found[/yellow]")
         raise typer.Exit(0)
 
-    # Select account
-    if account:
-        selected = next((a for a in accounts if a.account_number == account), None)
+    # Resolve account: CLI flag > config default > first account
+    account_num, source = resolve_account(account)
+
+    if account_num:
+        selected = next((a for a in accts if a.account_number == account_num), None)
         if not selected:
-            console.print(f"[red]Account {account} not found[/red]")
+            console.print(f"[red]Account {account_num} not found[/red]")
             raise typer.Exit(1)
     else:
-        selected = accounts[0]
+        selected = accts[0]
 
     # Fetch balances and positions
     with console.status(f"Fetching positions for {selected.display_name}..."):
@@ -121,29 +179,51 @@ def positions(
         console.print("[dim]No open positions[/dim]")
         return
 
-    # Positions table
-    table = Table(title="Open Positions", box=box.ROUNDED)
-    table.add_column("Symbol", style="cyan")
-    table.add_column("Qty", justify="right")
-    table.add_column("DTE", justify="right", style="dim")
-    table.add_column("Price", justify="right")
-    table.add_column("P/L", justify="right")
-    table.add_column("Delta", justify="right", style="dim")
-    table.add_column("Theta", justify="right", style="dim")
-
-    # Sort: options first, then by underlying
-    sorted_positions = sorted(
-        positions,
-        key=lambda p: (not p.is_option, p.underlying_symbol, p.expiration_date or ""),
-    )
-
     total_pnl = 0.0
-    for pos in sorted_positions:
-        row = format_position_row(pos)
-        table.add_row(*row)
-        total_pnl += pos.unrealized_pnl
 
-    console.print(table)
+    if group:
+        # Detect and display strategies
+        strategies = detect_strategies(positions)
+
+        table = Table(title="Strategies", box=box.ROUNDED)
+        table.add_column("Strategy", style="cyan")
+        table.add_column("Strikes", style="dim")
+        table.add_column("Qty", justify="right")
+        table.add_column("DTE", justify="right", style="dim")
+        table.add_column("P/L", justify="right")
+        table.add_column("Delta", justify="right", style="dim")
+        table.add_column("Theta", justify="right", style="dim")
+
+        for strat in strategies:
+            row = format_strategy_row(strat)
+            table.add_row(*row)
+            total_pnl += strat.unrealized_pnl
+
+        console.print(table)
+        console.print(f"\n[dim]{len(strategies)} strategies from {len(positions)} positions[/dim]")
+    else:
+        # Display individual positions
+        table = Table(title="Open Positions", box=box.ROUNDED)
+        table.add_column("Symbol", style="cyan")
+        table.add_column("Qty", justify="right")
+        table.add_column("DTE", justify="right", style="dim")
+        table.add_column("Price", justify="right")
+        table.add_column("P/L", justify="right")
+        table.add_column("Delta", justify="right", style="dim")
+        table.add_column("Theta", justify="right", style="dim")
+
+        # Sort: options first, then by underlying
+        sorted_positions = sorted(
+            positions,
+            key=lambda p: (not p.is_option, p.underlying_symbol, p.expiration_date or ""),
+        )
+
+        for pos in sorted_positions:
+            row = format_position_row(pos)
+            table.add_row(*row)
+            total_pnl += pos.unrealized_pnl
+
+        console.print(table)
 
     # Total P/L
     total_text = format_pnl(total_pnl)
@@ -151,8 +231,23 @@ def positions(
     console.print(total_text)
 
 
-@app.command()
-def accounts():
+# Account subcommand group
+account_app = typer.Typer(
+    help="Manage accounts (list, select, set, show)",
+    invoke_without_command=True,
+)
+app.add_typer(account_app, name="account")
+
+
+@account_app.callback()
+def account_callback(ctx: typer.Context):
+    """Manage accounts. Run without subcommand to list accounts."""
+    if ctx.invoked_subcommand is None:
+        account_list()
+
+
+@account_app.command("list")
+def account_list():
     """List all accounts."""
     client = get_client()
 
@@ -167,19 +262,126 @@ def accounts():
         console.print("[yellow]No accounts found[/yellow]")
         return
 
+    default = get_default_account()
+
     table = Table(title="Accounts", box=box.ROUNDED)
+    table.add_column("", width=2)  # Default indicator
     table.add_column("Account", style="cyan")
     table.add_column("Type")
     table.add_column("Nickname")
 
     for acc in accts:
+        is_default = acc.account_number == default
+        indicator = "[green]✓[/green]" if is_default else ""
         table.add_row(
+            indicator,
             acc.account_number,
             acc.account_type,
             acc.nickname or "-",
         )
 
     console.print(table)
+
+    if default:
+        console.print(f"\n[dim]Default account: {default}[/dim]")
+    else:
+        console.print("\n[dim]No default account set. Use 'pilot account select' to set one.[/dim]")
+
+
+@account_app.command("select")
+def account_select():
+    """Interactively select a default account."""
+    client = get_client()
+
+    if not client.is_enabled:
+        console.print("[red]Error:[/red] Tastytrade credentials not configured")
+        raise typer.Exit(1)
+
+    with console.status("Fetching accounts..."):
+        accts = client.get_accounts()
+
+    if not accts:
+        console.print("[yellow]No accounts found[/yellow]")
+        raise typer.Exit(1)
+
+    current_default = get_default_account()
+
+    console.print("\n[bold]Select an account:[/bold]\n")
+
+    for i, acc in enumerate(accts, 1):
+        is_default = acc.account_number == current_default
+        marker = " [green](current)[/green]" if is_default else ""
+        name = acc.nickname or acc.account_type
+        console.print(f"  {i}. {acc.account_number} - {name}{marker}")
+
+    console.print(f"  0. Clear default\n")
+
+    choice = typer.prompt("Enter number", type=int)
+
+    if choice == 0:
+        set_default_account(None)
+        console.print("[green]Default account cleared[/green]")
+    elif 1 <= choice <= len(accts):
+        selected = accts[choice - 1]
+        set_default_account(selected.account_number)
+        name = selected.nickname or selected.account_type
+        console.print(f"[green]Default account set to {selected.account_number} ({name})[/green]")
+    else:
+        console.print("[red]Invalid selection[/red]")
+        raise typer.Exit(1)
+
+
+@account_app.command("set")
+def account_set(account_number: str = typer.Argument(..., help="Account number to set as default")):
+    """Set the default account directly."""
+    client = get_client()
+
+    if not client.is_enabled:
+        console.print("[red]Error:[/red] Tastytrade credentials not configured")
+        raise typer.Exit(1)
+
+    with console.status("Validating account..."):
+        accts = client.get_accounts()
+
+    # Validate account exists
+    account = next((a for a in accts if a.account_number == account_number), None)
+
+    if not account:
+        console.print(f"[red]Account {account_number} not found[/red]")
+        console.print("\nAvailable accounts:")
+        for acc in accts:
+            console.print(f"  • {acc.account_number} ({acc.nickname or acc.account_type})")
+        raise typer.Exit(1)
+
+    set_default_account(account_number)
+    name = account.nickname or account.account_type
+    console.print(f"[green]Default account set to {account_number} ({name})[/green]")
+
+
+@account_app.command("show")
+def account_show():
+    """Show the current default account."""
+    default = get_default_account()
+
+    if not default:
+        console.print("[dim]No default account set[/dim]")
+        console.print("Use 'pilot account select' or 'pilot account set <number>' to set one.")
+        return
+
+    client = get_client()
+
+    if client.is_enabled:
+        with console.status("Fetching account info..."):
+            accts = client.get_accounts()
+            account = next((a for a in accts if a.account_number == default), None)
+
+        if account:
+            name = account.nickname or account.account_type
+            console.print(f"Default account: [cyan]{default}[/cyan] ({name})")
+        else:
+            console.print(f"Default account: [cyan]{default}[/cyan] [yellow](not found in API)[/yellow]")
+    else:
+        console.print(f"Default account: [cyan]{default}[/cyan]")
 
 
 @app.command()
@@ -235,7 +437,7 @@ def dashboard():
 
 @app.command()
 def analyze(
-    account: str = typer.Option(None, "--account", "-a", help="Account number"),
+    account: str = typer.Option(None, "--account", "-a", help="Account number (uses default if not specified)"),
 ):
     """Analyze positions and show recommendations."""
     from .analysis import get_position_analyzer, get_analyzer, RiskLevel
@@ -249,14 +451,21 @@ def analyze(
         raise typer.Exit(1)
 
     with console.status("Fetching data..."):
-        accounts = client.get_accounts()
-        if not accounts:
+        accts = client.get_accounts()
+        if not accts:
             console.print("[yellow]No accounts found[/yellow]")
             raise typer.Exit(0)
 
-        selected = accounts[0] if not account else next(
-            (a for a in accounts if a.account_number == account), accounts[0]
-        )
+        # Resolve account: CLI flag > config default > first account
+        account_num, source = resolve_account(account)
+
+        if account_num:
+            selected = next((a for a in accts if a.account_number == account_num), None)
+            if not selected:
+                console.print(f"[red]Account {account_num} not found[/red]")
+                raise typer.Exit(1)
+        else:
+            selected = accts[0]
 
         positions = client.get_positions(selected.account_number)
 
@@ -404,7 +613,7 @@ def market(
 
 
 # Watchlist subcommand group
-watchlist_app = typer.Typer(help="Manage your watchlist")
+watchlist_app = typer.Typer(help="Manage your watchlist (show, add, remove, clear, set)")
 app.add_typer(watchlist_app, name="watchlist")
 
 

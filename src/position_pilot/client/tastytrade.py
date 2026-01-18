@@ -178,6 +178,20 @@ class TastytradeClient:
                     except ValueError:
                         pass
 
+                # Fallback: parse OCC symbol if API didn't provide details
+                # OCC format: SYMBOL (6 chars) + YYMMDD + C/P + strike*1000 (8 chars)
+                if (not strike or not opt_type or not exp_date) and len(symbol) >= 15:
+                    parsed = self._parse_occ_symbol(symbol)
+                    if parsed:
+                        if not strike:
+                            strike = parsed.get("strike")
+                        if not opt_type:
+                            opt_type = parsed.get("option_type")
+                        if not exp_date:
+                            exp_date = parsed.get("expiration_date")
+                            if exp_date:
+                                dte = (exp_date - date.today()).days
+
             # Pricing
             avg_open = self._float(item.get("average-open-price")) or 0.0
             close = self._float(item.get("close-price")) or 0.0
@@ -266,6 +280,38 @@ class TastytradeClient:
             "implied_volatility": self._float(q.get("volatility")),
         }
 
+    def get_quotes_batch(self, symbols: list[str]) -> dict[str, dict]:
+        """Get quotes for multiple symbols in a single API call.
+
+        Returns a dictionary mapping symbol to quote data.
+        """
+        if not symbols:
+            return {}
+
+        # Tastytrade API accepts comma-separated symbols
+        symbols_param = ",".join(symbols)
+        data = self._get("/market-data", params={"symbols": symbols_param})
+        if not data:
+            return {}
+
+        quotes = {}
+        for item in data.get("data", {}).get("items", []):
+            symbol = item.get("symbol", "")
+            if symbol:
+                quotes[symbol] = {
+                    "bid": self._float(item.get("bid")),
+                    "ask": self._float(item.get("ask")),
+                    "mark": self._float(item.get("mark")),
+                    "last": self._float(item.get("last")),
+                    "delta": self._float(item.get("delta")),
+                    "gamma": self._float(item.get("gamma")),
+                    "theta": self._float(item.get("theta")),
+                    "vega": self._float(item.get("vega")),
+                    "implied_volatility": self._float(item.get("volatility")),
+                }
+
+        return quotes
+
     def enrich_position_greeks(self, position: Position) -> Position:
         """Fetch and attach current Greeks to a position."""
         if not position.is_option:
@@ -285,6 +331,36 @@ class TastytradeClient:
 
         return position
 
+    def enrich_positions_greeks_batch(self, positions: list[Position]) -> list[Position]:
+        """Fetch and attach Greeks to multiple option positions in a single API call.
+
+        Much more efficient than calling enrich_position_greeks for each position.
+        """
+        # Filter option positions and collect their symbols
+        option_symbols = [p.symbol for p in positions if p.is_option]
+
+        if not option_symbols:
+            return positions
+
+        # Fetch all quotes in one batch
+        quotes = self.get_quotes_batch(option_symbols)
+
+        # Update positions with quote data
+        for i, pos in enumerate(positions):
+            if pos.is_option and pos.symbol in quotes:
+                quote = quotes[pos.symbol]
+                positions[i].greeks = Greeks(
+                    delta=quote.get("delta"),
+                    gamma=quote.get("gamma"),
+                    theta=quote.get("theta"),
+                    vega=quote.get("vega"),
+                    implied_volatility=quote.get("implied_volatility"),
+                )
+                if quote.get("mark"):
+                    positions[i].mark_price = quote["mark"]
+
+        return positions
+
     def _get_day_trade_count(self, status: Any) -> int:
         """Extract day trade count from status field."""
         if isinstance(status, dict):
@@ -298,6 +374,42 @@ class TastytradeClient:
         try:
             return float(val) * mult
         except (TypeError, ValueError):
+            return None
+
+    def _parse_occ_symbol(self, symbol: str) -> Optional[dict]:
+        """
+        Parse OCC option symbol format.
+
+        Format: SYMBOL(6) + YYMMDD(6) + C/P(1) + STRIKE*1000(8)
+        Example: 'AMD   260220P00200000' -> AMD Feb 20 2026 $200 Put
+        """
+        try:
+            # Remove any spaces and ensure minimum length
+            symbol = symbol.replace(" ", "")
+            if len(symbol) < 15:
+                return None
+
+            # Extract components from the end (more reliable)
+            strike_str = symbol[-8:]  # Last 8 chars: strike * 1000
+            opt_type = symbol[-9]  # C or P
+            exp_str = symbol[-15:-9]  # YYMMDD
+
+            # Parse strike (divide by 1000)
+            strike = int(strike_str) / 1000.0
+
+            # Parse expiration date
+            exp_date = datetime.strptime(exp_str, "%y%m%d").date()
+
+            # Validate option type
+            if opt_type not in ("C", "P"):
+                return None
+
+            return {
+                "strike": strike,
+                "option_type": opt_type,
+                "expiration_date": exp_date,
+            }
+        except (ValueError, IndexError):
             return None
 
 

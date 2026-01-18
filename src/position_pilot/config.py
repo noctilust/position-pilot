@@ -94,3 +94,16 @@ def remove_from_watchlist(symbol: str) -> bool:
     config["watchlist"] = watchlist
     save_config(config)
     return True
+
+
+def get_default_account() -> str | None:
+    """Get the default account number."""
+    config = load_config()
+    return config.get("default_account")
+
+
+def set_default_account(account_number: str | None) -> None:
+    """Set the default account number."""
+    config = load_config()
+    config["default_account"] = account_number
+    save_config(config)

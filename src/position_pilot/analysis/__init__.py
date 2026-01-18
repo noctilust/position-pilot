@@ -14,6 +14,12 @@ from .signals import (
     RiskLevel,
     get_position_analyzer,
 )
+from .strategies import (
+    StrategyType,
+    StrategyGroup,
+    StrategyDetector,
+    detect_strategies,
+)
 
 __all__ = [
     "MarketAnalyzer",
@@ -26,4 +32,8 @@ __all__ = [
     "PositionHealth",
     "RiskLevel",
     "get_position_analyzer",
+    "StrategyType",
+    "StrategyGroup",
+    "StrategyDetector",
+    "detect_strategies",
 ]
