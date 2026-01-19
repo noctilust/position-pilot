@@ -25,6 +25,9 @@ from ..client import get_client
 from ..config import get_default_account, get_watchlist
 from ..models import Account, Position
 from ..analysis import get_analyzer, RiskLevel, detect_strategies, StrategyGroup, get_llm_analyzer
+from ..analysis.roll_history import get_roll_history
+from ..analysis.roll_analytics import analyze_patterns, format_roll_summary, format_patterns_summary
+from ..models.roll import RollChain
 
 
 class AccountPanel(Static):
@@ -544,6 +547,122 @@ class MarketPanel(Static):
         return Panel(content, title="Market", border_style="green")
 
 
+class RollHistoryPanel(Static):
+    """Displays roll history for a strategy."""
+
+    roll_chain: reactive[RollChain | None] = reactive(None)
+    current_pnl: reactive[float | None] = reactive(None)
+
+    def render(self) -> Panel:
+        if not self.roll_chain or self.roll_chain.roll_count == 0:
+            return Panel(
+                "[dim]No roll history available[/dim]",
+                title="Roll History",
+                border_style="cyan"
+            )
+
+        # Build roll history display
+        lines = [
+            f"[bold]{self.roll_chain.underlying} {self.roll_chain.strategy_type}[/bold]",
+            f"Rolls: [cyan]{self.roll_chain.roll_count}[/cyan]",
+        ]
+
+        if self.roll_chain.roll_count > 0:
+            pnl_style = "green" if self.roll_chain.net_pnl >= 0 else "red"
+            lines.extend([
+                f"Total Roll P/L: [{pnl_style}]${self.roll_chain.total_roll_pnl:+,.2f}[/{pnl_style}]",
+                f"Total Commission: ${self.roll_chain.total_commission:+,.2f}",
+                f"Net P/L: [{pnl_style}]${self.roll_chain.net_pnl:+,.2f}[/{pnl_style}]",
+            ])
+
+        if self.current_pnl is not None:
+            pnl_style = "green" if self.current_pnl >= 0 else "red"
+            lines.append(f"P/L Open: [{pnl_style}]${self.current_pnl:+,.2f}[/{pnl_style}]")
+
+        # Roll history
+        if self.roll_chain.rolls:
+            lines.append("\n[bold]Roll History:[/bold]")
+            for i, roll in enumerate(self.roll_chain.rolls[-5:], 1):  # Show last 5 rolls
+                pnl_style = "green" if roll.roll_pnl >= 0 else "red"
+                lines.append(
+                    f"  {i}. {roll.timestamp.strftime('%Y-%m-%d')}: "
+                    f"${roll.old_strike:.0f} → ${roll.new_strike:.0f} "
+                    f"({roll.old_dte} → {roll.new_dte} DTE, "
+                    f"Δ{roll.dte_change:+d} days) "
+                    f"P/L: [{pnl_style}]${roll.roll_pnl:+,.2f}[/{pnl_style}]"
+                )
+
+            if len(self.roll_chain.rolls) > 5:
+                lines.append(f"  ... and {len(self.roll_chain.rolls) - 5} more rolls")
+
+        content = "\n".join(lines)
+        return Panel(content, title="Roll History", border_style="cyan")
+
+
+class RollInsightsPanel(Static):
+    """Displays AI-powered rolling insights."""
+
+    insights: reactive[object | None] = reactive(None)
+    patterns: reactive[object | None] = reactive(None)
+
+    def render(self) -> Panel:
+        if not self.insights and not self.patterns:
+            return Panel(
+                "[dim]Press 'i' on a strategy row to generate roll insights[/dim]",
+                title="Roll Insights",
+                border_style="magenta"
+            )
+
+        lines = []
+
+        # Show patterns if available
+        if self.patterns:
+            p = self.patterns
+            lines.extend([
+                f"[bold]Patterns ({p.total_rolls} rolls)[/bold]",
+                f"Win Rate: [cyan]{p.win_rate:.1%}[/cyan]",
+                f"Avg DTE at roll: {p.avg_dte_at_roll:.1f} days",
+                f"Typical targets: {p.typical_roll_days if p.typical_roll_days else 'N/A'}",
+                f"Best DTE window: [green]{p.best_dte_window[0]}-{p.best_dte_window[1]} DTE[/green]",
+                "",
+            ])
+
+        # Show AI insights if available
+        if self.insights:
+            ins = self.insights
+            lines.extend([
+                "[bold]AI Recommendations:[/bold]",
+                f"Roll at: [yellow]{ins.optimal_roll_dte} DTE[/yellow]",
+                f"Target strikes: [cyan]${ins.target_strike_range[0]:.0f}-${ins.target_strike_range[1]:.0f}[/cyan]",
+                "",
+                f"[dim]{ins.roll_timing_reasoning}[/dim]",
+                "",
+            ])
+
+            # Show pattern alignment
+            if hasattr(ins, 'fits_historical_pattern'):
+                status = "✓" if ins.fits_historical_pattern else "⚠"
+                score = ins.pattern_alignment_score * 100
+                lines.append(f"{status} Pattern match: [cyan]{score:.0f}%[/cyan]")
+
+            # Show risks
+            if hasattr(ins, 'risks') and ins.risks:
+                lines.append("")
+                lines.append("[bold yellow]Risks:[/bold yellow]")
+                for risk in ins.risks[:3]:
+                    lines.append(f"  • {risk}")
+
+            # Show opportunities
+            if hasattr(ins, 'opportunities') and ins.opportunities:
+                lines.append("")
+                lines.append("[bold green]Opportunities:[/bold green]")
+                for opp in ins.opportunities[:3]:
+                    lines.append(f"  • {opp}")
+
+        content = "\n".join(lines) if lines else "[dim]No insights available[/dim]"
+        return Panel(content, title="Roll Insights", border_style="magenta")
+
+
 class PortfolioSummary(Static):
     """Portfolio-level summary metrics."""
 
@@ -673,6 +792,8 @@ class PilotDashboard(App):
         Binding("enter", "toggle_expand", "Expand", show=False),
         Binding("a", "analyze", "AI Rec"),
         Binding("A", "regenerate", "AI Rec (Refresh)"),
+        Binding("h", "show_roll_history", "Roll History"),
+        Binding("i", "show_roll_insights", "Roll Insights"),
     ]
 
     def __init__(self):
@@ -698,6 +819,8 @@ class PilotDashboard(App):
         with Vertical(id="side-panels"):
             yield RecommendationsPanel(id="recommendations-panel")
             yield MarketPanel(id="market-panel")
+            yield RollHistoryPanel(id="roll-history-panel")
+            yield RollInsightsPanel(id="roll-insights-panel")
 
         yield StatusBar(id="status-bar")
         yield Footer()
@@ -941,6 +1064,92 @@ class PilotDashboard(App):
         """Toggle expand/collapse state of all strategy rows."""
         positions_widget = self.query_one(PositionsTable)
         positions_widget._toggle_all_strategies()
+
+    def action_show_roll_history(self) -> None:
+        """Show roll history for the selected strategy."""
+        positions_widget = self.query_one(PositionsTable)
+        cursor_row = positions_widget.cursor_row
+
+        if cursor_row not in positions_widget._row_to_strategy:
+            self.query_one(StatusBar).message = "No strategy selected"
+            return
+
+        symbol, strategy = positions_widget._row_to_strategy[cursor_row]
+
+        # Get roll history
+        roll_history = get_roll_history()
+        if self.account:
+            chain = roll_history.get_chain(symbol, strategy.strategy_type, self.account.account_number)
+            roll_history_panel = self.query_one(RollHistoryPanel)
+
+            if chain:
+                roll_history_panel.roll_chain = chain
+                # Calculate P/L Open with current position
+                current_pnl = sum(pos.unrealized_pnl for pos in strategy.positions)
+                roll_history_panel.current_pnl = current_pnl
+                self.query_one(StatusBar).message = f"Loaded roll history for {symbol} {strategy.strategy_type}"
+            else:
+                roll_history_panel.roll_chain = None
+                roll_history_panel.current_pnl = None
+                self.query_one(StatusBar).message = f"No roll history found for {symbol} {strategy.strategy_type}"
+
+    @work(exclusive=True)
+    async def action_show_roll_insights(self) -> None:
+        """Generate AI-powered roll insights for the selected strategy."""
+        positions_widget = self.query_one(PositionsTable)
+        cursor_row = positions_widget.cursor_row
+
+        if cursor_row not in positions_widget._row_to_strategy:
+            self.query_one(StatusBar).message = "No strategy selected"
+            return
+
+        symbol, strategy = positions_widget._row_to_strategy[cursor_row]
+        status = self.query_one(StatusBar)
+        status.loading = True
+        status.message = "Generating roll insights..."
+
+        try:
+            # Get roll history
+            roll_history = get_roll_history()
+            chain = None
+            if self.account:
+                chain = roll_history.get_chain(symbol, strategy.strategy_type, self.account.account_number)
+
+            # Analyze patterns
+            patterns = None
+            if chain and chain.roll_count > 0:
+                all_chains = [chain]
+                patterns = analyze_patterns(all_chains)
+
+            # Generate AI insights
+            insights = None
+            if self._analyzer is None:
+                self._analyzer = get_llm_analyzer()
+
+            if chain and patterns and self._analyzer:
+                # Use first position as representative
+                current_position = strategy.positions[0]
+                insights = await self._analyzer.generate_roll_insights(
+                    chain=chain,
+                    current_position=current_position,
+                    patterns=patterns
+                )
+
+            # Update panel
+            insights_panel = self.query_one(RollInsightsPanel)
+            insights_panel.patterns = patterns
+            insights_panel.insights = insights
+
+            if patterns:
+                status.message = f"Generated insights for {symbol} {strategy.strategy_type} ({patterns.total_rolls} rolls)"
+            else:
+                status.message = f"No roll history for {symbol} {strategy.strategy_type}"
+
+        except Exception as e:
+            status.message = f"Error generating insights: {str(e)}"
+            status.loading = False
+
+        status.loading = False
 
     async def on_event(self, event: events.Event) -> None:
         """Handle all events at the app level."""

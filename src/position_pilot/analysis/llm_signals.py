@@ -11,6 +11,8 @@ from anthropic import Anthropic
 from ..models.position import Position, Signal, Recommendation
 from .market import get_analyzer
 from .recommendation_cache import get_recommendation_cache
+from .roll_analytics import RollPatterns
+from ..models.roll import RollChain, RollEvent
 
 
 class RiskLevel(str, Enum):
@@ -42,6 +44,33 @@ class PositionHealth:
     @property
     def issue_count(self) -> int:
         return len(self.issues)
+
+
+@dataclass
+class RollInsights:
+    """AI-generated insights for rolling decisions."""
+
+    # Timing recommendations
+    optimal_roll_dte: int  # Recommended DTE to roll at
+    roll_timing_reasoning: str  # Why this timing makes sense
+
+    # Strike/delta recommendations
+    target_strike_range: tuple[float, float]  # Recommended strike range
+    target_delta: Optional[float] = None  # Recommended delta
+    strike_selection_reasoning: str = ""  # Why these strikes
+
+    # Current position assessment
+    fits_historical_pattern: bool = False  # Does current position match learned patterns?
+    pattern_alignment_score: float = 0.0  # How closely it matches (0-1)
+
+    # Risk assessment
+    risks: list[str] = field(default_factory=list)  # Potential risks with current position
+    opportunities: list[str] = field(default_factory=list)  # Opportunities identified
+
+    # Actionable recommendation
+    recommendation: str = ""  # Specific roll recommendation
+    urgency: int = 3  # 1-5 scale
+    suggested_params: dict = field(default_factory=dict)  # Specific parameters for recommended roll
 
 
 class LLMPositionAnalyzer:
@@ -436,6 +465,185 @@ Prioritize capital preservation.""".format(details="\n".join(details))
             suggested_action=suggested_action,
             risk_notes=alternative_actions[0] if alternative_actions else None,
         )
+
+    def generate_roll_insights(
+        self,
+        chain: RollChain,
+        patterns: RollPatterns,
+        current_position: Optional[Position] = None
+    ) -> RollInsights:
+        """Generate AI-powered insights about rolling behavior.
+
+        Args:
+            chain: Roll chain with historical rolls
+            patterns: Analyzed roll patterns
+            current_position: Optional current position for context
+
+        Returns:
+            RollInsights with recommendations
+        """
+        # Format roll history for prompt
+        roll_history_text = "\n".join([
+            f"  {i}. {roll.timestamp.strftime('%Y-%m-%d')}: "
+            f"${roll.old_strike} → ${roll.new_strike} "
+            f"({roll.old_dte} → {roll.new_dte} DTE, Δ{roll.dte_change:+d}) "
+            f"P/L: ${roll.roll_pnl:+,.2f}"
+            for i, roll in enumerate(chain.rolls, 1)
+        ])
+
+        # Format patterns for prompt
+        patterns_text = f"""
+Typical roll DTE targets: {patterns.typical_roll_days if patterns.typical_roll_days else 'N/A'}
+Avg DTE at roll: {patterns.avg_dte_at_roll:.1f} days
+Best DTE window: {patterns.best_dte_window[0]}-{patterns.best_dTE_window[1]} days
+Avg strike change: ${patterns.avg_strike_adjustment:+.2f}
+Win rate: {patterns.win_rate:.1%}
+Total rolls: {patterns.total_rolls}
+Avg P/L per roll: ${patterns.avg_roll_pnl:+,.2f}
+"""
+
+        # Current position info
+        current_text = ""
+        if current_position:
+            current_text = f"""
+Current Position:
+  Symbol: {current_position.symbol}
+  Strike: ${current_position.strike_price}
+  DTE: {current_position.days_to_expiration}
+  P/L: ${current_position.unrealized_pnl:+,.2f} ({current_position.unrealized_pnl_percent:+.1f}%)
+"""
+
+        prompt = f"""You are an expert options trader analyzing roll patterns.
+
+Roll Chain: {chain.underlying} {chain.strategy_type}
+Roll History (P/L Open: ${chain.pl_open:+,.2f}):
+{roll_history_text}
+
+Learned Patterns:
+{patterns_text}
+
+{current_text}
+
+Based on the roll history and patterns, provide rolling recommendations:
+
+Respond in this format:
+OPTIMAL_ROLL_DTE: [DTE number]
+TIMING_REASONING: [1-2 sentences explaining why]
+TARGET_STRIKE_RANGE: [min-max] or [specific strike]
+STRIKE_REASONING: [1-2 sentences]
+FITS_PATTERN: [true/false]
+PATTERN_SCORE: [0-1]
+RISKS: [2-3 risks or "None"]
+OPPORTUNITIES: [2-3 opportunities or "None"]
+RECOMMENDATION: [specific roll recommendation]
+URGENCY: [1-5]
+SUGGESTED_PARAMS: {{{{dte: [target DTE], strikes: [min, max] or [single]}}}}"""
+
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            return self._parse_roll_insights_response(response.content[0].text)
+
+        except Exception as e:
+            logger.error(f"Roll insights generation error: {e}")
+            # Return conservative insights on error
+            return RollInsights(
+                optimal_roll_dte=21,
+                roll_timing_reasoning="Unable to analyze - using default",
+                target_strike_range=(0.0, 0.0),
+                target_delta=None,
+                strike_selection_reasoning="Default recommendation",
+                fits_historical_pattern=False,
+                pattern_alignment_score=0.0,
+                risks=["Analysis unavailable"],
+                opportunities=[],
+                recommendation="Review position manually",
+                urgency=1,
+                suggested_params={}
+            )
+
+    def _parse_roll_insights_response(self, response_text: str) -> RollInsights:
+        """Parse LLM response into RollInsights object."""
+        insights = RollInsights(
+            optimal_roll_dte=21,
+            roll_timing_reasoning="",
+            target_strike_range=(0.0, 0.0),
+            target_delta=None,
+            strike_selection_reasoning="",
+            fits_historical_pattern=False,
+            pattern_alignment_score=0.0,
+            risks=[],
+            opportunities=[],
+            recommendation="",
+            urgency=1,
+            suggested_params={}
+        )
+
+        try:
+            for line in response_text.split('\n'):
+                line = line.strip()
+                if line.startswith('OPTIMAL_ROLL_DTE:'):
+                    dte_str = line.split(':', 1)[1].strip()
+                    insights.optimal_roll_dte = int(dte_str)
+                elif line.startswith('TIMING_REASONING:'):
+                    insights.roll_timing_reasoning = line.split(':', 1)[1].strip()
+                elif line.startswith('TARGET_STRIKE_RANGE:'):
+                    range_str = line.split(':', 1)[1].strip()
+                    # Parse range like "400-420" or single strike
+                    if '-' in range_str:
+                        min_strike, max_strike = range_str.split('-')
+                        insights.target_strike_range = (float(min_strike), float(max_strike))
+                    else:
+                        insights.target_strike_range = (float(range_str), float(range_str))
+                elif line.startswith('STRIKE_REASONING:'):
+                    insights.strike_selection_reasoning = line.split(':', 1)[1].strip()
+                elif line.startswith('FITS_PATTERN:'):
+                    fits_str = line.split(':', 1)[1].strip().lower()
+                    insights.fits_historical_pattern = fits_str == "true"
+                elif line.startswith('PATTERN_SCORE:'):
+                    score_str = line.split(':', 1)[1].strip()
+                    insights.pattern_alignment_score = float(score_str)
+                elif line.startswith('RISKS:'):
+                    risks_str = line.split(':', 1)[1].strip()
+                    if risks_str.upper() != 'NONE':
+                        insights.risks = [r.strip() for r in risks_str.split(',')]
+                elif line.startswith('OPPORTUNITIES:'):
+                    opps_str = line.split(':', 1)[1].strip()
+                    if opps_str.upper() != 'NONE':
+                        insights.opportunities = [o.strip() for o in opps_str.split(',')]
+                elif line.startswith('RECOMMENDATION:'):
+                    insights.recommendation = line.split(':', 1)[1].strip()
+                elif line.startswith('URGENCY:'):
+                    urgency_str = line.split(':', 1)[1].strip()
+                    insights.urgency = int(urgency_str)
+                    insights.urgency = max(1, min(5, insights.urgency))
+                elif line.startswith('SUGGESTED_PARAMS:'):
+                    params_str = line.split(':', 1)[1].strip()
+                    # Parse JSON-like dict
+                    # Simple parsing for now: {dte: 21, strikes: [400, 420]}
+                    try:
+                        # Remove braces and split by comma
+                        clean = params_str.strip('{}')
+                        if clean:
+                            parts = clean.split(',')
+                            for part in parts:
+                                if 'dte' in part:
+                                    insights.suggested_params['dte'] = int(part.split(':')[1].strip())
+                                elif 'strikes' in part:
+                                    strikes = part.split(':')[1].strip().strip('[]').split(',')
+                                    insights.suggested_params['strikes'] = [float(s) for s in strikes]
+                    except Exception:
+                        pass  # Keep empty dict on parse error
+
+        except Exception as e:
+            logger.error(f"Roll insights parsing error: {e}")
+            insights.recommendation = f"Parsing error: {str(e)}"
+
+        return insights
 
 
 # Global singleton
