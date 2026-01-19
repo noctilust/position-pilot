@@ -10,6 +10,7 @@ import httpx
 from dotenv import load_dotenv
 
 from ..models.position import Account, Greeks, Position, PositionType
+from ..models.transaction import Transaction, TransactionType, Order, OrderStatus
 from ..cache import Cache
 
 # Load .env file from project root
@@ -435,6 +436,224 @@ class TastytradeClient:
                     positions[i].underlying_price = underlying_quote.get("mark") or underlying_quote.get("last")
 
         return positions
+
+    def get_transactions(
+        self,
+        account_number: str,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        limit: int = 250,
+        force_refresh: bool = False
+    ) -> list[Transaction]:
+        """Fetch transaction history for an account.
+
+        Args:
+            account_number: The account number
+            start_date: Optional start date filter
+            end_date: Optional end date filter
+            limit: Maximum number of transactions to fetch (default: 250)
+            force_refresh: If True, bypass cache
+
+        Returns:
+            List of Transaction objects
+        """
+        cache_key = f"transactions:{account_number}"
+
+        # Check cache first (unless force refresh)
+        if not force_refresh:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                logger.debug(f"Cache hit for transactions: {account_number}")
+                # Return all cached transactions (filtering by date in Python)
+                transactions = [Transaction(**t) for t in cached.get("transactions", [])]
+                if start_date or end_date:
+                    transactions = self._filter_transactions_by_date(transactions, start_date, end_date)
+                return transactions
+
+        # Fetch from API
+        params = {"limit": limit}
+        if start_date:
+            params["start-date"] = start_date.strftime("%Y-%m-%d")
+        if end_date:
+            params["end-date"] = end_date.strftime("%Y-%m-%d")
+
+        data = self._get(f"/accounts/{account_number}/transactions", params=params)
+        if not data:
+            return []
+
+        transactions = []
+        items = data.get("data", {}).get("items", [])
+
+        for item in items:
+            tx = self._parse_transaction(item, account_number)
+            if tx:
+                transactions.append(tx)
+
+        # Store in cache (store all transactions without date filtering)
+        cache_data = {
+            "transactions": [t.model_dump(mode="json", exclude_none=True) for t in transactions],
+            "cached_at": datetime.now().isoformat()
+        }
+        self._cache.set(cache_key, cache_data)
+        logger.debug(f"Cached {len(transactions)} transactions for {account_number}")
+
+        return transactions
+
+    def get_orders(
+        self,
+        account_number: str,
+        status: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        limit: int = 100
+    ) -> list[Order]:
+        """Fetch order history for an account.
+
+        Args:
+            account_number: The account number
+            status: Optional status filter (e.g., "filled", "open")
+            start_date: Optional start date filter
+            limit: Maximum number of orders to fetch (default: 100)
+
+        Returns:
+            List of Order objects
+        """
+        params = {"limit": limit}
+        if status:
+            params["status"] = status
+        if start_date:
+            params["start-date"] = start_date.strftime("%Y-%m-%d")
+
+        data = self._get(f"/accounts/{account_number}/orders", params=params)
+        if not data:
+            return []
+
+        orders = []
+        items = data.get("data", {}).get("items", [])
+
+        for item in items:
+            order = self._parse_order(item, account_number)
+            if order:
+                orders.append(order)
+
+        return orders
+
+    def _filter_transactions_by_date(
+        self,
+        transactions: list[Transaction],
+        start_date: Optional[datetime],
+        end_date: Optional[datetime]
+    ) -> list[Transaction]:
+        """Filter transactions by date range."""
+        filtered = transactions
+        if start_date:
+            filtered = [t for t in filtered if t.transaction_date >= start_date]
+        if end_date:
+            filtered = [t for t in filtered if t.transaction_date <= end_date]
+        return filtered
+
+    def _parse_transaction(self, item: dict, account_number: str) -> Optional[Transaction]:
+        """Parse a transaction from API response."""
+        try:
+            # Parse transaction type
+            tx_type_str = item.get("type", "").lower().replace("-", "").replace("_", "")
+            tx_type = TransactionType.ORDER_FILL  # Default
+
+            for t in TransactionType:
+                if t.value in tx_type_str or tx_type_str in t.value:
+                    tx_type = t
+                    break
+
+            # Parse transaction date
+            date_str = item.get("transaction-date", item.get("date", ""))
+            if date_str:
+                try:
+                    # Tastytrade returns ISO format with microseconds
+                    if "." in date_str:
+                        tx_date = datetime.strptime(date_str.split(".")[0], "%Y-%m-%dT%H:%M:%S")
+                    else:
+                        tx_date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                except ValueError:
+                    tx_date = datetime.now()
+            else:
+                tx_date = datetime.now()
+
+            return Transaction(
+                transaction_id=item.get("id", ""),
+                transaction_type=tx_type,
+                transaction_date=tx_date,
+                description=item.get("description", ""),
+                amount=self._float(item.get("value", item.get("amount", 0))),
+                symbol=item.get("symbol"),
+                quantity=self._float(item.get("quantity")),
+                price=self._float(item.get("price")),
+                commission=self._float(item.get("commission", item.get("fees"))),
+                order_id=item.get("order-id"),
+                account_number=account_number
+            )
+        except Exception as e:
+            logger.error(f"Error parsing transaction: {e}")
+            return None
+
+    def _parse_order(self, item: dict, account_number: str) -> Optional[Order]:
+        """Parse an order from API response."""
+        try:
+            # Parse order status
+            status_str = item.get("status", "").lower()
+            order_status = OrderStatus.RECEIVED
+            for s in OrderStatus:
+                if s.value in status_str:
+                    order_status = s
+                    break
+
+            # Parse dates
+            created_str = item.get("created-at", "")
+            updated_str = item.get("updated-at", "")
+
+            try:
+                if created_str:
+                    created_at = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                else:
+                    created_at = datetime.now()
+            except ValueError:
+                created_at = datetime.now()
+
+            try:
+                if updated_str:
+                    updated_at = datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
+                else:
+                    updated_at = datetime.now()
+            except ValueError:
+                updated_at = datetime.now()
+
+            # Get leg details (for multi-leg orders)
+            legs = item.get("legs", [])
+            if legs:
+                # Use first leg for symbol/action
+                leg = legs[0]
+                symbol = leg.get("symbol", "")
+                action = leg.get("action", "")
+            else:
+                symbol = item.get("symbol", "")
+                action = item.get("action", "")
+
+            return Order(
+                order_id=item.get("id", ""),
+                account_number=account_number,
+                symbol=symbol,
+                action=action,
+                quantity=self._float(item.get("quantity", item.get("total-quantity"))),
+                order_type=item.get("type", "market"),
+                status=order_status,
+                created_at=created_at,
+                updated_at=updated_at,
+                filled_quantity=self._float(item.get("filled-quantity")),
+                average_fill_price=self._float(item.get("average-fill-price")),
+                commissions=self._float(item.get("-commissions", 0), mult=-1),  # Tastytrade returns negative
+                underlying_symbol=item.get("underlying-symbol")
+            )
+        except Exception as e:
+            logger.error(f"Error parsing order: {e}")
+            return None
 
     def _get_day_trade_count(self, status: Any) -> int:
         """Extract day trade count from status field."""
