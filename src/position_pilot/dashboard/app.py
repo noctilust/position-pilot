@@ -28,6 +28,7 @@ from ..analysis import get_analyzer, RiskLevel, detect_strategies, StrategyGroup
 from ..analysis.roll_history import get_roll_history
 from ..analysis.roll_analytics import analyze_patterns, format_roll_summary, format_patterns_summary
 from ..models.roll import RollChain
+from .widgets import OptionChainHeatmap
 
 
 class AccountPanel(Static):
@@ -780,6 +781,18 @@ class PilotDashboard(App):
     #positions-table-widget {
         height: 100%;
     }
+
+    .hidden {
+        display: none;
+    }
+
+    #heatmap-container {
+        height: 100%;
+    }
+
+    #chain-heatmap-widget {
+        height: 100%;
+    }
     """
 
     BINDINGS = [
@@ -794,6 +807,7 @@ class PilotDashboard(App):
         Binding("A", "regenerate", "AI Rec (Refresh)"),
         Binding("h", "show_roll_history", "Roll History"),
         Binding("i", "show_roll_insights", "Roll Insights"),
+        Binding("C", "show_chain_heatmap", "Chain Heatmap"),
     ]
 
     def __init__(self):
@@ -815,6 +829,9 @@ class PilotDashboard(App):
 
         with Container(id="positions-container"):
             yield PositionsTable(id="positions-table-widget")
+
+        with Container(id="heatmap-container", classes="hidden"):
+            yield OptionChainHeatmap(id="chain-heatmap-widget")
 
         with Vertical(id="side-panels"):
             yield RecommendationsPanel(id="recommendations-panel")
@@ -1150,6 +1167,57 @@ class PilotDashboard(App):
             status.loading = False
 
         status.loading = False
+
+    def action_show_chain_heatmap(self) -> None:
+        """Show option chain heatmap for the selected strategy."""
+        positions_widget = self.query_one(PositionsTable)
+        cursor_row = positions_widget.cursor_row
+
+        if cursor_row not in positions_widget._row_to_strategy:
+            self.query_one(StatusBar).message = "No strategy selected"
+            return
+
+        symbol, strategy = positions_widget._row_to_strategy[cursor_row]
+
+        # Get roll history
+        roll_history = get_roll_history()
+        if self.account:
+            chain = roll_history.get_chain(symbol, strategy.strategy_type, self.account.account_number)
+
+            if chain and chain.roll_count > 0:
+                # Get current position (first leg of strategy)
+                current_position = strategy.positions[0] if strategy.positions else None
+
+                # Load heatmap with roll data
+                heatmap = self.query_one(OptionChainHeatmap)
+                heatmap.load_from_chain(chain, current_position)
+
+                # Toggle visibility
+                positions_container = self.query_one("#positions-container", Container)
+                heatmap_container = self.query_one("#heatmap-container", Container)
+
+                positions_container.add_class("hidden")
+                heatmap_container.remove_class("hidden")
+
+                self.query_one(StatusBar).message = f"Showing chain heatmap for {symbol} {strategy.strategy_type}"
+            else:
+                self.query_one(StatusBar).message = f"No roll history for {symbol} {strategy.strategy_type}"
+        else:
+            self.query_one(StatusBar).message = "No account loaded"
+
+    def action_toggle_heatmap_view(self) -> None:
+        """Toggle between positions table and heatmap view."""
+        positions_container = self.query_one("#positions-container", Container)
+        heatmap_container = self.query_one("#heatmap-container", Container)
+
+        if "hidden" in positions_container.classes:
+            positions_container.remove_class("hidden")
+            heatmap_container.add_class("hidden")
+            self.query_one(StatusBar).message = "Showing positions table"
+        else:
+            heatmap_container.remove_class("hidden")
+            positions_container.add_class("hidden")
+            self.query_one(StatusBar).message = "Showing chain heatmap"
 
     async def on_event(self, event: events.Event) -> None:
         """Handle all events at the app level."""
