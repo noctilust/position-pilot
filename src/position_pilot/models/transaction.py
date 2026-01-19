@@ -23,7 +23,7 @@ class TransactionType(str, Enum):
 class Transaction(BaseModel):
     """A transaction from Tastytrade."""
 
-    transaction_id: str
+    transaction_id: str = Field(default="", alias="id")
     transaction_type: TransactionType
     transaction_date: datetime
     description: str
@@ -32,7 +32,7 @@ class Transaction(BaseModel):
     quantity: Optional[float] = None
     price: Optional[float] = None
     commission: Optional[float] = None
-    order_id: Optional[str] = None
+    order_id: Optional[str] = Field(default=None, alias="order-id")
     account_number: str = Field(default="", alias="account-number")
 
     class Config:

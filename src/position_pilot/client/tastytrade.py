@@ -555,30 +555,54 @@ class TastytradeClient:
         """Parse a transaction from API response."""
         try:
             # Parse transaction type
-            tx_type_str = item.get("type", "").lower().replace("-", "").replace("_", "")
+            tx_type_str = item.get("transaction-type", "").lower().replace("-", "").replace(" ", "")
             tx_type = TransactionType.ORDER_FILL  # Default
 
-            for t in TransactionType:
-                if t.value in tx_type_str or tx_type_str in t.value:
-                    tx_type = t
-                    break
+            # Map API transaction types to our enum
+            type_mapping = {
+                "trade": TransactionType.ORDER_FILL,
+                "receivedeliver": TransactionType.ORDER_FILL,
+                "moneymovement": TransactionType.FEE,
+                "dividend": TransactionType.DIVIDEND,
+                "interest": TransactionType.INTEREST,
+                "adjustment": TransactionType.ADJUSTMENT,
+            }
+
+            if tx_type_str in type_mapping:
+                tx_type = type_mapping[tx_type_str]
 
             # Parse transaction date
             date_str = item.get("transaction-date", item.get("date", ""))
-            if date_str:
+            exec_str = item.get("executed-at", "")
+
+            if exec_str:
+                # Use executed-at timestamp if available (more precise)
                 try:
                     # Tastytrade returns ISO format with microseconds
-                    if "." in date_str:
-                        tx_date = datetime.strptime(date_str.split(".")[0], "%Y-%m-%dT%H:%M:%S")
+                    if "." in exec_str:
+                        tx_date = datetime.strptime(exec_str.split(".")[0], "%Y-%m-%dT%H:%M:%S")
                     else:
-                        tx_date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                        tx_date = datetime.fromisoformat(exec_str.replace("Z", "+00:00"))
+                except ValueError:
+                    # Fallback to transaction-date
+                    try:
+                        tx_date = datetime.strptime(date_str, "%Y-%m-%d")
+                    except ValueError:
+                        tx_date = datetime.now()
+            elif date_str:
+                # Use transaction-date (date only)
+                try:
+                    tx_date = datetime.strptime(date_str, "%Y-%m-%d")
                 except ValueError:
                     tx_date = datetime.now()
             else:
                 tx_date = datetime.now()
 
+            # Convert ID to string
+            tx_id = str(item.get("id", ""))
+
             return Transaction(
-                transaction_id=item.get("id", ""),
+                id=tx_id,
                 transaction_type=tx_type,
                 transaction_date=tx_date,
                 description=item.get("description", ""),
@@ -587,11 +611,12 @@ class TastytradeClient:
                 quantity=self._float(item.get("quantity")),
                 price=self._float(item.get("price")),
                 commission=self._float(item.get("commission", item.get("fees"))),
-                order_id=item.get("order-id"),
+                order_id=str(item.get("order-id")) if item.get("order-id") else None,
                 account_number=account_number
             )
         except Exception as e:
             logger.error(f"Error parsing transaction: {e}")
+            logger.debug(f"Problematic transaction data: {item}")
             return None
 
     def _parse_order(self, item: dict, account_number: str) -> Optional[Order]:

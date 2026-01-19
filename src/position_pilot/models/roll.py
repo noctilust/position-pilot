@@ -23,23 +23,21 @@ class RollEvent:
     old_strike: float
     old_expiration: date
     old_dte: int
-    old_delta: Optional[float] = None
-    old_quantity: float = 1.0
 
     # New position (opened)
     new_symbol: str
     new_strike: float
     new_expiration: date
     new_dte: int
-    new_delta: Optional[float] = None
-    new_quantity: float = 1.0
 
-    # Economics
+    # Optional fields (must come last)
+    old_quantity: float = 1.0
+    old_delta: Optional[float] = None
+    new_quantity: float = 1.0
+    new_delta: Optional[float] = None
     roll_pnl: float = 0.0  # P/L from closing old position
     premium_effect: float = 0.0  # Net debit/credit from roll
     commission: float = 0.0
-
-    # Context
     reason: Optional[str] = None  # Manually tagged or AI-inferred
     notes: Optional[str] = None
 

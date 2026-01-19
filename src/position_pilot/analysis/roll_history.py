@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -173,7 +173,7 @@ class RollHistory:
         Returns:
             List of RollEvent objects
         """
-        cutoff_date = datetime.now() - datetime.timedelta(days=days)
+        cutoff_date = datetime.now() - timedelta(days=days)
         recent_rolls = []
 
         chains = self.get_all_chains(account_number)
