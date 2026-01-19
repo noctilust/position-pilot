@@ -1,5 +1,7 @@
 """CLI entry point for Position Pilot."""
 
+from datetime import datetime, timedelta
+from typing import Optional
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -688,6 +690,292 @@ def watchlist_set(symbols: list[str] = typer.Argument(..., help="Symbols to set"
     symbols = [s.upper() for s in symbols]
     set_watchlist(symbols)
     console.print(f"[green]Watchlist set to: {', '.join(symbols)}[/green]")
+
+
+# Roll tracking commands group
+rolls_app = typer.Typer(help="Manage roll tracking and analyze rolling patterns")
+app.add_typer(rolls_app, name="rolls")
+
+
+@rolls_app.command("history")
+def rolls_history(
+    symbol: str = typer.Argument(..., help="Underlying symbol (e.g., SPY)"),
+    strategy: Optional[str] = typer.Option(None, "--strategy", "-s", help="Filter by strategy type"),
+    days: int = typer.Option(365, "--days", "-d", help="Days of history to analyze (default: 1 year)"),
+    account: str = typer.Option(None, "--account", "-a", help="Account number (uses default if not specified)"),
+):
+    """Show roll history for a symbol."""
+    from .client import get_client
+    from .analysis.roll_tracker import RollTracker
+    from .analysis.roll_history import get_roll_history
+    from .analysis.roll_analytics import format_roll_summary
+    from .config import get_default_account
+
+    client = get_client()
+
+    if not client.is_enabled:
+        console.print("[red]Error:[/red] Tastytrade credentials not configured")
+        raise typer.Exit(1)
+
+    # Resolve account
+    default_account = get_default_account()
+    accounts = client.get_accounts()
+
+    if not accounts:
+        console.print("[yellow]No accounts found[/yellow]")
+        raise typer.Exit(0)
+
+    if account:
+        selected = next((a for a in accounts if a.account_number == account), None)
+        if not selected:
+            console.print(f"[red]Account {account} not found[/red]")
+            raise typer.Exit(1)
+    else:
+        selected = accounts[0] if default_account is None else next(
+            (a for a in accounts if a.account_number == default_account), accounts[0]
+        )
+
+    # Fetch transactions
+    start_date = datetime.now() - timedelta(days=days)
+
+    with console.status(f"[dim]Fetching transactions since {start_date.strftime('%Y-%m-%d')}...[/dim]"):
+        transactions = client.get_transactions(
+            selected.account_number,
+            start_date=start_date,
+            limit=1000,
+            force_refresh=False
+        )
+
+    if not transactions:
+        console.print("[yellow]No transactions found[/yellow]")
+        raise typer.Exit(0)
+
+    # Get current positions
+    positions = client.get_positions(selected.account_number)
+
+    # Detect rolls
+    tracker = RollTracker()
+    roll_chains = tracker.detect_rolls(transactions, positions, selected.account_number)
+
+    # Filter by strategy if specified
+    if strategy:
+        roll_chains = [c for c in roll_chains if strategy.lower() in c.strategy_type.lower()]
+
+    # Filter by symbol
+    symbol_upper = symbol.upper()
+    roll_chains = [c for c in roll_chains if c.underlying == symbol_upper]
+
+    if not roll_chains:
+        console.print(f"[yellow]No roll history found for {symbol_upper}[/yellow]")
+        console.print("[dim]Tip: Rolls will appear here once you roll positions[/dim]")
+        raise typer.Exit(0)
+
+    # Display roll chains
+    for chain in roll_chains:
+        console.print(f"\n[bold cyan]{format_roll_summary(chain)}[/bold cyan]\n")
+
+
+@rolls_app.command("chain")
+def rolls_chain(
+    symbol: str = typer.Argument(..., help="Underlying symbol (e.g., SPY)"),
+    days: int = typer.Option(365, "--days", "-d", help="Days of history to analyze (default: 1 year)"),
+    account: str = typer.Option(None, "--account", "-a", help="Account number (uses default if not specified)"),
+):
+    """Display option chain with roll activity heatmap."""
+    from .client import get_client
+    from .analysis.roll_tracker import RollTracker
+    from .analysis.roll_history import get_roll_history
+    from .config import get_default_account
+
+    client = get_client()
+
+    if not client.is_enabled:
+        console.print("[red]Error:[/red] Tastytrade credentials not configured")
+        raise typer.Exit(1)
+
+    # Resolve account (same logic as above)
+    default_account = get_default_account()
+    accounts = client.get_accounts()
+
+    if not accounts:
+        console.print("[yellow]No accounts found[/yellow]")
+        raise typer.Exit(0)
+
+    if account:
+        selected = next((a for a in accounts if a.account_number == account), None)
+        if not selected:
+            console.print(f"[red]Account {account} not found[/red]")
+            raise typer.Exit(1)
+    else:
+        selected = accounts[0] if default_account is None else next(
+            (a for a in accounts if a.account_number == default_account), accounts[0]
+        )
+
+    symbol_upper = symbol.upper()
+
+    # Get roll history
+    history = get_roll_history()
+    chains = history.get_all_chains(selected.account_number, symbol=symbol_upper)
+
+    if not chains:
+        console.print(f"[yellow]No roll history found for {symbol_upper}[/yellow]")
+        console.print("[dim]Tip: Use 'pilot rolls history' to view roll details[/dim]")
+        raise typer.Exit(0)
+
+    # Build heatmap data
+    heatmap_data = {}
+    for chain in chains:
+        for roll in chain.rolls:
+            # Group by old strike and old DTE
+            strike = roll.old_strike
+            dte = roll.old_dte
+
+            # Determine DTE bucket
+            if dte <= 7:
+                dte_bucket = "0-7"
+            elif dte <= 14:
+                dte_bucket = "8-14"
+            elif dte <= 21:
+                dte_bucket = "15-21"
+            elif dte <= 35:
+                dte_bucket = "22-35"
+            else:
+                dte_bucket = "36+"
+
+            key = (strike, dte_bucket)
+            if key not in heatmap_data:
+                heatmap_data[key] = 0
+            heatmap_data[key] += 1
+
+    # Display heatmap
+    console.print(f"\n[bold cyan]{symbol_upper} Option Chain - Roll Activity ({days} days)[/bold cyan]\n")
+
+    # Group strikes
+    strikes = sorted(set(k[0] for k in heatmap_data.keys()))
+
+    # Create table
+    table = Table(show_header=True, header_style="bold magenta", box=box.ROUNDED)
+    table.add_column("Strike", style="cyan")
+    table.add_column("0-7DTE", justify="right")
+    table.add_column("8-14DTE", justify="right")
+    table.add_column("15-21DTE", justify="right")
+    table.add_column("22-35DTE", justify="right")
+    table.add_column("36+DTE", justify="right")
+    table.add_column("Total", justify="right")
+
+    dte_buckets = ["0-7", "8-14", "15-21", "22-35", "36+"]
+
+    for strike in strikes:
+        row = [f"${strike:.0f}"]
+        row_totals = []
+
+        for bucket in dte_buckets:
+            count = heatmap_data.get((strike, bucket), 0)
+            # Format with roll count bars
+            if count == 0:
+                cell = "[dim]-[/dim]"
+            elif count <= 2:
+                cell = f"[yellow]{count}[/yellow]"
+            else:
+                cell = f"[red bold]{count}[/red bold]"
+            row.append(cell)
+            row_totals.append(count)
+
+        total = sum(row_totals)
+        row.append(str(total))
+        table.add_row(*row)
+
+    console.print(table)
+    console.print("\n[dim]Legend: [yellow]1-2[/yellow] [red bold]3+[/red bold] rolls at that strike/DTE[/dim]")
+
+
+@rolls_app.command("patterns")
+def rolls_patterns(
+    symbol: str = typer.Argument(..., help="Underlying symbol (e.g., SPY)"),
+    days: int = typer.Option(365, "--days", "-d", help="Days of history to analyze (default: 1 year)"),
+    account: str = typer.Option(None, "--account", "-a", help="Account number (uses default if not specified)"),
+):
+    """Show learned rolling patterns and statistics."""
+    from .client import get_client
+    from .analysis.roll_tracker import RollTracker
+    from .analysis.roll_analytics import analyze_patterns, format_patterns_summary
+    from .config import get_default_account
+
+    client = get_client()
+
+    if not client.is_enabled:
+        console.print("[red]Error:[/red] Tastytrade credentials not configured")
+        raise typer.Exit(1)
+
+    # Resolve account (same logic as above)
+    default_account = get_default_account()
+    accounts = client.get_accounts()
+
+    if not accounts:
+        console.print("[yellow]No accounts found[/yellow]")
+        raise typer.Exit(0)
+
+    if account:
+        selected = next((a for a in accounts if a.account_number == account), None)
+        if not selected:
+            console.print(f"[red]Account {account} not found[/red]")
+            raise typer.Exit(1)
+    else:
+        selected = accounts[0] if default_account is None else next(
+            (a for a in accounts if a.account_number == default_account), accounts[0]
+        )
+
+    symbol_upper = symbol.upper()
+
+    # Fetch transactions and detect rolls
+    start_date = datetime.now() - timedelta(days=days)
+
+    with console.status(f"[dim]Fetching transactions since {start_date.strftime('%Y-%m-%d')}...[/dim]"):
+        transactions = client.get_transactions(
+            selected.account_number,
+            start_date=start_date,
+            limit=1000,
+            force_refresh=False
+        )
+
+    if not transactions:
+        console.print("[yellow]No transactions found[/yellow]")
+        raise typer.Exit(0)
+
+    positions = client.get_positions(selected.account_number)
+
+    # Detect rolls
+    tracker = RollTracker()
+    roll_chains = tracker.detect_rolls(transactions, positions, selected.account_number)
+
+    # Filter by symbol
+    roll_chains = [c for c in roll_chains if c.underlying == symbol_upper]
+
+    if not roll_chains:
+        console.print(f"[yellow]No roll history found for {symbol_upper}[/yellow]")
+        console.print("[dim]Tip: Patterns will appear here once you have rolled positions[/dim]")
+        raise typer.Exit(0)
+
+    # Analyze patterns
+    patterns = analyze_patterns(roll_chains)
+
+    # Display patterns
+    console.print(f"\n[bold cyan]{symbol_upper} Rolling Patterns (last {days} days)[/bold cyan]\n")
+    console.print(Panel(format_patterns_summary(patterns), border_style="blue"))
+
+    # Actionable insights
+    console.print("\n[bold yellow]💡 Key Insights:[/bold yellow]")
+    if patterns.typical_roll_days:
+        console.print(f"  • You typically roll to {patterns.typical_roll_days[0]} or {patterns.typical_roll_days[1] if len(patterns.typical_roll_days) > 1 else ''} DTE")
+    console.print(f"  • Average roll occurs at {patterns.avg_dte_at_roll:.1f} DTE")
+    console.print(f"  • Best DTE window: {patterns.best_dte_window[0]}-{patterns.best_dte_window[1]} days")
+
+    if patterns.win_rate >= 0.7:
+        console.print(f"  • [green]Strong win rate: {patterns.win_rate:.1%}[/green]")
+    elif patterns.win_rate >= 0.5:
+        console.print(f"  • [yellow]Moderate win rate: {patterns.win_rate:.1%}[/yellow]")
+    else:
+        console.print(f"  • [red]Low win rate: {patterns.win_rate:.1%}[/red]")
 
 
 if __name__ == "__main__":

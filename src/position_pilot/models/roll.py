@@ -136,6 +136,11 @@ class RollChain(BaseModel):
         """Net P/L after commissions."""
         return self.total_roll_pnl - self.total_commission
 
+    @property
+    def pl_open(self) -> float:
+        """P/L from original position open through all rolls (without current position)."""
+        return self.net_pnl
+
     def get_strike_history(self) -> list[float]:
         """List of strikes rolled through (old to new)."""
         return [roll.old_strike for roll in self.rolls] + (
