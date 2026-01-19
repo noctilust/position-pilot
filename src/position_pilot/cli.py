@@ -978,5 +978,97 @@ def rolls_patterns(
         console.print(f"  • [red]Low win rate: {patterns.win_rate:.1%}[/red]")
 
 
+@rolls_app.command("fetch")
+def rolls_fetch(
+    days: int = typer.Option(365, "--days", "-d", help="Days of history to fetch (default: 1 year)"),
+    account: str = typer.Option(None, "--account", "-a", help="Account number (uses default if not specified)"),
+    force_refresh: bool = typer.Option(False, "--force", "-f", help="Force refresh from API (bypass cache)"),
+):
+    """Fetch and store roll history from transactions.
+
+    This command fetches your transaction history, detects roll operations,
+    and stores them in the roll history cache for faster access later.
+    """
+    from .client import get_client
+    from .analysis.roll_tracker import RollTracker
+    from .analysis.roll_history import get_roll_history
+    from .config import get_default_account
+
+    client = get_client()
+
+    if not client.is_enabled:
+        console.print("[red]Error:[/red] Tastytrade credentials not configured")
+        raise typer.Exit(1)
+
+    # Resolve account
+    default_account = get_default_account()
+    accounts = client.get_accounts()
+
+    if not accounts:
+        console.print("[yellow]No accounts found[/yellow]")
+        raise typer.Exit(0)
+
+    if account:
+        selected = next((a for a in accounts if a.account_number == account), None)
+        if not selected:
+            console.print(f"[red]Account {account} not found[/red]")
+            raise typer.Exit(1)
+    else:
+        selected = accounts[0] if default_account is None else next(
+            (a for a in accounts if a.account_number == default_account), accounts[0]
+        )
+
+    # Fetch transactions
+    start_date = datetime.now() - timedelta(days=days)
+
+    with console.status(f"[dim]Fetching transactions since {start_date.strftime('%Y-%m-%d')}...[/dim]"):
+        transactions = client.get_transactions(
+            selected.account_number,
+            start_date=start_date,
+            limit=1000,
+            force_refresh=force_refresh
+        )
+
+    if not transactions:
+        console.print("[yellow]No transactions found[/yellow]")
+        raise typer.Exit(0)
+
+    console.print(f"[green]✓[/green] Fetched {len(transactions)} transactions")
+
+    # Detect rolls
+    positions = client.get_positions(selected.account_number)
+    tracker = RollTracker()
+    roll_chains = tracker.detect_rolls(transactions, positions, selected.account_number)
+
+    console.print(f"[green]✓[/green] Detected {len(roll_chains)} roll chains")
+
+    if len(roll_chains) == 0:
+        console.print("[yellow]No rolls found in transaction history[/yellow]")
+        console.print("[dim]Rolls will be detected once you close and reopen positions[/dim]")
+        raise typer.Exit(0)
+
+    # Store in roll history
+    roll_history = get_roll_history()
+    total_rolls = 0
+
+    for chain in roll_chains:
+        roll_history.add_chain(chain, selected.account_number)
+        total_rolls += chain.roll_count
+
+    console.print(f"[green]✓[/green] Stored {total_rolls} rolls from {len(roll_chains)} roll chains")
+
+    # Summary
+    console.print("\n[bold]Roll History Summary:[/bold]")
+    for chain in roll_chains:
+        pnl_style = "green" if chain.net_pnl >= 0 else "red"
+        console.print(
+            f"  {chain.underlying:6} {chain.strategy_type:15}: "
+            f"[{pnl_style}]${chain.net_pnl:+,.2f}[/{pnl_style}] "
+            f"({chain.roll_count} rolls)"
+        )
+
+    console.print(f"\n[dim]Roll history cached at: ~/.cache/position-pilot/roll_history.json[/dim]")
+
+
 if __name__ == "__main__":
     app()
