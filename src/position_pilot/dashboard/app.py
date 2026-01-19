@@ -249,10 +249,21 @@ class PositionsTable(DataTable):
             total_pnl = sum(s.unrealized_pnl for s in symbol_strategies)
             pnl_style = "green" if total_pnl >= 0 else "red"
 
+            # Get underlying price from first position
+            underlying_price = None
+            for strat in symbol_strategies:
+                if strat.positions and strat.positions[0].underlying_price:
+                    underlying_price = strat.positions[0].underlying_price
+                    break
+
+            price_str = ""
+            if underlying_price:
+                price_str = Text(f"${underlying_price:.2f}", style="cyan")
+
             # Add symbol summary row
             self.add_row(
                 Text(f" {symbol}", style="bold magenta"),
-                "",
+                price_str,
                 "",
                 Text(f"{len(symbol_strategies)} strategies", style="dim"),
                 "",
