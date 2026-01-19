@@ -131,7 +131,9 @@ class StrategyGroup:
         total = 0.0
         for pos in self.positions:
             if pos.greeks and pos.greeks.theta:
-                total += pos.greeks.theta * abs(pos.quantity) * pos.multiplier
+                # Adjust theta for short positions (positive theta = gains from time decay)
+                adjusted_theta = -pos.greeks.theta if pos.is_short else pos.greeks.theta
+                total += adjusted_theta * abs(pos.quantity) * pos.multiplier
         return total
 
     @property

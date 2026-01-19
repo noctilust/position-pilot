@@ -72,7 +72,12 @@ def format_position_row(pos: Position) -> list:
 
     # Greeks (if option)
     delta = f"{pos.greeks.delta:.2f}" if pos.greeks and pos.greeks.delta else "-"
-    theta = f"${pos.greeks.theta * pos.multiplier * abs(pos.quantity):.0f}" if pos.greeks and pos.greeks.theta else "-"
+    if pos.greeks and pos.greeks.theta:
+        # Adjust theta for short positions (positive theta = gains from time decay)
+        adjusted_theta = -pos.greeks.theta if pos.is_short else pos.greeks.theta
+        theta = f"${adjusted_theta * pos.multiplier * abs(pos.quantity):.0f}"
+    else:
+        theta = "-"
 
     return [symbol, qty, dte, price_str, pnl, delta, theta]
 

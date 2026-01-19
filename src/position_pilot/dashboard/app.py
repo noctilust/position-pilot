@@ -757,7 +757,9 @@ class PilotDashboard(App):
                 for pos in positions:
                     if pos.greeks:
                         if pos.greeks.theta:
-                            total_theta += pos.greeks.theta * pos.multiplier * abs(pos.quantity)
+                            # Adjust theta for short positions (positive theta = gains from time decay)
+                            adjusted_theta = -pos.greeks.theta if pos.is_short else pos.greeks.theta
+                            total_theta += adjusted_theta * pos.multiplier * abs(pos.quantity)
                         if pos.greeks.delta:
                             qty = pos.quantity if not pos.is_short else -pos.quantity
                             total_delta += pos.greeks.delta * pos.multiplier * qty
