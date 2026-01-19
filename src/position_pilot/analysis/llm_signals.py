@@ -262,8 +262,10 @@ class LLMPositionAnalyzer:
         ])
 
         if position.greeks:
+            # Adjust delta for short positions to show actual portfolio exposure
             if position.greeks.delta:
-                details.append(f"Delta: {position.greeks.delta:.2f}")
+                adjusted_delta = -position.greeks.delta if position.is_short else position.greeks.delta
+                details.append(f"Delta: {adjusted_delta:.2f}")
             if position.greeks.theta:
                 details.append(f"Theta: {position.greeks.theta:.3f}")
 
@@ -306,8 +308,10 @@ Focus on: theta decay, delta exposure, expiration risk, P/L trend.""".format(det
         ])
 
         if position.greeks:
+            # Adjust delta for short positions to show actual portfolio exposure
             if position.greeks.delta:
-                details.append(f"Delta: {position.greeks.delta:.2f}")
+                adjusted_delta = -position.greeks.delta if position.is_short else position.greeks.delta
+                details.append(f"Delta: {adjusted_delta:.2f}")
             if position.greeks.theta:
                 theta_daily = position.greeks.theta * position.multiplier * abs(position.quantity)
                 details.append(f"Theta: {position.greeks.theta:.3f} (${theta_daily:+.2f}/day)")
