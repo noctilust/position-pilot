@@ -47,6 +47,12 @@ class StrategyType(Enum):
     RATIO_SPREAD = "Ratio Spread"
     BUTTERFLY = "Butterfly"
 
+    # Synthetic positions
+    SYNTHETIC_LONG = "Synthetic Long"
+    SYNTHETIC_SHORT = "Synthetic Short"
+    RISK_REVERSAL_BULL = "Risk Reversal (Bull)"
+    RISK_REVERSAL_BEAR = "Risk Reversal (Bear)"
+
     # Equity
     LONG_STOCK = "Long Stock"
     SHORT_STOCK = "Short Stock"
@@ -218,6 +224,7 @@ class StrategyDetector:
             self._detect_straddle(underlying, opts, exp)
             self._detect_strangle(underlying, opts, exp)
             self._detect_vertical_spreads(underlying, opts, exp)
+            self._detect_synthetic_long(underlying, opts, exp)
             self._detect_jade_lizard(underlying, opts, exp)
 
         # Detect calendar/diagonal spreads (cross-expiration)
@@ -496,6 +503,59 @@ class StrategyDetector:
                     )
                     self.strategies.append(group)
                     self._mark_used(legs)
+
+    def _detect_synthetic_long(self, underlying: str, options: list[Position], exp: date) -> None:
+        """Detect synthetic positions and risk reversals."""
+        available = [o for o in options if self._is_available(o)]
+
+        # Get all calls and puts
+        calls = sorted([o for o in available if o.option_type == "C"],
+                      key=lambda x: x.strike_price or 0)
+        puts = sorted([o for o in available if o.option_type == "P"],
+                     key=lambda x: x.strike_price or 0)
+
+        # Look for all call + put combinations
+        for call in calls:
+            for put in puts:
+                # Must be opposite directions (one long, one short)
+                if call.is_short == put.is_short:
+                    continue
+
+                legs = [call, put]
+                if not all(self._is_available(leg) for leg in legs):
+                    continue
+
+                call_strike = call.strike_price or 0
+                put_strike = put.strike_price or 0
+
+                # Bullish strategies (long call + short put)
+                if not call.is_short and put.is_short:
+                    if abs(call_strike - put_strike) < 0.01:
+                        # Same strike = Synthetic Long
+                        strategy_type = StrategyType.SYNTHETIC_LONG
+                    else:
+                        # Different strikes = Bullish Risk Reversal
+                        strategy_type = StrategyType.RISK_REVERSAL_BULL
+
+                # Bearish strategies (short call + long put)
+                elif call.is_short and not put.is_short:
+                    if abs(call_strike - put_strike) < 0.01:
+                        # Same strike = Synthetic Short
+                        strategy_type = StrategyType.SYNTHETIC_SHORT
+                    else:
+                        # Different strikes = Bearish Risk Reversal
+                        strategy_type = StrategyType.RISK_REVERSAL_BEAR
+                else:
+                    continue
+
+                group = StrategyGroup(
+                    strategy_type=strategy_type,
+                    underlying=underlying,
+                    positions=legs,
+                    expiration=exp if exp != date.max else None,
+                )
+                self.strategies.append(group)
+                self._mark_used(legs)
 
     def _detect_jade_lizard(self, underlying: str, options: list[Position], exp: date) -> None:
         """Detect jade lizard: short put + short call spread (bear call)."""

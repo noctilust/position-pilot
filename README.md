@@ -1,13 +1,15 @@
 # Position Pilot
 
-CLI tool and TUI dashboard for options traders using Tastytrade.
+CLI tool and TUI dashboard for options traders using Tastytrade with **AI-powered recommendations** via Claude.
 
 ## Features
 
-- **Strategy Detection** – Auto-groups positions (Iron Condors, Vertical Spreads, Calendars, etc.)
-- **Health Monitoring** – Alerts on DTE and profit/loss thresholds
-- **Interactive Dashboard** – Terminal UI with real-time data
-- **Market Data** – Quotes with IV rank
+- **🤖 AI-Powered Analysis** – Claude 3.5 Sonnet generates trading recommendations (no rule-based fallback)
+- **📊 Strategy Detection** – Auto-groups positions (Iron Condors, Vertical Spreads, Synthetic Longs, etc.)
+- **💰 Extrinsic & Intrinsic Value** – Shows time value and real value per contract (key metrics for option traders)
+- **⚠️ Health Monitoring** – AI assesses risks based on Greeks, DTE, P/L, and market context
+- **🖥️ Interactive Dashboard** – Terminal UI with real-time data
+- **📈 Market Data** – Quotes with IV rank and Greeks
 
 ## Installation
 
@@ -17,14 +19,20 @@ uv install
 
 ## Configuration
 
-Set Tastytrade credentials:
+Set required credentials:
 
 ```bash
-export TASTYTRADE_USERNAME=your_username
-export TASTYTRADE_PASSWORD=your_password
+# Tastytrade OAuth (get from your Tastytrade account settings)
+export TASTYTRADE_CLIENT_SECRET=your_client_secret
+export TASTYTRADE_REFRESH_TOKEN=your_refresh_token
+
+# Anthropic Claude API (get from https://console.anthropic.com/)
+export ANTHROPIC_API_KEY=your_api_key
 ```
 
 Config file: `~/.config/position-pilot/config.json`
+
+**Market Data Cache**: Market data (quotes, Greeks, IV metrics) is cached for 10 minutes in `~/.cache/position-pilot/` to reduce API calls and improve performance. Use `r` key in dashboard to refresh with fresh market data.
 
 ## Commands
 
@@ -62,15 +70,18 @@ pilot account set 12345678
 | Key | Action |
 |-----|--------|
 | `q` | Quit |
-| `r` | Refresh |
+| `r` | Refresh all data |
+| `s` | Hide/show stock positions |
+| `f` | Hide/show financial numbers (account balances & P/L) |
 | `Enter` | Expand/collapse strategy |
-| `e` | Collapse all strategies |
+| `c` | Collapse all strategies |
 | `g` | Toggle strategies/raw view |
 
 ## Requirements
 
 - Python 3.12+
 - Tastytrade account
+- Anthropic API key (for Claude-powered recommendations)
 
 ## License
 

@@ -113,8 +113,8 @@ class MarketAnalyzer:
                 return cached
 
         # Fetch fresh data
-        quote = self.client.get_quote(symbol)
-        metrics = self.client.get_market_metrics(symbol)
+        quote = self.client.get_quote(symbol, force_refresh=force_refresh)
+        metrics = self.client.get_market_metrics(symbol, force_refresh=force_refresh)
 
         if not quote:
             return None

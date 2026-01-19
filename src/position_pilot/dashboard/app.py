@@ -24,13 +24,14 @@ from rich.table import Table
 from ..client import get_client
 from ..config import get_default_account, get_watchlist
 from ..models import Account, Position
-from ..analysis import get_position_analyzer, get_analyzer, RiskLevel, detect_strategies, StrategyGroup
+from ..analysis import get_llm_analyzer, get_analyzer, RiskLevel, detect_strategies, StrategyGroup
 
 
 class AccountPanel(Static):
     """Displays account summary."""
 
     account: reactive[Account | None] = reactive(None)
+    show_financials: reactive[bool] = reactive(True)
 
     def render(self) -> Panel:
         if not self.account:
@@ -40,9 +41,20 @@ class AccountPanel(Static):
         table.add_column("Label", style="dim")
         table.add_column("Value", justify="right")
 
-        table.add_row("Net Liq", f"${self.account.net_liquidating_value:,.2f}")
-        table.add_row("Buying Power", f"${self.account.buying_power:,.2f}")
-        table.add_row("Cash", f"${self.account.cash_balance:,.2f}")
+        if self.show_financials:
+            table.add_row("Net Liq", f"${self.account.net_liquidating_value:,.2f}")
+            table.add_row("Buying Power", f"${self.account.buying_power:,.2f}")
+            table.add_row("Cash", f"${self.account.cash_balance:,.2f}")
+        else:
+            # Match asterisk length to actual value length
+            net_liq_str = f"${self.account.net_liquidating_value:,.2f}"
+            buying_power_str = f"${self.account.buying_power:,.2f}"
+            cash_str = f"${self.account.cash_balance:,.2f}"
+
+            table.add_row("Net Liq", "$" + "*" * (len(net_liq_str) - 1))
+            table.add_row("Buying Power", "$" + "*" * (len(buying_power_str) - 1))
+            table.add_row("Cash", "$" + "*" * (len(cash_str) - 1))
+
         table.add_row("Positions", str(len(self.account.positions)))
 
         return Panel(table, title=f"[bold]{self.account.display_name}[/bold]", border_style="blue")
@@ -53,13 +65,17 @@ class PositionsTable(DataTable):
 
     positions: reactive[list[Position]] = reactive(list)
     show_strategies: reactive[bool] = reactive(True)
-    _initialized: bool = False
-    # Track expanded strategies: key = (symbol, strategy_type, strikes_tuple), value = bool
-    _expanded_strategies: set[tuple] = set()
-    # Map row indices to strategy data for enter key handling
-    _row_to_strategy: dict[int, tuple[str, StrategyGroup]] = {}
 
     BINDINGS = []
+
+    def __init__(self, **kwargs):
+        """Initialize the positions table with empty state."""
+        super().__init__(**kwargs)
+        self._initialized: bool = False
+        # Track expanded strategies: key = (symbol, strategy_type, strikes_tuple), value = bool
+        self._expanded_strategies: set[tuple] = set()
+        # Map row indices to strategy data for enter key handling
+        self._row_to_strategy: dict[int, tuple[str, StrategyGroup]] = {}
 
     def _handle_toggle_expand(self) -> None:
         """Toggle expansion of the currently selected strategy row."""
@@ -86,10 +102,36 @@ class PositionsTable(DataTable):
             # Repopulate table
             self._populate_table()
 
+            # Restore cursor to the same strategy row
+            self._restore_cursor_to_strategy(strategy_key)
+
+    def _restore_cursor_to_strategy(self, strategy_key: tuple) -> None:
+        """Restore cursor to the row containing the given strategy key."""
+        for row_idx, (symbol, strategy) in self._row_to_strategy.items():
+            strikes = tuple(sorted([
+                p.strike_price for p in strategy.positions
+                if p.strike_price is not None
+            ]))
+            row_key = (symbol, strategy.strategy_type, strikes)
+            if row_key == strategy_key:
+                self.move_cursor(row=row_idx)
+                return
+
     def _toggle_all_strategies(self) -> None:
         """Toggle expand/collapse state of all strategy rows."""
         if not self.show_strategies:
             return
+
+        # Save current cursor position's strategy key
+        cursor_row = self.cursor_row
+        saved_strategy_key = None
+        if cursor_row in self._row_to_strategy:
+            symbol, strategy = self._row_to_strategy[cursor_row]
+            strikes = tuple(sorted([
+                p.strike_price for p in strategy.positions
+                if p.strike_price is not None
+            ]))
+            saved_strategy_key = (symbol, strategy.strategy_type, strikes)
 
         # Get all strategies
         strategies = detect_strategies(self.positions)
@@ -125,8 +167,16 @@ class PositionsTable(DataTable):
 
         self._populate_table()
 
+        # Restore cursor to the same strategy row
+        if saved_strategy_key:
+            self._restore_cursor_to_strategy(saved_strategy_key)
+
     def on_mount(self) -> None:
         """Set up table columns when widget is mounted."""
+        # Initialize state BEFORE marking as initialized to avoid race conditions
+        self._expanded_strategies = set()
+        self._row_to_strategy = {}
+
         self._initialized = True
         self.cursor_type = "row"
         self.show_header = True
@@ -134,7 +184,7 @@ class PositionsTable(DataTable):
         self.z_stripes = True
 
         # Set up initial columns
-        self.add_columns("Strategy", "Strikes", "Qty", "DTE", "P/L", "P/L %", "Delta")
+        self.add_columns("Strategy", "Qty", "Strikes", "DTE", "P/L", "P/L %", "Delta", "Extrinsic", "Intrinsic")
 
     def set_positions(self, positions: list[Position]) -> None:
         """Set positions and trigger table update via reactive system."""
@@ -149,9 +199,9 @@ class PositionsTable(DataTable):
         self.clear(columns=True)
 
         if self.show_strategies:
-            self.add_columns("Strategy", "Strikes", "Qty", "DTE", "P/L", "P/L %", "Delta")
+            self.add_columns("Strategy", "Qty", "Strikes", "DTE", "P/L", "P/L %", "Delta", "Extrinsic", "Intrinsic")
         else:
-            self.add_columns("Symbol", "Qty", "DTE", "Price", "P/L", "P/L %", "Delta")
+            self.add_columns("Symbol", "Qty", "DTE", "Price", "P/L", "P/L %", "Delta", "Extrinsic", "Intrinsic")
 
         self._populate_table()
 
@@ -195,10 +245,12 @@ class PositionsTable(DataTable):
             # Add symbol summary row
             self.add_row(
                 Text(f" {symbol}", style="bold magenta"),
+                "",
                 Text(f"{len(symbol_strategies)} strategies", style="dim"),
                 "",
-                "",
                 Text(f"${total_pnl:+,.2f}", style=f"bold {pnl_style}"),
+                "",
+                "",
                 "",
                 "",
             )
@@ -219,7 +271,8 @@ class PositionsTable(DataTable):
 
                 strikes_display = strat.strikes_display or "-"
                 qty = str(strat.total_quantity)
-                dte = f"{strat.days_to_expiration}" if strat.days_to_expiration is not None else "-"
+                # Don't show DTE on collapsed strategy row - it's shown on each leg instead
+                dte = ""
 
                 pnl_style = "green" if strat.unrealized_pnl >= 0 else "red"
                 pnl = Text(f"${strat.unrealized_pnl:+,.2f}", style=pnl_style)
@@ -230,7 +283,36 @@ class PositionsTable(DataTable):
 
                 delta = f"{strat.total_delta:.0f}" if strat.total_delta else "-"
 
-                self.add_row(name, strikes_display, qty, dte, pnl, pnl_pct, delta)
+                # Calculate average extrinsic value per contract for strategy
+                # For multi-leg strategies, show weighted average based on quantity
+                extrinsic_values = [
+                    (pos.extrinsic_value, abs(pos.quantity))
+                    for pos in strat.positions
+                    if pos.extrinsic_value is not None and pos.is_option
+                ]
+                if extrinsic_values:
+                    weighted_sum = sum(ext * qty for ext, qty in extrinsic_values)
+                    total_qty = sum(qty for _, qty in extrinsic_values)
+                    avg_extrinsic = weighted_sum / total_qty if total_qty > 0 else 0
+                    extrinsic_str = f"${avg_extrinsic:.2f}" if avg_extrinsic > 0 else "-"
+                else:
+                    extrinsic_str = "-"
+
+                # Calculate average intrinsic value per contract for strategy
+                intrinsic_values = [
+                    (pos.intrinsic_value, abs(pos.quantity))
+                    for pos in strat.positions
+                    if pos.intrinsic_value is not None and pos.is_option
+                ]
+                if intrinsic_values:
+                    weighted_sum = sum(intrin * qty for intrin, qty in intrinsic_values)
+                    total_qty = sum(qty for _, qty in intrinsic_values)
+                    avg_intrinsic = weighted_sum / total_qty if total_qty > 0 else 0
+                    intrinsic_str = f"${avg_intrinsic:.2f}" if avg_intrinsic > 0 else "-"
+                else:
+                    intrinsic_str = "-"
+
+                self.add_row(name, qty, strikes_display, dte, pnl, pnl_pct, delta, extrinsic_str, intrinsic_str)
 
                 # Track row index for this strategy (current row count after adding)
                 row_index = len(self.rows) - 1
@@ -268,19 +350,31 @@ class PositionsTable(DataTable):
                         if pos.greeks and pos.greeks.delta is not None:
                             pos_delta = f"{pos.greeks.delta:.2f}"
 
+                        # Extrinsic value per contract
+                        pos_extrinsic = "-"
+                        if pos.extrinsic_value is not None:
+                            pos_extrinsic = f"${pos.extrinsic_value:.2f}"
+
+                        # Intrinsic value per contract
+                        pos_intrinsic = "-"
+                        if pos.intrinsic_value is not None:
+                            pos_intrinsic = f"${pos.intrinsic_value:.2f}"
+
                         self.add_row(
                             Text(pos_symbol, style="dim"),
-                            "",  # Empty for strikes column
                             pos_qty,
+                            "",  # Empty for strikes column
                             pos_dte,
                             pos_price_str,
                             pos_pnl,
                             Text(pos_delta if pos_delta != "-" else "", style="dim"),
+                            Text(pos_extrinsic if pos_extrinsic != "-" else "", style="dim"),
+                            Text(pos_intrinsic if pos_intrinsic != "-" else "", style="dim"),
                         )
 
             # Add blank row after each symbol group (except last)
             if i < len(sorted_symbols) - 1:
-                self.add_row("", "", "", "", "", "", "")
+                self.add_row("", "", "", "", "", "", "", "", "")
 
     def _populate_positions(self) -> None:
         """Populate table with individual positions."""
@@ -312,7 +406,17 @@ class PositionsTable(DataTable):
             if pos.greeks and pos.greeks.delta is not None:
                 delta = f"{pos.greeks.delta:.2f}"
 
-            self.add_row(symbol, qty, dte, price_str, pnl, pnl_pct, delta)
+            # Extrinsic value per contract
+            extrinsic = "-"
+            if pos.extrinsic_value is not None:
+                extrinsic = f"${pos.extrinsic_value:.2f}"
+
+            # Intrinsic value per contract
+            intrinsic = "-"
+            if pos.intrinsic_value is not None:
+                intrinsic = f"${pos.intrinsic_value:.2f}"
+
+            self.add_row(symbol, qty, dte, price_str, pnl, pnl_pct, delta, extrinsic, intrinsic)
 
 
 class RecommendationsPanel(Static):
@@ -400,13 +504,19 @@ class PortfolioSummary(Static):
     total_theta: reactive[float] = reactive(0.0)
     total_delta: reactive[float] = reactive(0.0)
     risk_summary: reactive[dict] = reactive(dict)
+    show_financials: reactive[bool] = reactive(True)
 
     def render(self) -> Panel:
-        # P/L styling
+        # P/L styling and masking
         pnl_style = "green" if self.total_pnl >= 0 else "red"
-        pnl_text = f"[{pnl_style}]${self.total_pnl:+,.2f}[/{pnl_style}]"
+        if self.show_financials:
+            pnl_text = f"[{pnl_style}]${self.total_pnl:+,.2f}[/{pnl_style}]"
+        else:
+            # Match asterisk length to actual value
+            actual_pnl_text = f"${self.total_pnl:+,.2f}"
+            pnl_text = f"[{pnl_style}]$" + "*" * (len(actual_pnl_text) - 1) + f"[/{pnl_style}]"
 
-        # Theta styling (positive theta is good for premium sellers)
+        # Theta styling (always visible)
         theta_style = "green" if self.total_theta < 0 else "red"
         theta_text = f"[{theta_style}]${self.total_theta:+,.2f}[/{theta_style}]"
 
@@ -512,17 +622,20 @@ class PilotDashboard(App):
         Binding("r", "refresh", "Refresh"),
         Binding("a", "analyze", "Analyze"),
         Binding("g", "toggle_group", "Group"),
+        Binding("s", "toggle_stocks", "Hide/Show Stocks"),
+        Binding("f", "toggle_financials", "Hide/Show $"),
         Binding("enter", "toggle_expand", "Expand/Collapse", show=False),
-        Binding("e", "toggle_all_strategies", "Collapse All"),
+        Binding("c", "toggle_all_strategies", "Collapse All"),
     ]
 
     def __init__(self):
         super().__init__()
         self.client = get_client()
-        self.analyzer = get_position_analyzer()
+        self.analyzer = get_llm_analyzer()  # Use LLM analyzer
         self.market_analyzer = get_analyzer()
         self.account: Account | None = None
         self.watchlist = get_watchlist()
+        self.show_stocks = True  # Toggle for showing/hiding stock positions
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -546,7 +659,7 @@ class PilotDashboard(App):
         self.load_data()
 
     @work(exclusive=True)
-    async def load_data(self) -> None:
+    async def load_data(self, force_refresh: bool = False) -> None:
         """Load all data asynchronously."""
         status = self.query_one(StatusBar)
         status.loading = True
@@ -576,7 +689,7 @@ class PilotDashboard(App):
                 positions = self.client.get_positions(self.account.account_number)
 
                 # Enrich with Greeks (batch - much faster!)
-                positions = self.client.enrich_positions_greeks_batch(positions)
+                positions = self.client.enrich_positions_greeks_batch(positions, force_refresh=force_refresh)
 
                 self.account.positions = positions
 
@@ -584,9 +697,10 @@ class PilotDashboard(App):
                 account_panel = self.query_one(AccountPanel)
                 account_panel.account = self.account
 
-                # Update positions table
+                # Update positions table (filter stocks if hidden)
                 positions_widget = self.query_one(PositionsTable)
-                positions_widget.set_positions(positions)
+                filtered_positions = positions if self.show_stocks else [p for p in positions if p.is_option]
+                positions_widget.set_positions(filtered_positions)
 
                 # Analyze portfolio
                 analysis = self.analyzer.analyze_portfolio(positions)
@@ -605,7 +719,7 @@ class PilotDashboard(App):
             # Fetch market data
             market_data = {}
             for symbol in self.watchlist:
-                snapshot = self.market_analyzer.get_snapshot(symbol)
+                snapshot = self.market_analyzer.get_snapshot(symbol, force_refresh=force_refresh)
                 if snapshot:
                     market_data[symbol] = {
                         "price": snapshot.price,
@@ -620,17 +734,36 @@ class PilotDashboard(App):
             status.last_update = datetime.now()
 
     def action_refresh(self) -> None:
-        """Refresh all data."""
-        self.load_data()
+        """Refresh all data with fresh market data (bypass cache)."""
+        self.load_data(force_refresh=True)
 
     def action_analyze(self) -> None:
         """Run full analysis."""
-        self.load_data()
+        self.load_data(force_refresh=True)
 
     def action_toggle_group(self) -> None:
         """Toggle between strategies and positions view."""
         positions_widget = self.query_one(PositionsTable)
         positions_widget.show_strategies = not positions_widget.show_strategies
+
+    def action_toggle_financials(self) -> None:
+        """Toggle display of account financial numbers and portfolio P/L."""
+        account_panel = self.query_one(AccountPanel)
+        portfolio_panel = self.query_one(PortfolioSummary)
+
+        # Toggle both panels together
+        new_state = not account_panel.show_financials
+        account_panel.show_financials = new_state
+        portfolio_panel.show_financials = new_state
+
+    def action_toggle_stocks(self) -> None:
+        """Toggle display of stock positions."""
+        self.show_stocks = not self.show_stocks
+        # Re-filter and update positions table
+        if self.account and self.account.positions:
+            positions_widget = self.query_one(PositionsTable)
+            filtered_positions = self.account.positions if self.show_stocks else [p for p in self.account.positions if p.is_option]
+            positions_widget.set_positions(filtered_positions)
 
     def action_toggle_expand(self) -> None:
         """Toggle expansion of the currently selected strategy row."""

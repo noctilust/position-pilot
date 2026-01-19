@@ -439,11 +439,11 @@ def dashboard():
 def analyze(
     account: str = typer.Option(None, "--account", "-a", help="Account number (uses default if not specified)"),
 ):
-    """Analyze positions and show recommendations."""
-    from .analysis import get_position_analyzer, get_analyzer, RiskLevel
+    """Analyze positions and show recommendations using LLM."""
+    from .analysis import get_llm_analyzer, get_analyzer, RiskLevel
 
     client = get_client()
-    analyzer = get_position_analyzer()
+    analyzer = get_llm_analyzer()  # Use LLM analyzer
     market = get_analyzer()
 
     if not client.is_enabled:

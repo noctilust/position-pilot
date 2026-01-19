@@ -3,12 +3,14 @@
 import logging
 import os
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
 from dotenv import load_dotenv
 
 from ..models.position import Account, Greeks, Position, PositionType
+from ..cache import Cache
 
 load_dotenv()
 
@@ -27,12 +29,21 @@ class TastytradeClient:
         self._token_expiry: Optional[datetime] = None
         self._enabled = bool(self.client_secret and self.refresh_token)
 
+        # Initialize cache with 10-minute TTL
+        cache_dir = Path.home() / ".cache" / "position-pilot"
+        self._cache = Cache(ttl_seconds=600, cache_dir=cache_dir)
+
         if not self._enabled:
             logger.warning("Tastytrade credentials not configured")
 
     @property
     def is_enabled(self) -> bool:
         return self._enabled
+
+    def clear_cache(self) -> None:
+        """Clear all cached market data."""
+        self._cache.clear()
+        logger.info("Market data cache cleared")
 
     def _ensure_token(self) -> bool:
         """Ensure we have a valid access token."""
@@ -238,8 +249,18 @@ class TastytradeClient:
             logger.error(f"Error parsing position: {e}")
             return None
 
-    def get_market_metrics(self, symbol: str) -> Optional[dict]:
+    def get_market_metrics(self, symbol: str, force_refresh: bool = False) -> Optional[dict]:
         """Fetch IV rank and other metrics for a symbol."""
+        cache_key = f"metrics:{symbol}"
+
+        # Check cache unless force refresh
+        if not force_refresh:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                logger.debug(f"Cache hit for market metrics: {symbol}")
+                return cached
+
+        # Fetch from API
         data = self._get("/market-metrics", params={"symbols": symbol})
         if not data:
             return None
@@ -249,7 +270,7 @@ class TastytradeClient:
             return None
 
         m = items[0]
-        return {
+        result = {
             "iv_rank": self._float(m.get("implied-volatility-index-rank"), mult=100),
             "iv_percentile": self._float(m.get("implied-volatility-percentile"), mult=100),
             "implied_volatility": self._float(m.get("implied-volatility-index")),
@@ -257,8 +278,24 @@ class TastytradeClient:
             "liquidity_rating": m.get("liquidity-rating"),
         }
 
-    def get_quote(self, symbol: str) -> Optional[dict]:
+        # Store in cache
+        self._cache.set(cache_key, result)
+        logger.debug(f"Cached market metrics: {symbol}")
+
+        return result
+
+    def get_quote(self, symbol: str, force_refresh: bool = False) -> Optional[dict]:
         """Get current quote for a symbol."""
+        cache_key = f"quote:{symbol}"
+
+        # Check cache unless force refresh
+        if not force_refresh:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                logger.debug(f"Cache hit for quote: {symbol}")
+                return cached
+
+        # Fetch from API
         data = self._get("/market-data", params={"symbols": symbol})
         if not data:
             return None
@@ -268,7 +305,7 @@ class TastytradeClient:
             return None
 
         q = items[0]
-        return {
+        result = {
             "bid": self._float(q.get("bid")),
             "ask": self._float(q.get("ask")),
             "mark": self._float(q.get("mark")),
@@ -280,7 +317,13 @@ class TastytradeClient:
             "implied_volatility": self._float(q.get("volatility")),
         }
 
-    def get_quotes_batch(self, symbols: list[str]) -> dict[str, dict]:
+        # Store in cache
+        self._cache.set(cache_key, result)
+        logger.debug(f"Cached quote: {symbol}")
+
+        return result
+
+    def get_quotes_batch(self, symbols: list[str], force_refresh: bool = False) -> dict[str, dict]:
         """Get quotes for multiple symbols in a single API call.
 
         Returns a dictionary mapping symbol to quote data.
@@ -288,36 +331,56 @@ class TastytradeClient:
         if not symbols:
             return {}
 
-        # Tastytrade API accepts comma-separated symbols
-        symbols_param = ",".join(symbols)
-        data = self._get("/market-data", params={"symbols": symbols_param})
-        if not data:
-            return {}
-
         quotes = {}
-        for item in data.get("data", {}).get("items", []):
-            symbol = item.get("symbol", "")
-            if symbol:
-                quotes[symbol] = {
-                    "bid": self._float(item.get("bid")),
-                    "ask": self._float(item.get("ask")),
-                    "mark": self._float(item.get("mark")),
-                    "last": self._float(item.get("last")),
-                    "delta": self._float(item.get("delta")),
-                    "gamma": self._float(item.get("gamma")),
-                    "theta": self._float(item.get("theta")),
-                    "vega": self._float(item.get("vega")),
-                    "implied_volatility": self._float(item.get("volatility")),
-                }
+        symbols_to_fetch = []
+
+        # Check cache for each symbol unless force refresh
+        if not force_refresh:
+            for symbol in symbols:
+                cache_key = f"quote:{symbol}"
+                cached = self._cache.get(cache_key)
+                if cached is not None:
+                    quotes[symbol] = cached
+                    logger.debug(f"Cache hit for quote: {symbol}")
+                else:
+                    symbols_to_fetch.append(symbol)
+        else:
+            symbols_to_fetch = symbols
+
+        # Fetch uncached symbols from API
+        if symbols_to_fetch:
+            symbols_param = ",".join(symbols_to_fetch)
+            data = self._get("/market-data", params={"symbols": symbols_param})
+            if data:
+                for item in data.get("data", {}).get("items", []):
+                    symbol = item.get("symbol", "")
+                    if symbol:
+                        quote_data = {
+                            "bid": self._float(item.get("bid")),
+                            "ask": self._float(item.get("ask")),
+                            "mark": self._float(item.get("mark")),
+                            "last": self._float(item.get("last")),
+                            "delta": self._float(item.get("delta")),
+                            "gamma": self._float(item.get("gamma")),
+                            "theta": self._float(item.get("theta")),
+                            "vega": self._float(item.get("vega")),
+                            "implied_volatility": self._float(item.get("volatility")),
+                        }
+                        quotes[symbol] = quote_data
+
+                        # Store in cache
+                        cache_key = f"quote:{symbol}"
+                        self._cache.set(cache_key, quote_data)
+                        logger.debug(f"Cached quote: {symbol}")
 
         return quotes
 
-    def enrich_position_greeks(self, position: Position) -> Position:
+    def enrich_position_greeks(self, position: Position, force_refresh: bool = False) -> Position:
         """Fetch and attach current Greeks to a position."""
         if not position.is_option:
             return position
 
-        quote = self.get_quote(position.symbol)
+        quote = self.get_quote(position.symbol, force_refresh=force_refresh)
         if quote:
             position.greeks = Greeks(
                 delta=quote.get("delta"),
@@ -331,7 +394,7 @@ class TastytradeClient:
 
         return position
 
-    def enrich_positions_greeks_batch(self, positions: list[Position]) -> list[Position]:
+    def enrich_positions_greeks_batch(self, positions: list[Position], force_refresh: bool = False) -> list[Position]:
         """Fetch and attach Greeks to multiple option positions in a single API call.
 
         Much more efficient than calling enrich_position_greeks for each position.
@@ -343,7 +406,11 @@ class TastytradeClient:
             return positions
 
         # Fetch all quotes in one batch
-        quotes = self.get_quotes_batch(option_symbols)
+        quotes = self.get_quotes_batch(option_symbols, force_refresh=force_refresh)
+
+        # Collect unique underlying symbols for pricing
+        underlying_symbols = list(set(p.underlying_symbol for p in positions if p.is_option))
+        underlying_quotes = self.get_quotes_batch(underlying_symbols, force_refresh=force_refresh) if underlying_symbols else {}
 
         # Update positions with quote data
         for i, pos in enumerate(positions):
@@ -358,6 +425,11 @@ class TastytradeClient:
                 )
                 if quote.get("mark"):
                     positions[i].mark_price = quote["mark"]
+
+                # Add underlying price for extrinsic value calculation
+                if pos.underlying_symbol in underlying_quotes:
+                    underlying_quote = underlying_quotes[pos.underlying_symbol]
+                    positions[i].underlying_price = underlying_quote.get("mark") or underlying_quote.get("last")
 
         return positions
 

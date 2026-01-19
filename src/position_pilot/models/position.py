@@ -48,6 +48,7 @@ class Position(BaseModel):
     average_open_price: float = 0.0
     close_price: float = 0.0
     mark_price: Optional[float] = None
+    underlying_price: Optional[float] = None  # Current price of underlying stock
 
     # P/L
     cost_basis: float = 0.0
@@ -75,6 +76,36 @@ class Position(BaseModel):
         """Display quantity with direction."""
         sign = "-" if self.is_short else "+"
         return f"{sign}{abs(self.quantity)}"
+
+    @property
+    def intrinsic_value(self) -> Optional[float]:
+        """Calculate intrinsic value of option."""
+        if not self.is_option or not self.strike_price or not self.underlying_price:
+            return None
+
+        # Calculate intrinsic value
+        if self.option_type == "C":
+            # Call: intrinsic = max(0, underlying - strike)
+            intrinsic = max(0, self.underlying_price - self.strike_price)
+        elif self.option_type == "P":
+            # Put: intrinsic = max(0, strike - underlying)
+            intrinsic = max(0, self.strike_price - self.underlying_price)
+        else:
+            return None
+
+        return intrinsic
+
+    @property
+    def extrinsic_value(self) -> Optional[float]:
+        """Calculate extrinsic (time) value of option."""
+        if not self.is_option or not self.mark_price or not self.strike_price or not self.underlying_price:
+            return None
+
+        intrinsic = self.intrinsic_value or 0
+
+        # Extrinsic = option price - intrinsic
+        extrinsic = self.mark_price - intrinsic
+        return max(0, extrinsic)  # Ensure non-negative
 
 
 class Account(BaseModel):
