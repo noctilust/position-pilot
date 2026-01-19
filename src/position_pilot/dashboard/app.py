@@ -184,7 +184,7 @@ class PositionsTable(DataTable):
         self.z_stripes = True
 
         # Set up initial columns
-        self.add_columns("Position", "Price", "Qty", "Strikes", "DTE", "P/L", "P/L %", "Delta", "Extrinsic", "Intrinsic")
+        self.add_columns("Position", "Price", "Qty", "Strikes", "DTE", "P/L", "P/L %", "/Δ", "Extrinsic", "Intrinsic")
 
     def set_positions(self, positions: list[Position]) -> None:
         """Set positions and trigger table update via reactive system."""
@@ -199,9 +199,9 @@ class PositionsTable(DataTable):
         self.clear(columns=True)
 
         if self.show_strategies:
-            self.add_columns("Position", "Price", "Qty", "Strikes", "DTE", "P/L", "P/L %", "Delta", "Extrinsic", "Intrinsic")
+            self.add_columns("Position", "Price", "Qty", "Strikes", "DTE", "P/L", "P/L %", "/Δ", "Extrinsic", "Intrinsic")
         else:
-            self.add_columns("Symbol", "Price", "Qty", "DTE", "P/L", "P/L %", "Delta", "Extrinsic", "Intrinsic")
+            self.add_columns("Symbol", "Price", "Qty", "DTE", "P/L", "P/L %", "/Δ", "Extrinsic", "Intrinsic")
 
         self._populate_table()
 
@@ -375,7 +375,9 @@ class PositionsTable(DataTable):
 
                         pos_delta = "-"
                         if pos.greeks and pos.greeks.delta is not None:
-                            pos_delta = f"{pos.greeks.delta:.2f}"
+                            # Flip sign for short positions
+                            leg_delta = pos.greeks.delta * -1 if pos.is_short else pos.greeks.delta
+                            pos_delta = f"{leg_delta:.2f}"
 
                         # Extrinsic value per contract
                         pos_extrinsic = "-"
@@ -432,7 +434,9 @@ class PositionsTable(DataTable):
 
             delta = "-"
             if pos.greeks and pos.greeks.delta is not None:
-                delta = f"{pos.greeks.delta:.2f}"
+                # Flip sign for short positions
+                leg_delta = pos.greeks.delta * -1 if pos.is_short else pos.greeks.delta
+                delta = f"{leg_delta:.2f}"
 
             # Extrinsic value per contract
             extrinsic = "-"
