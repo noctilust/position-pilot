@@ -672,6 +672,7 @@ class PilotDashboard(App):
         Binding("c", "toggle_all_strategies", "Collapse All"),
         Binding("enter", "toggle_expand", "Expand", show=False),
         Binding("a", "analyze", "AI Rec"),
+        Binding("A", "regenerate", "AI Rec (Refresh)"),
     ]
 
     def __init__(self):
@@ -831,6 +832,61 @@ class PilotDashboard(App):
 
             try:
                 rec, generated_at = self._analyzer.generate_recommendation(strategy.positions[0])
+                # Update recommendations panel
+                recs_panel.recommendation = (rec, generated_at)
+                # Explicitly refresh the panel
+                recs_panel.refresh()
+            except Exception as e:
+                import sys
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+                # On error, show empty panel
+                recs_panel.recommendation = (None, None)
+                recs_panel.refresh()
+            finally:
+                status.loading = False
+                status.last_update = datetime.now()
+        else:
+            # Individual position row - not implemented yet
+            recs_panel.recommendation = (None, None)
+            recs_panel.refresh()
+
+    def action_regenerate(self) -> None:
+        """Regenerate AI recommendation for selected strategy (bypass cache)."""
+        positions_widget = self.query_one(PositionsTable)
+        cursor_row = positions_widget.cursor_row
+
+        # Get recommendations panel
+        recs_panel = self.query_one(RecommendationsPanel)
+
+        if cursor_row < 0:
+            # No row selected
+            recs_panel.recommendation = (None, None)
+            return
+
+        # Check if a strategy row is selected
+        if cursor_row in positions_widget._row_to_strategy:
+            symbol, strategy = positions_widget._row_to_strategy[cursor_row]
+
+            # Generate recommendation for this strategy (use first position)
+            if not strategy.positions:
+                recs_panel.recommendation = (None, None)
+                return
+
+            # Lazy initialize LLM analyzer if needed
+            if self._analyzer is None:
+                self._analyzer = get_llm_analyzer()
+
+            # Show loading status
+            status = self.query_one(StatusBar)
+            status.loading = True
+
+            try:
+                # Force refresh: bypass cache and regenerate
+                rec, generated_at = self._analyzer.generate_recommendation(
+                    strategy.positions[0],
+                    force_refresh=True
+                )
                 # Update recommendations panel
                 recs_panel.recommendation = (rec, generated_at)
                 # Explicitly refresh the panel
