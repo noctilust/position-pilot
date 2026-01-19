@@ -438,13 +438,15 @@ def dashboard():
 @app.command()
 def analyze(
     account: str = typer.Option(None, "--account", "-a", help="Account number (uses default if not specified)"),
+    refresh: bool = typer.Option(False, "--refresh", "-r", help="Force refresh AI recommendations (bypass cache)"),
 ):
-    """Analyze positions and show recommendations using LLM."""
-    from .analysis import get_llm_analyzer, get_analyzer, RiskLevel
+    """Analyze portfolio health and metrics (AI recommendations are on-demand per position)."""
+    from .analysis import get_llm_analyzer, get_analyzer, RiskLevel, get_recommendation_cache
 
     client = get_client()
     analyzer = get_llm_analyzer()  # Use LLM analyzer
     market = get_analyzer()
+    cache = get_recommendation_cache()
 
     if not client.is_enabled:
         console.print("[red]Error:[/red] Tastytrade credentials not configured")
@@ -478,8 +480,15 @@ def analyze(
         console.print("[dim]No open positions to analyze[/dim]")
         return
 
-    # Run analysis
+    # Run analysis (metrics only)
     analysis = analyzer.analyze_portfolio(positions)
+
+    # Show cache info
+    cache_info = analysis.get("cache_info", {})
+    if cache_info:
+        total = cache_info.get("total", 0)
+        console.print(f"[dim]Cached AI Recommendations: {total} positions[/dim]")
+        console.print()
 
     # Risk summary
     risk_table = Table(show_header=False, box=box.SIMPLE)
@@ -518,39 +527,7 @@ def analyze(
 
     console.print(Panel(metrics_table, title="Portfolio Metrics", border_style="cyan"))
 
-    # Recommendations
-    recs = analysis["recommendations"]
-    if recs:
-        console.print("\n[bold]Recommendations:[/bold]\n")
-
-        signal_icons = {
-            "strong_buy": "[green]⬆⬆[/green]",
-            "buy": "[green]⬆[/green]",
-            "hold": "[yellow]▬[/yellow]",
-            "sell": "[red]⬇[/red]",
-            "strong_sell": "[red]⬇⬇[/red]",
-            "roll": "[cyan]↻[/cyan]",
-            "close": "[red]✕[/red]",
-        }
-
-        for rec in recs:
-            pos = rec.position
-            if pos.is_option:
-                exp = pos.expiration_date.strftime("%m/%d") if pos.expiration_date else "?"
-                name = f"{pos.underlying_symbol} {exp} ${pos.strike_price:.0f}"
-            else:
-                name = pos.symbol
-
-            icon = signal_icons.get(rec.signal.value, "?")
-            urgency = "!" * min(rec.urgency, 3) if rec.urgency > 1 else ""
-
-            console.print(f"{icon} [bold]{name}[/bold] {urgency}")
-            console.print(f"   {rec.reason}")
-            if rec.suggested_action:
-                console.print(f"   [dim]→ {rec.suggested_action}[/dim]")
-            console.print()
-    else:
-        console.print("\n[green]All positions healthy - no action needed[/green]")
+    console.print("\n[dim]💡 Tip: Use the dashboard and press 'a' on a strategy row to generate AI recommendations[/dim]")
 
 
 @app.command()

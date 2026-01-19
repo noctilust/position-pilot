@@ -1,5 +1,19 @@
 """Data models for positions, accounts, and analysis."""
 
-from .position import Account, Position, PositionType, Greeks
+from .position import (
+    Account,
+    Position,
+    PositionType,
+    Greeks,
+    Signal,
+    Recommendation,
+)
 
-__all__ = ["Account", "Position", "PositionType", "Greeks"]
+__all__ = [
+    "Account",
+    "Position",
+    "PositionType",
+    "Greeks",
+    "Signal",
+    "Recommendation",
+]

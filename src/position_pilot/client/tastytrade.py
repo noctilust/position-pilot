@@ -12,7 +12,10 @@ from dotenv import load_dotenv
 from ..models.position import Account, Greeks, Position, PositionType
 from ..cache import Cache
 
-load_dotenv()
+# Load .env file from project root
+from pathlib import Path
+project_root = Path(__file__).parent.parent.parent.parent
+load_dotenv(project_root / ".env")
 
 logger = logging.getLogger(__name__)
 

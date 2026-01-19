@@ -1,4 +1,4 @@
-"""LLM-driven position analysis and trading signals using Claude."""
+"""LLM-driven position analysis and trading signals using Claude Sonnet 4.5."""
 
 import os
 from dataclasses import dataclass, field
@@ -10,6 +10,7 @@ from anthropic import Anthropic
 
 from ..models.position import Position, Signal, Recommendation
 from .market import get_analyzer
+from .recommendation_cache import get_recommendation_cache
 
 
 class RiskLevel(str, Enum):
@@ -44,10 +45,13 @@ class PositionHealth:
 
 
 class LLMPositionAnalyzer:
-    """Analyzes positions and generates recommendations using Claude LLM."""
+    """Analyzes positions and generates recommendations using Claude Sonnet 4.5."""
 
     def __init__(self, api_key: Optional[str] = None):
         """Initialize the LLM analyzer with Anthropic API key.
+
+        Uses Claude Sonnet 4.5 for trading recommendations, offering enhanced
+        reasoning capabilities for complex options strategies.
 
         Args:
             api_key: Anthropic API key. If None, reads from ANTHROPIC_API_KEY env var.
@@ -66,8 +70,8 @@ class LLMPositionAnalyzer:
         self.market = get_analyzer()
 
         # Model configuration
-        self.model = "claude-3-5-sonnet-20241022"
-        self.max_tokens = 1024
+        self.model = "claude-sonnet-4-5-20250929"  # Claude Sonnet 4.5
+        self.max_tokens = 2048  # Increased for response parsing
         self.timeout = 10  # seconds
 
     def assess_health(self, position: Position) -> PositionHealth:
@@ -89,105 +93,124 @@ class LLMPositionAnalyzer:
             return self._parse_health_response(position, response.content[0].text)
 
         except Exception as e:
-            # Since we don't have rule-based fallback, we create a neutral assessment
-            # with a note about the analysis failure
-            return PositionHealth(
-                position=position,
-                risk_level=RiskLevel.MODERATE,
-                issues=[f"Analysis error: {str(e)}"],
-            )
+            error_msg = str(e)
+            # Handle specific error types
+            if "content-length" in error_msg.lower() or "too large" in error_msg.lower():
+                return PositionHealth(
+                    position=position,
+                    risk_level=RiskLevel.MODERATE,
+                    issues=["Request too large - unable to analyze"],
+                )
+            else:
+                return PositionHealth(
+                    position=position,
+                    risk_level=RiskLevel.MODERATE,
+                    issues=[f"Analysis error: {error_msg}"],
+                )
 
-    def generate_recommendation(self, position: Position) -> Recommendation:
+    def generate_recommendation(self, position: Position, force_refresh: bool = False) -> tuple[Recommendation, datetime]:
         """Generate a trading recommendation using LLM analysis.
 
         Args:
             position: The position to analyze
+            force_refresh: If True, bypass cache and generate new recommendation
 
         Returns:
-            Recommendation with signal, reasoning, and suggested action
+            Tuple of (Recommendation, generated_at timestamp)
 
         Raises:
             Exception: If LLM analysis fails (no fallback to rules)
         """
+        # Check cache first (unless force_refresh)
+        cache = get_recommendation_cache()
+        if not force_refresh:
+            cached_result = cache.get(position)
+            if cached_result:
+                return cached_result
+
         # Gather market context
         market_context = self._gather_market_context(position)
 
         # Build comprehensive prompt
         prompt = self._build_recommendation_prompt(position, market_context)
 
-        # Call Claude API
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        # Call Claude API with error handling
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            # Parse structured response
+            recommendation = self._parse_recommendation_response(position, response.content[0].text)
 
-        # Parse structured response
-        return self._parse_recommendation_response(position, response.content[0].text)
+            # Cache the recommendation
+            cache.set(position, recommendation)
+            generated_at = datetime.now()
+
+            return (recommendation, generated_at)
+        except Exception as e:
+            error_msg = str(e)
+            # Handle specific error types
+            if "content-length" in error_msg.lower() or "too large" in error_msg.lower():
+                rec = Recommendation(
+                    position=position,
+                    signal=Signal.HOLD,
+                    reason="Unable to analyze - request size exceeded",
+                    urgency=1,
+                    suggested_action="Review position manually",
+                )
+                return (rec, datetime.now())
+            else:
+                # Re-raise other exceptions
+                raise
 
     def analyze_portfolio(self, positions: list[Position]) -> dict:
-        """Analyze entire portfolio and return summary using LLM insights.
+        """Analyze entire portfolio and return summary (without generating recommendations).
+
+        Use generate_recommendation() explicitly to get AI recommendations for specific positions.
 
         Args:
             positions: List of positions to analyze
 
         Returns:
-            Dictionary with recommendations, risk summary, and portfolio metrics
+            Dictionary with portfolio metrics (no recommendations)
         """
         if not positions:
             return {
                 "total_positions": 0,
-                "recommendations": [],
-                "risk_summary": {},
                 "total_theta": 0,
                 "total_delta": 0,
             }
 
-        recommendations = []
         risk_counts = {level: 0 for level in RiskLevel}
         total_theta = 0.0
         total_delta = 0.0
 
         for pos in positions:
-            try:
-                rec = self.generate_recommendation(pos)
-                recommendations.append(rec)
+            # Only assess health (no LLM recommendation)
+            health = self.assess_health(pos)
+            risk_counts[health.risk_level] += 1
 
-                health = self.assess_health(pos)
-                risk_counts[health.risk_level] += 1
+            # Calculate portfolio Greeks
+            if pos.greeks:
+                if pos.greeks.theta:
+                    total_theta += pos.greeks.theta * pos.multiplier * abs(pos.quantity)
+                if pos.greeks.delta:
+                    qty = pos.quantity if not pos.is_short else -pos.quantity
+                    total_delta += pos.greeks.delta * pos.multiplier * qty
 
-                # Calculate portfolio Greeks
-                if pos.greeks:
-                    if pos.greeks.theta:
-                        total_theta += pos.greeks.theta * pos.multiplier * abs(pos.quantity)
-                    if pos.greeks.delta:
-                        qty = pos.quantity if not pos.is_short else -pos.quantity
-                        total_delta += pos.greeks.delta * pos.multiplier * qty
-
-            except Exception as e:
-                # Log error but continue processing other positions
-                # Create a placeholder recommendation indicating analysis failure
-                recommendations.append(
-                    Recommendation(
-                        position=pos,
-                        signal=Signal.HOLD,
-                        reason=f"Analysis unavailable: {str(e)}",
-                        urgency=1,
-                        suggested_action="Review position manually",
-                    )
-                )
-
-        # Sort recommendations by urgency
-        recommendations.sort(key=lambda r: r.urgency, reverse=True)
+        cache = get_recommendation_cache()
+        cache_info = cache.get_cache_info()
 
         return {
             "total_positions": len(positions),
-            "recommendations": recommendations,
             "risk_summary": risk_counts,
             "total_theta": total_theta,
             "total_delta": total_delta,
             "critical_count": risk_counts[RiskLevel.CRITICAL],
             "high_risk_count": risk_counts[RiskLevel.HIGH],
+            "cache_info": cache_info,
         }
 
     def _gather_market_context(self, position: Position) -> dict:
@@ -218,120 +241,98 @@ class LLMPositionAnalyzer:
         return context
 
     def _build_health_assessment_prompt(self, position: Position) -> str:
-        """Build prompt for health assessment."""
-        return f"""You are an expert options trading analyst. Assess the health of this position:
+        """Build compact prompt for health assessment."""
+        # Build compact position summary
+        pos_type = f"{'Short ' if position.is_short else 'Long'}{position.option_type if position.is_option else position.position_type}"
 
-## Position Details
-- Symbol: {position.symbol}
-- Underlying: {position.underlying_symbol}
-- Type: {"Short " if position.is_short else "Long"} {position.option_type if position.is_option else position.position_type}
-- Quantity: {position.display_quantity}
+        details = [
+            f"Symbol: {position.symbol}",
+            f"Type: {pos_type}",
+            f"Qty: {position.display_quantity}",
+        ]
 
-{"## Option Details" if position.is_option else "## Equity Details"}
-{"- Strike: ${position.strike_price}" if position.is_option else ""}
-{"- Expiration: {position.expiration_date}" if position.is_option else ""}
-{"- Days to Expiration: {position.days_to_expiration}" if position.is_option else ""}
+        if position.is_option:
+            details.extend([
+                f"Strike: ${position.strike_price}",
+                f"DTE: {position.days_to_expiration}",
+            ])
 
-## Pricing & P/L
-- Open Price: ${position.average_open_price:.2f}
-- Current Price: ${position.mark_price or position.close_price:.2f}
-- Unrealized P/L: ${position.unrealized_pnl:+,.2f} ({position.unrealized_pnl_percent:+.1f}%)
+        details.extend([
+            f"P/L: ${position.unrealized_pnl:+,.2f} ({position.unrealized_pnl_percent:+.1f}%)",
+        ])
 
-{"## Greeks" if position.greeks else ""}
-{"- Delta: {position.greeks.delta:.2f}" if position.greeks and position.greeks.delta else ""}
-{"- Theta: {position.greeks.theta:.3f}" if position.greeks and position.greeks.theta else ""}
-{"- Vega: {position.greeks.vega:.3f}" if position.greeks and position.greeks.vega else ""}
-{"- Implied Volatility: {position.greeks.implied_volatility:.1%}" if position.greeks and position.greeks.implied_volatility else ""}
+        if position.greeks:
+            if position.greeks.delta:
+                details.append(f"Delta: {position.greeks.delta:.2f}")
+            if position.greeks.theta:
+                details.append(f"Theta: {position.greeks.theta:.3f}")
 
-Assess the position health and respond in this exact format:
+        prompt = """Analyze this options position:
 
+{details}
+
+Respond in this format:
 RISK_LEVEL: [LOW/MODERATE/HIGH/CRITICAL]
-ISSUES: [comma-separated list of issues, or "None"]
-OPPORTUNITIES: [comma-separated list of opportunities, or "None"]
+ISSUES: [list or "None"]
+OPPORTUNITIES: [list or "None"]
 DTE_RISK: [true/false]
 PNL_RISK: [true/false]
 DELTA_RISK: [true/false]
-THETA_STATUS: [brief description of theta impact, or "N/A"]
+THETA_STATUS: [description or "N/A"]
 
-Consider:
-- Time decay (theta) and its daily impact on P/L
-- Delta exposure and directional risk
-- Gamma risk for short options
-- Expiration proximity and assignment risk
-- P/L trajectory and trend
-- Intrinsic vs extrinsic value composition"""
+Focus on: theta decay, delta exposure, expiration risk, P/L trend.""".format(details="\n".join(details))
+
+        return prompt
 
     def _build_recommendation_prompt(self, position: Position, market_context: dict) -> str:
-        """Build comprehensive prompt for trading recommendation."""
-        # Format market context
-        iv_info = ""
+        """Build compact prompt for trading recommendation."""
+        # Build compact position summary
+        pos_type = f"{'Short ' if position.is_short else 'Long'}{position.option_type if position.is_option else position.position_type}"
+
+        details = [
+            f"Symbol: {position.symbol}",
+            f"Type: {pos_type}",
+            f"Qty: {position.display_quantity}",
+        ]
+
+        if position.is_option:
+            details.extend([
+                f"Strike: ${position.strike_price}",
+                f"DTE: {position.days_to_expiration}",
+            ])
+
+        details.extend([
+            f"P/L: ${position.unrealized_pnl:+,.2f} ({position.unrealized_pnl_percent:+.1f}%)",
+        ])
+
+        if position.greeks:
+            if position.greeks.delta:
+                details.append(f"Delta: {position.greeks.delta:.2f}")
+            if position.greeks.theta:
+                theta_daily = position.greeks.theta * position.multiplier * abs(position.quantity)
+                details.append(f"Theta: {position.greeks.theta:.3f} (${theta_daily:+.2f}/day)")
+
+        # Market context
         if market_context.get("iv_rank"):
-            iv_info = f"- IV Rank: {market_context['iv_rank']:.0f} "
-            if market_context.get("iv_percentile"):
-                iv_info += f"({market_context['iv_percentile']:.0f}th percentile)"
-
-        distance_info = ""
+            details.append(f"IV Rank: {market_context['iv_rank']:.0f}")
         if market_context.get("distance_to_strike") is not None:
-            distance_info = f"- Distance to Strike: {market_context['distance_to_strike']:+.1f}%"
+            details.append(f"Distance to strike: {market_context['distance_to_strike']:+.1f}%")
 
-        # Calculate theta/vega dollar impact
-        theta_daily = ""
-        if position.greeks and position.greeks.theta and position.is_option:
-            theta_dollars = position.greeks.theta * position.multiplier * abs(position.quantity)
-            theta_daily = f" (${theta_dollars:+.2f}/day)"
+        prompt = """Provide trading recommendation:
 
-        return f"""You are an expert options trader and risk manager. Provide a trading recommendation for this position:
+{details}
 
-## Position Details
-- Symbol: {position.symbol}
-- Underlying: {position.underlying_symbol}
-- Type: {"Short " if position.is_short else "Long"} {position.option_type if position.is_option else position.position_type}
-- Quantity: {position.display_quantity}
+Respond in this format:
+SIGNAL: [HOLD/ROLL/SELL/CLOSE/BUY]
+REASON: [2-3 sentence rationale]
+URGENCY: [1-5]
+SUGGESTED_ACTION: [specific step]
+ALTERNATIVE_ACTIONS: [2-3 alternatives]
 
-{"## Option Details" if position.is_option else "## Equity Details"}
-{"- Strike: ${position.strike_price}" if position.is_option else ""}
-{"- Expiration: {position.expiration_date} ({position.days_to_expiration} DTE)" if position.is_option else ""}
+Consider: theta decay, gamma risk, IV exposure, expiration proximity, P/L trend.
+Prioritize capital preservation.""".format(details="\n".join(details))
 
-## Pricing & P/L
-- Cost Basis: ${position.cost_basis:,.2f}
-- Market Value: ${position.market_value:,.2f}
-- Unrealized P/L: ${position.unrealized_pnl:+,.2f} ({position.unrealized_pnl_percent:+.1f}%)
-
-{"## Greeks" if position.greeks else ""}
-{"- Delta: {position.greeks.delta:.2f}" if position.greeks and position.greeks.delta else ""}
-{"- Gamma: {position.greeks.gamma:.3f}" if position.greeks and position.greeks.gamma else ""}
-{"- Theta: {position.greeks.theta:.3f}{theta_daily}" if position.greeks and position.greeks.theta else ""}
-{"- Vega: {position.greeks.vega:.3f}" if position.greeks and position.greeks.vega else ""}
-{"- Implied Volatility: {position.greeks.implied_volatility:.1%}" if position.greeks and position.greeks.implied_volatility else ""}
-
-## Value Breakdown
-{"- Intrinsic Value: ${position.intrinsic_value:.2f}" if position.intrinsic_value else ""}
-{"- Extrinsic Value: ${position.extrinsic_value:.2f}" if position.extrinsic_value else ""}
-
-## Market Context
-- Underlying Price: ${market_context['underlying_price']:.2f}
-{iv_info}
-{distance_info}
-
-Provide your recommendation in this exact format:
-
-SIGNAL: [HOLD/ROLL/SELL/CLOSE/BUY/STRONG_BUY/STRONG_SELL]
-REASON: [2-3 sentence explanation of the rationale]
-URGENCY: [1-5, where 1=low priority, 5=critical/immediate action needed]
-SUGGESTED_ACTION: [specific actionable step, e.g., "Roll to 45 DTE", "Close 50% of position"]
-ALTERNATIVE_ACTIONS: [2-3 alternative strategies to consider]
-
-Consider:
-- Theta decay and time value erosion
-- Gamma risk and delta acceleration
-- IV exposure and vega risk
-- Expiration proximity and assignment probability
-- P/L momentum and trend
-- Portfolio correlation (if part of spread)
-- Market volatility regime (IV rank context)
-- Risk/reward ratio for holding vs closing/rolling
-
-Be decisive but prudent. Prioritize capital preservation over profit maximization."""
+        return prompt
 
     def _parse_health_response(self, position: Position, response_text: str) -> PositionHealth:
         """Parse LLM response into PositionHealth object."""

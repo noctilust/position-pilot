@@ -18,6 +18,10 @@ from .llm_signals import (
     LLMPositionAnalyzer,
     get_llm_analyzer,
 )
+from .recommendation_cache import (
+    RecommendationCache,
+    get_recommendation_cache,
+)
 from .strategies import (
     StrategyType,
     StrategyGroup,
@@ -38,6 +42,8 @@ __all__ = [
     "get_position_analyzer",
     "LLMPositionAnalyzer",
     "get_llm_analyzer",
+    "RecommendationCache",
+    "get_recommendation_cache",
     "StrategyType",
     "StrategyGroup",
     "StrategyDetector",

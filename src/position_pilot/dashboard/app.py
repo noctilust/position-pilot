@@ -24,7 +24,7 @@ from rich.table import Table
 from ..client import get_client
 from ..config import get_default_account, get_watchlist
 from ..models import Account, Position
-from ..analysis import get_llm_analyzer, get_analyzer, RiskLevel, detect_strategies, StrategyGroup
+from ..analysis import get_analyzer, RiskLevel, detect_strategies, StrategyGroup, get_llm_analyzer
 
 
 class AccountPanel(Static):
@@ -184,7 +184,7 @@ class PositionsTable(DataTable):
         self.z_stripes = True
 
         # Set up initial columns
-        self.add_columns("Strategy", "Qty", "Strikes", "DTE", "P/L", "P/L %", "Delta", "Extrinsic", "Intrinsic")
+        self.add_columns("Position", "Price", "Qty", "Strikes", "DTE", "P/L", "P/L %", "Delta", "Extrinsic", "Intrinsic")
 
     def set_positions(self, positions: list[Position]) -> None:
         """Set positions and trigger table update via reactive system."""
@@ -199,9 +199,9 @@ class PositionsTable(DataTable):
         self.clear(columns=True)
 
         if self.show_strategies:
-            self.add_columns("Strategy", "Qty", "Strikes", "DTE", "P/L", "P/L %", "Delta", "Extrinsic", "Intrinsic")
+            self.add_columns("Position", "Price", "Qty", "Strikes", "DTE", "P/L", "P/L %", "Delta", "Extrinsic", "Intrinsic")
         else:
-            self.add_columns("Symbol", "Qty", "DTE", "Price", "P/L", "P/L %", "Delta", "Extrinsic", "Intrinsic")
+            self.add_columns("Symbol", "Price", "Qty", "DTE", "P/L", "P/L %", "Delta", "Extrinsic", "Intrinsic")
 
         self._populate_table()
 
@@ -219,10 +219,17 @@ class PositionsTable(DataTable):
         if not self.positions:
             return
 
-        if self.show_strategies:
-            self._populate_strategies()
-        else:
-            self._populate_positions()
+        try:
+            if self.show_strategies:
+                self._populate_strategies()
+            else:
+                self._populate_positions()
+        except Exception as e:
+            import sys
+            import traceback
+            sys.stderr.write(f"ERROR in _populate_table: {e}\n")
+            traceback.print_exc(file=sys.stderr)
+            sys.stderr.flush()
 
     def _populate_strategies(self) -> None:
         """Populate table with strategies, grouped by symbol."""
@@ -246,6 +253,7 @@ class PositionsTable(DataTable):
             self.add_row(
                 Text(f" {symbol}", style="bold magenta"),
                 "",
+                "",
                 Text(f"{len(symbol_strategies)} strategies", style="dim"),
                 "",
                 Text(f"${total_pnl:+,.2f}", style=f"bold {pnl_style}"),
@@ -268,6 +276,9 @@ class PositionsTable(DataTable):
                 # Expand/collapse indicator
                 indicator = "▼" if is_expanded else "▶"
                 name = Text(f"  {indicator} {strat.strategy_type.value}", style="")
+
+                # For multi-leg strategies, don't show a single price (each leg has its own price)
+                price_str = "-"
 
                 strikes_display = strat.strikes_display or "-"
                 qty = str(strat.total_quantity)
@@ -312,7 +323,7 @@ class PositionsTable(DataTable):
                 else:
                     intrinsic_str = "-"
 
-                self.add_row(name, qty, strikes_display, dte, pnl, pnl_pct, delta, extrinsic_str, intrinsic_str)
+                self.add_row(name, price_str, qty, strikes_display, dte, pnl, pnl_pct, delta, extrinsic_str, intrinsic_str)
 
                 # Track row index for this strategy (current row count after adding)
                 row_index = len(self.rows) - 1
@@ -361,20 +372,21 @@ class PositionsTable(DataTable):
                             pos_intrinsic = f"${pos.intrinsic_value:.2f}"
 
                         self.add_row(
-                            Text(pos_symbol, style="dim"),
-                            pos_qty,
+                            Text(pos_symbol, style="dim"),  # Strategy
+                            pos_price_str,  # Price
+                            pos_qty,  # Qty
                             "",  # Empty for strikes column
-                            pos_dte,
-                            pos_price_str,
-                            pos_pnl,
-                            Text(pos_delta if pos_delta != "-" else "", style="dim"),
-                            Text(pos_extrinsic if pos_extrinsic != "-" else "", style="dim"),
-                            Text(pos_intrinsic if pos_intrinsic != "-" else "", style="dim"),
+                            pos_dte,  # DTE
+                            pos_pnl,  # P/L
+                            pos_pnl_pct,  # P/L %
+                            Text(pos_delta if pos_delta != "-" else "", style="dim"),  # Delta
+                            Text(pos_extrinsic if pos_extrinsic != "-" else "", style="dim"),  # Extrinsic
+                            Text(pos_intrinsic if pos_intrinsic != "-" else "", style="dim"),  # Intrinsic
                         )
 
             # Add blank row after each symbol group (except last)
             if i < len(sorted_symbols) - 1:
-                self.add_row("", "", "", "", "", "", "", "", "")
+                self.add_row("", "", "", "", "", "", "", "", "", "")
 
     def _populate_positions(self) -> None:
         """Populate table with individual positions."""
@@ -416,52 +428,67 @@ class PositionsTable(DataTable):
             if pos.intrinsic_value is not None:
                 intrinsic = f"${pos.intrinsic_value:.2f}"
 
-            self.add_row(symbol, qty, dte, price_str, pnl, pnl_pct, delta, extrinsic, intrinsic)
+            self.add_row(symbol, price_str, qty, dte, pnl, pnl_pct, delta, extrinsic, intrinsic)
 
 
 class RecommendationsPanel(Static):
-    """Displays trading recommendations."""
+    """Displays trading recommendations (on-demand with timestamps)."""
 
-    recommendations: reactive[list] = reactive(list)
+    recommendation: reactive[tuple[object, datetime]] = reactive((None, None))  # (Recommendation, timestamp)
 
     def render(self) -> Panel:
-        if not self.recommendations:
-            return Panel("[dim]No recommendations[/dim]", title="Recommendations", border_style="yellow")
+        rec, generated_at = self.recommendation
 
-        lines = []
-        for rec in self.recommendations[:5]:  # Show top 5
-            # Signal emoji
-            signal_icons = {
-                "strong_buy": "🟢",
-                "buy": "🟢",
-                "hold": "🟡",
-                "sell": "🟠",
-                "strong_sell": "🔴",
-                "roll": "🔄",
-                "close": "❌",
-            }
-            icon = signal_icons.get(rec.signal.value, "⚪")
+        if not rec:
+            return Panel(
+                "[dim]Press 'a' on a strategy row to generate AI recommendation[/dim]",
+                title="AI Recommendation",
+                border_style="yellow"
+            )
 
-            # Format position name
-            pos = rec.position
-            if pos.is_option:
-                exp = pos.expiration_date.strftime("%m/%d") if pos.expiration_date else "?"
-                strike = f"${pos.strike_price:.0f}" if pos.strike_price else "?"
-                name = f"{pos.underlying_symbol} {exp} {strike}"
-            else:
-                name = pos.symbol
+        # Signal emoji
+        signal_icons = {
+            "strong_buy": "🟢",
+            "buy": "🟢",
+            "hold": "🟡",
+            "sell": "🟠",
+            "strong_sell": "🔴",
+            "roll": "🔄",
+            "close": "❌",
+        }
+        icon = signal_icons.get(rec.signal.value, "⚪")
 
-            # Urgency indicator
-            urgency = "!" * min(rec.urgency, 3)
+        # Format position name
+        pos = rec.position
+        if pos.is_option:
+            exp = pos.expiration_date.strftime("%m/%d") if pos.expiration_date else "?"
+            strike = f"${pos.strike_price:.0f}" if pos.strike_price else "?"
+            name = f"{pos.underlying_symbol} {exp} {strike}"
+        else:
+            name = pos.symbol
 
-            lines.append(f"{icon} [bold]{name}[/bold] {urgency}")
-            lines.append(f"   {rec.reason}")
-            if rec.suggested_action:
-                lines.append(f"   [dim]→ {rec.suggested_action}[/dim]")
-            lines.append("")
+        # Urgency indicator
+        urgency = "!" * min(rec.urgency, 3)
 
-        content = "\n".join(lines) if lines else "[dim]All positions healthy[/dim]"
-        return Panel(content, title="Recommendations", border_style="yellow")
+        # Format timestamp
+        if generated_at:
+            time_str = generated_at.strftime("%H:%M:%S")
+            date_str = generated_at.strftime("%Y-%m-%d") if generated_at.date() != datetime.now().date() else "Today"
+            timestamp_str = f"[dim]Generated: {date_str} at {time_str}[/dim]"
+        else:
+            timestamp_str = "[dim]Recently generated[/dim]"
+
+        lines = [
+            f"{icon} [bold]{name}[/bold] {urgency}",
+            f"   {rec.reason}",
+            timestamp_str,
+        ]
+
+        if rec.suggested_action:
+            lines.append(f"   [dim]→ {rec.suggested_action}[/dim]")
+
+        content = "\n".join(lines)
+        return Panel(content, title="AI Recommendation", border_style="yellow")
 
 
 class MarketPanel(Static):
@@ -608,7 +635,6 @@ class PilotDashboard(App):
     #status-bar {
         column-span: 2;
         height: 1;
-        dock: bottom;
         padding: 0 1;
     }
 
@@ -620,22 +646,23 @@ class PilotDashboard(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
-        Binding("a", "analyze", "Analyze"),
         Binding("g", "toggle_group", "Group"),
-        Binding("s", "toggle_stocks", "Hide/Show Stocks"),
-        Binding("f", "toggle_financials", "Hide/Show $"),
-        Binding("enter", "toggle_expand", "Expand/Collapse", show=False),
+        Binding("s", "toggle_stocks", "Stocks"),
+        Binding("f", "toggle_financials", "Financials"),
         Binding("c", "toggle_all_strategies", "Collapse All"),
+        Binding("enter", "toggle_expand", "Expand", show=False),
+        Binding("a", "analyze", "AI Rec"),
     ]
 
     def __init__(self):
         super().__init__()
         self.client = get_client()
-        self.analyzer = get_llm_analyzer()  # Use LLM analyzer
         self.market_analyzer = get_analyzer()
         self.account: Account | None = None
         self.watchlist = get_watchlist()
         self.show_stocks = True  # Toggle for showing/hiding stock positions
+        # Lazy initialize LLM analyzer (only when 'a' is pressed)
+        self._analyzer = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -667,6 +694,7 @@ class PilotDashboard(App):
         try:
             # Fetch accounts
             accounts = self.client.get_accounts()
+
             if accounts:
                 # Use default account from config, or fall back to first
                 default_account_num = get_default_account()
@@ -702,19 +730,28 @@ class PilotDashboard(App):
                 filtered_positions = positions if self.show_stocks else [p for p in positions if p.is_option]
                 positions_widget.set_positions(filtered_positions)
 
-                # Analyze portfolio
-                analysis = self.analyzer.analyze_portfolio(positions)
+                # Calculate portfolio metrics directly (no LLM calls on initial load)
+                total_theta = 0.0
+                total_delta = 0.0
+                for pos in positions:
+                    if pos.greeks:
+                        if pos.greeks.theta:
+                            total_theta += pos.greeks.theta * pos.multiplier * abs(pos.quantity)
+                        if pos.greeks.delta:
+                            qty = pos.quantity if not pos.is_short else -pos.quantity
+                            total_delta += pos.greeks.delta * pos.multiplier * qty
 
                 # Update portfolio summary
                 portfolio = self.query_one(PortfolioSummary)
                 portfolio.total_pnl = sum(p.unrealized_pnl for p in positions)
-                portfolio.total_theta = analysis["total_theta"]
-                portfolio.total_delta = analysis["total_delta"]
-                portfolio.risk_summary = analysis["risk_summary"]
+                portfolio.total_theta = total_theta
+                portfolio.total_delta = total_delta
+                portfolio.risk_summary = {}  # Empty until user requests analysis
 
-                # Update recommendations
+                # Note: AI recommendations are now on-demand (press 'a' on a strategy row)
+                # Initialize empty recommendations panel
                 recs_panel = self.query_one(RecommendationsPanel)
-                recs_panel.recommendations = analysis["recommendations"]
+                recs_panel.recommendation = (None, None)
 
             # Fetch market data
             market_data = {}
@@ -729,6 +766,11 @@ class PilotDashboard(App):
             market_panel = self.query_one(MarketPanel)
             market_panel.data = market_data
 
+        except Exception as e:
+            # Log error but don't crash the dashboard
+            import sys
+            import traceback
+            traceback.print_exc(file=sys.stderr)
         finally:
             status.loading = False
             status.last_update = datetime.now()
@@ -738,8 +780,55 @@ class PilotDashboard(App):
         self.load_data(force_refresh=True)
 
     def action_analyze(self) -> None:
-        """Run full analysis."""
-        self.load_data(force_refresh=True)
+        """Generate AI recommendation for selected strategy/position."""
+        positions_widget = self.query_one(PositionsTable)
+        cursor_row = positions_widget.cursor_row
+
+        # Get recommendations panel
+        recs_panel = self.query_one(RecommendationsPanel)
+
+        if cursor_row < 0:
+            # No row selected
+            recs_panel.recommendation = (None, None)
+            return
+
+        # Check if a strategy row is selected
+        if cursor_row in positions_widget._row_to_strategy:
+            symbol, strategy = positions_widget._row_to_strategy[cursor_row]
+
+            # Generate recommendation for this strategy (use first position)
+            if not strategy.positions:
+                recs_panel.recommendation = (None, None)
+                return
+
+            # Lazy initialize LLM analyzer if needed
+            if self._analyzer is None:
+                self._analyzer = get_llm_analyzer()
+
+            # Show loading status
+            status = self.query_one(StatusBar)
+            status.loading = True
+
+            try:
+                rec, generated_at = self._analyzer.generate_recommendation(strategy.positions[0])
+                # Update recommendations panel
+                recs_panel.recommendation = (rec, generated_at)
+                # Explicitly refresh the panel
+                recs_panel.refresh()
+            except Exception as e:
+                import sys
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+                # On error, show empty panel
+                recs_panel.recommendation = (None, None)
+                recs_panel.refresh()
+            finally:
+                status.loading = False
+                status.last_update = datetime.now()
+        else:
+            # Individual position row - not implemented yet
+            recs_panel.recommendation = (None, None)
+            recs_panel.refresh()
 
     def action_toggle_group(self) -> None:
         """Toggle between strategies and positions view."""
