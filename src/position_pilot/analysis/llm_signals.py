@@ -266,8 +266,10 @@ class LLMPositionAnalyzer:
             if position.greeks.delta:
                 adjusted_delta = -position.greeks.delta if position.is_short else position.greeks.delta
                 details.append(f"Delta: {adjusted_delta:.2f}")
+            # Adjust theta for short positions (positive theta = gains from time decay)
             if position.greeks.theta:
-                details.append(f"Theta: {position.greeks.theta:.3f}")
+                adjusted_theta = -position.greeks.theta if position.is_short else position.greeks.theta
+                details.append(f"Theta: {adjusted_theta:.3f}")
 
         prompt = """Analyze this options position:
 
@@ -312,9 +314,11 @@ Focus on: theta decay, delta exposure, expiration risk, P/L trend.""".format(det
             if position.greeks.delta:
                 adjusted_delta = -position.greeks.delta if position.is_short else position.greeks.delta
                 details.append(f"Delta: {adjusted_delta:.2f}")
+            # Adjust theta for short positions (positive theta = gains from time decay)
             if position.greeks.theta:
-                theta_daily = position.greeks.theta * position.multiplier * abs(position.quantity)
-                details.append(f"Theta: {position.greeks.theta:.3f} (${theta_daily:+.2f}/day)")
+                adjusted_theta = -position.greeks.theta if position.is_short else position.greeks.theta
+                theta_daily = adjusted_theta * position.multiplier * abs(position.quantity)
+                details.append(f"Theta: {adjusted_theta:.3f} (${theta_daily:+.2f}/day)")
 
         # Market context
         if market_context.get("iv_rank"):
