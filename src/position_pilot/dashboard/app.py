@@ -303,7 +303,7 @@ class PositionsTable(DataTable):
                 if strat.unrealized_pnl_percent is not None:
                     pnl_pct = Text(f"{strat.unrealized_pnl_percent:+.1f}%", style=pnl_style)
 
-                delta = f"{strat.total_delta:.0f}" if strat.total_delta else "-"
+                delta = f"{strat.total_delta:.2f}" if strat.total_delta else "-"
 
                 # Calculate average extrinsic value per contract for strategy
                 # For multi-leg strategies, show weighted average based on quantity
@@ -342,7 +342,12 @@ class PositionsTable(DataTable):
 
                 # Show legs if expanded
                 if is_expanded:
-                    for pos in strat.positions:
+                    # Sort positions: calls first, then puts
+                    sorted_positions = sorted(
+                        strat.positions,
+                        key=lambda p: 0 if p.option_type == "C" else 1
+                    )
+                    for pos in sorted_positions:
                         # Format position as a leg
                         if pos.is_option:
                             exp = pos.expiration_date.strftime("%m/%d") if pos.expiration_date else "?"
