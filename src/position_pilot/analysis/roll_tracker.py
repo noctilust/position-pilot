@@ -1,4 +1,15 @@
-"""Roll detection and tracking from transaction history."""
+"""Roll detection and tracking from transaction history.
+
+This module uses an order-based approach to detect roll operations for multi-leg
+strategies like short strangles, iron condors, and vertical spreads.
+
+Algorithm:
+1. Group transactions by order-id to handle multi-leg orders
+2. Use the action field to classify legs as opening or closing
+3. Detect single orders with both closing and opening legs (roll orders)
+4. Match closing legs with opening legs within the same order
+5. Build roll chains from matched leg pairs
+"""
 
 import logging
 from datetime import datetime, timedelta
@@ -7,6 +18,7 @@ from typing import Optional
 from ..models.position import Position
 from ..models.roll import RollEvent, RollChain
 from ..models.transaction import Transaction, TransactionType
+from .strategies import StrategyType
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +52,6 @@ class RollTracker:
         """
         # Handle empty transaction list
         if not transactions:
-            logger.debug("No transactions provided for roll detection")
             return []
 
         # Filter to only order-fill transactions with error handling
@@ -51,8 +62,9 @@ class RollTracker:
             return []
 
         if not order_fills:
-            logger.debug("No order-fill transactions found")
             return []
+
+        logger.info(f"Analyzing {len(order_fills)} order-fill transactions for rolls")
 
         # Group by underlying symbol with error handling
         try:
@@ -100,89 +112,156 @@ class RollTracker:
         current_positions: list[Position],
         account_number: str
     ) -> list[RollChain]:
-        """Detect roll operations for a single underlying.
+        """Detect roll operations for a single underlying using order-level matching.
 
-        A roll is detected when:
-        1. Same underlying symbol
-        2. Opposite position directions (closing then opening)
-        3. Same strategy type (e.g., closing put spread, opening new put spread)
-        4. Within time window
-        5. Similar quantity (allowing for partial rolls)
+        Algorithm:
+        1. Group transactions by order-id
+        2. For each order, classify legs as closing or opening based on action field
+        3. Detect single orders with both closing and opening legs (roll orders)
+        4. Match closing legs with opening legs within the same order
+        5. Build roll chains from matched leg pairs
         """
         # Sort by date
         fills.sort(key=lambda t: t.transaction_date)
 
-        # Group potential roll pairs (close followed by open)
-        roll_candidates = []
+        # Group by order-id
+        order_groups = self._group_by_order_id(fills)
 
-        for i, close_tx in enumerate(fills):
-            # Look for opening transaction after this close
-            for open_tx in fills[i + 1:]:
-                # Check time window
-                time_diff = open_tx.transaction_date - close_tx.transaction_date
-                if time_diff > self.time_window:
-                    break  # Too far apart, stop looking
+        # Detect roll orders (single orders with both close and open legs)
+        roll_orders = []
 
-                # Check if this looks like a roll pair
-                if self._is_roll_pair(close_tx, open_tx):
-                    roll_candidates.append((close_tx, open_tx))
+        for order_id, transactions in order_groups.items():
+            # Classify legs as closing or opening based on action field
+            closing_legs, opening_legs = self._classify_order_legs(transactions)
 
-        # Build roll chains from candidates
-        chains = self._build_roll_chains(roll_candidates, account_number)
+            # Only consider orders with both closing and opening legs as roll orders
+            if closing_legs and opening_legs:
+                roll_orders.append((order_id, closing_legs, opening_legs))
 
-        return chains
+        # Build roll chains from roll orders
+        return self._build_roll_chains_from_roll_orders(roll_orders, account_number)
 
-    def _is_roll_pair(self, close_tx: Transaction, open_tx: Transaction) -> bool:
-        """Check if two transactions form a roll pair.
+    def _group_by_order_id(self, transactions: list[Transaction]) -> dict[str, list[Transaction]]:
+        """Group transactions by order-id."""
+        groups = {}
+        for tx in transactions:
+            order_id = tx.order_id or f"no-order-{tx.transaction_id}"
+            if order_id not in groups:
+                groups[order_id] = []
+            groups[order_id].append(tx)
+        return groups
 
-        A roll pair has:
-        - Same underlying
-        - Opposite directions (one closing, one opening)
-        - Similar option type (both calls or both puts)
-        - Similar quantities
+    def _classify_order_legs(self, transactions: list[Transaction]) -> tuple[list[Transaction], list[Transaction]]:
+        """Classify order legs as closing or opening based on action field.
+
+        Uses the action field from Tastytrade API:
+        - Closing legs: "Buy to Close", "Sell to Close"
+        - Opening legs: "Buy to Open", "Sell to Open"
+
+        Returns:
+            Tuple of (closing_legs, opening_legs)
         """
-        try:
-            # Validate both transactions have symbols
-            if not close_tx.symbol or not open_tx.symbol:
-                return False
+        closing_legs = []
+        opening_legs = []
 
-            # Extract underlying symbols
-            close_underlying = self._extract_underlying(close_tx.symbol)
-            open_underlying = self._extract_underlying(open_tx.symbol)
+        for tx in transactions:
+            action = (tx.action or "").lower()
 
-            if close_underlying != open_underlying:
-                return False
+            # Classify based on action field
+            if "close" in action:
+                closing_legs.append(tx)
+            elif "open" in action:
+                opening_legs.append(tx)
+            else:
+                # Fallback: use quantity sign (positive = sell/open, negative = buy/close)
+                # This is less reliable than the action field
+                if tx.quantity and tx.quantity < 0:
+                    closing_legs.append(tx)
+                elif tx.quantity and tx.quantity > 0:
+                    opening_legs.append(tx)
 
-            # Check option type
-            close_opt = self._get_option_type(close_tx.symbol)
-            open_opt = self._get_option_type(open_tx.symbol)
+        return closing_legs, opening_legs
 
-            # Both must be same type (both calls or both puts)
-            if close_opt != open_opt or close_opt is None:
-                return False
+    def _build_roll_chains_from_roll_orders(
+        self,
+        roll_orders: list[tuple[str, list[Transaction], list[Transaction]]],
+        account_number: str
+    ) -> list[RollChain]:
+        """Build roll chains from roll orders.
 
-            # Check quantities (allow for partial rolls, within 20%)
-            if close_tx.quantity and open_tx.quantity:
-                # Avoid division by zero
-                if close_tx.quantity == 0:
-                    logger.debug(f"Close quantity is zero for {close_tx.symbol}")
-                    return False
+        Each roll order contains both closing and opening legs.
+        We match closing legs with opening legs by option type (call/put).
 
-                qty_ratio = abs(open_tx.quantity / close_tx.quantity)
-                if not 0.8 <= qty_ratio <= 1.2:
-                    return False
+        Args:
+            roll_orders: List of (order_id, closing_legs, opening_legs) tuples
+            account_number: Account number
 
-            # Check opposite directions via transaction amounts
-            # Closing: positive amount (credit received), Opening: negative amount (debit paid)
-            # Or vice versa depending on position direction
-            if close_tx.amount and open_tx.amount:
-                # One should be opposite sign of the other
-                return (close_tx.amount > 0 and open_tx.amount < 0) or (close_tx.amount < 0 and open_tx.amount > 0)
+        Returns:
+            List of RollChain objects
+        """
+        chains_by_underlying = {}
 
-            return False
-        except Exception as e:
-            logger.debug(f"Error checking roll pair: {e}")
-            return False
+        for order_id, close_legs, open_legs in roll_orders:
+            # Get underlying from first closing leg
+            underlying = self._extract_underlying(close_legs[0].symbol) if close_legs else None
+
+            if not underlying:
+                logger.warning(f"Could not extract underlying from roll order {order_id}")
+                continue
+
+            # Create new chain if needed
+            if underlying not in chains_by_underlying:
+                # Infer strategy type from legs
+                opt_types = set()
+                for tx in close_legs:
+                    if tx.symbol:
+                        opt_type = self._get_option_type(tx.symbol)
+                        if opt_type:
+                            opt_types.add(opt_type)
+
+                strategy_type = self._infer_strategy_type_from_option_types(opt_types)
+
+                chains_by_underlying[underlying] = RollChain(
+                    underlying=underlying,
+                    strategy_type=strategy_type,
+                    account_number=account_number,
+                    original_open_date=close_legs[0].transaction_date
+                )
+
+            # Create roll events by matching close and open legs
+            # Group by option type for matching
+            close_by_type = self._group_by_option_type(close_legs)
+            open_by_type = self._group_by_option_type(open_legs)
+
+            for opt_type in ("C", "P"):
+                close_type_legs = close_by_type.get(opt_type, [])
+                open_type_legs = open_by_type.get(opt_type, [])
+
+                if not close_type_legs or not open_type_legs:
+                    continue
+
+                # Match close legs with open legs (should be 1-to-1 or close)
+                min_legs = min(len(close_type_legs), len(open_type_legs))
+                for i in range(min_legs):
+                    close_tx = close_type_legs[i]
+                    open_tx = open_type_legs[i]
+                    roll = self._create_roll_event(close_tx, open_tx, account_number)
+                    chains_by_underlying[underlying].add_roll(roll)
+
+        return list(chains_by_underlying.values())
+
+    def _group_by_option_type(self, transactions: list[Transaction]) -> dict[str, list[Transaction]]:
+        """Group transactions by option type (call/put)."""
+        groups: dict[str, list[Transaction]] = {"C": [], "P": []}
+
+        for tx in transactions:
+            if not tx.symbol:
+                continue
+            opt_type = self._get_option_type(tx.symbol)
+            if opt_type in groups:
+                groups[opt_type].append(tx)
+
+        return groups
 
     def _get_option_type(self, symbol: str) -> Optional[str]:
         """Extract option type (C/P) from OCC symbol."""
@@ -193,47 +272,44 @@ class RollTracker:
                 return opt_char
         return None
 
-    def _build_roll_chains(
-        self,
-        roll_pairs: list[tuple[Transaction, Transaction]],
-        account_number: str
-    ) -> list[RollChain]:
-        """Build roll chains from detected roll pairs."""
-        # For now, create a simple chain per underlying
-        # In the future, this could link rolls together based on continuation
+    def _infer_strategy_type_from_option_types(self, opt_types: set[str]) -> str:
+        """Infer strategy type from option types present.
 
-        chains_by_underlying = {}
+        Args:
+            opt_types: Set of option types ("C" and/or "P")
 
-        for close_tx, open_tx in roll_pairs:
-            underlying = self._extract_underlying(close_tx.symbol)
-
-            if underlying not in chains_by_underlying:
-                chains_by_underlying[underlying] = RollChain(
-                    underlying=underlying,
-                    strategy_type=self._infer_strategy_type(close_tx, open_tx),
-                    account_number=account_number,
-                    original_open_date=close_tx.transaction_date
-                )
-
-            # Create roll event
-            roll = self._create_roll_event(close_tx, open_tx, account_number)
-            chains_by_underlying[underlying].add_roll(roll)
-
-        return list(chains_by_underlying.values())
+        Returns:
+            Strategy type string
+        """
+        # Multi-leg strategies with both calls and puts
+        if opt_types == {"C", "P"}:
+            # Has both calls and puts - default to short strangle
+            # Could be: strangle, straddle, iron condor, etc.
+            return StrategyType.SHORT_STRANGLE.value
+        elif "P" in opt_types:
+            return StrategyType.BULL_PUT_SPREAD.value
+        elif "C" in opt_types:
+            return StrategyType.BEAR_CALL_SPREAD.value
+        else:
+            return StrategyType.CUSTOM.value
 
     def _infer_strategy_type(self, close_tx: Transaction, open_tx: Transaction) -> str:
-        """Infer the strategy type from the transactions."""
-        # For now, simple inference based on option type
-        # In the future, could analyze multi-leg orders
+        """Infer the strategy type from the transactions.
+
+        Uses StrategyType enum values for consistency with the dashboard.
+        For put spreads, defaults to Bull Put Spread (most common rolling strategy).
+        For call spreads, defaults to Bear Call Spread (most common rolling strategy).
+
+        DEPRECATED: Use _infer_strategy_type_from_option_types instead.
+        """
         close_opt = self._get_option_type(close_tx.symbol)
-        open_opt = self._get_option_type(open_tx.symbol)
 
         if close_opt == "P":
-            return "put_spread"
+            return StrategyType.BULL_PUT_SPREAD.value
         elif close_opt == "C":
-            return "call_spread"
+            return StrategyType.BEAR_CALL_SPREAD.value
         else:
-            return "unknown"
+            return StrategyType.CUSTOM.value
 
     def _create_roll_event(
         self,
@@ -265,7 +341,6 @@ class RollTracker:
                     if close_dte < 0:
                         close_dte = 0  # Expired
                 except Exception as e:
-                    logger.debug(f"Error calculating close DTE: {e}")
                     close_dte = 0
 
             if open_exp:
@@ -274,7 +349,6 @@ class RollTracker:
                     if open_dte < 0:
                         open_dte = 0  # Expired
                 except Exception as e:
-                    logger.debug(f"Error calculating open DTE: {e}")
                     open_dte = 0
 
             # Generate roll ID with validation
@@ -294,8 +368,13 @@ class RollTracker:
             open_qty = abs(open_tx.quantity) if open_tx.quantity and open_tx.quantity != 0 else 1.0
 
             # Safely extract amounts with defaults
+            # P/L from closing old position (positive = profit)
             roll_pnl = close_tx.amount if close_tx.amount is not None else 0.0
-            premium_effect = open_tx.amount if open_tx.amount is not None else 0.0
+
+            # Net premium effect: opening premium - closing cost
+            # For credit spreads: opening > closing (positive net credit)
+            # For debit spreads: opening < closing (negative net debit)
+            premium_effect = (open_tx.amount if open_tx.amount is not None else 0.0) - (close_tx.amount if close_tx.amount is not None else 0.0)
 
             # Safely extract commissions with defaults
             close_commission = close_tx.commission if close_tx.commission is not None else 0.0
@@ -348,7 +427,6 @@ class RollTracker:
         """Extract strike price from OCC option symbol."""
         try:
             if not symbol or len(symbol) < 15:
-                logger.debug(f"Invalid symbol format for strike extraction: {symbol}")
                 return 0.0
 
             # OCC format: SYMBOL(6) + YYMMDD(6) + C/P(1) + STRIKE*1000(8)
@@ -356,19 +434,16 @@ class RollTracker:
 
             # Validate strike string is numeric
             if not strike_str.isdigit():
-                logger.debug(f"Strike value is not numeric: {strike_str}")
                 return 0.0
 
             strike = int(strike_str) / 1000.0
 
             # Validate strike is reasonable (between 0 and 100,000)
             if strike <= 0 or strike > 100000:
-                logger.debug(f"Strike value out of reasonable range: {strike}")
                 return 0.0
 
             return float(strike)
         except (ValueError, IndexError, AttributeError) as e:
-            logger.debug(f"Error extracting strike from {symbol}: {e}")
             return 0.0
         except Exception as e:
             logger.error(f"Unexpected error extracting strike from {symbol}: {e}")
@@ -378,26 +453,22 @@ class RollTracker:
         """Extract expiration date from OCC option symbol."""
         try:
             if not symbol or len(symbol) < 15:
-                logger.debug(f"Invalid symbol format for expiration extraction: {symbol}")
                 return None
 
             exp_str = symbol[-15:-9]  # YYMMDD
 
             # Validate expiration string format
             if not exp_str.isdigit():
-                logger.debug(f"Expiration value is not numeric: {exp_str}")
                 return None
 
             exp_date = datetime.strptime(exp_str, "%y%m%d")
 
             # Validate expiration is reasonable (between 1900 and 2100)
             if exp_date.year < 1900 or exp_date.year > 2100:
-                logger.debug(f"Expiration year out of reasonable range: {exp_date.year}")
                 return None
 
             return exp_date
         except (ValueError, IndexError, AttributeError) as e:
-            logger.debug(f"Error extracting expiration from {symbol}: {e}")
             return None
         except Exception as e:
             logger.error(f"Unexpected error extracting expiration from {symbol}: {e}")

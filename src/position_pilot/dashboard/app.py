@@ -1,5 +1,7 @@
 """Interactive Textual dashboard for Position Pilot."""
 
+import logging
+import sys
 from datetime import datetime
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
@@ -26,8 +28,11 @@ from ..config import get_default_account, get_watchlist
 from ..models import Account, Position
 from ..analysis import get_analyzer, RiskLevel, detect_strategies, StrategyGroup, get_llm_analyzer
 from ..analysis.roll_history import get_roll_history
-from ..analysis.roll_analytics import analyze_patterns, format_roll_summary, format_patterns_summary
+from ..analysis.roll_analytics import analyze_patterns, format_roll_summary, format_patterns_summary, group_rolls_by_timestamp
 from ..models.roll import RollChain
+
+logger = logging.getLogger(__name__)
+
 from .widgets import OptionChainHeatmap
 
 
@@ -554,6 +559,14 @@ class RollHistoryPanel(Static):
     roll_chain: reactive[RollChain | None] = reactive(None)
     current_pnl: reactive[float | None] = reactive(None)
 
+    def watch_roll_chain(self, old_chain: RollChain | None, new_chain: RollChain | None) -> None:
+        """Called when roll_chain changes."""
+        self.refresh()
+
+    def watch_current_pnl(self, old_pnl: float | None, new_pnl: float | None) -> None:
+        """Called when current_pnl changes."""
+        self.refresh()
+
     def render(self) -> Panel:
         if not self.roll_chain or self.roll_chain.roll_count == 0:
             return Panel(
@@ -580,21 +593,57 @@ class RollHistoryPanel(Static):
             pnl_style = "green" if self.current_pnl >= 0 else "red"
             lines.append(f"P/L Open: [{pnl_style}]${self.current_pnl:+,.2f}[/{pnl_style}]")
 
-        # Roll history
+        # Roll history - group multi-leg strategy rolls
         if self.roll_chain.rolls:
             lines.append("\n[bold]Roll History:[/bold]")
-            for i, roll in enumerate(self.roll_chain.rolls[-5:], 1):  # Show last 5 rolls
-                pnl_style = "green" if roll.roll_pnl >= 0 else "red"
-                lines.append(
-                    f"  {i}. {roll.timestamp.strftime('%Y-%m-%d')}: "
-                    f"${roll.old_strike:.0f} → ${roll.new_strike:.0f} "
-                    f"({roll.old_dte} → {roll.new_dte} DTE, "
-                    f"Δ{roll.dte_change:+d} days) "
-                    f"P/L: [{pnl_style}]${roll.roll_pnl:+,.2f}[/{pnl_style}]"
-                )
+            try:
+                # Group rolls by timestamp (for multi-leg strategies like strangles)
+                roll_groups = group_rolls_by_timestamp(self.roll_chain.rolls)
 
-            if len(self.roll_chain.rolls) > 5:
-                lines.append(f"  ... and {len(self.roll_chain.rolls) - 5} more rolls")
+                for i, group in enumerate(roll_groups, 1):
+                    if len(group) == 2:
+                        # Paired roll (strangle) - display combined
+                        # Sort by option type to ensure consistent order (put first)
+                        put_roll = next((r for r in group if r.option_type == "PUT"), group[0])
+                        call_roll = next((r for r in group if r.option_type == "CALL"), group[1])
+
+                        combined_premium = put_roll.premium_effect + call_roll.premium_effect
+                        combined_roll_pnl = put_roll.roll_pnl + call_roll.roll_pnl
+
+                        # Calculate per-share value (for 100-share options contract)
+                        per_share = combined_premium / (put_roll.new_quantity * 100)
+
+                        is_credit = combined_premium >= 0
+                        style = "green" if is_credit else "red"
+                        label = "credit" if is_credit else "debit"
+
+                        lines.append(
+                            f"  {i}. {put_roll.timestamp.strftime('%Y-%m-%d')}: "
+                            f"${put_roll.old_strike:.0f}P/${call_roll.old_strike:.0f}C → "
+                            f"${put_roll.new_strike:.0f}P/${call_roll.new_strike:.0f}C "
+                            f"({put_roll.old_dte} → {put_roll.new_dte} DTE, "
+                            f"Δ{put_roll.dte_change:+d} days) "
+                            f"Net: [{style}]${combined_premium:+,.2f} {label}[/{style}] "
+                            f"([dim]${per_share:+.2f}/share, ${combined_roll_pnl:+,.2f} roll P/L[/dim])"
+                        )
+                    else:
+                        # Single roll - display as before
+                        roll = group[0]
+                        is_credit = roll.premium_effect >= 0
+                        style = "green" if is_credit else "red"
+                        label = "credit" if is_credit else "debit"
+
+                        lines.append(
+                            f"  {i}. {roll.timestamp.strftime('%Y-%m-%d')}: "
+                            f"${roll.old_strike:.0f}{roll.option_indicator} → ${roll.new_strike:.0f}{roll.option_indicator} "
+                            f"({roll.old_dte} → {roll.new_dte} DTE, "
+                            f"Δ{roll.dte_change:+d} days) "
+                            f"[{style}]${roll.premium_effect:+,.2f} {label}[/{style}] "
+                            f"([dim]${roll.pnl_per_contract:+.2f}/contract[/dim])"
+                        )
+            except Exception as e:
+                logger.error(f"RollHistoryPanel: Error building roll entries: {e}", exc_info=True)
+                lines.append("[red]Error displaying roll history[/red]")
 
         content = "\n".join(lines)
         return Panel(content, title="Roll History", border_style="cyan")
@@ -605,6 +654,14 @@ class RollInsightsPanel(Static):
 
     insights: reactive[object | None] = reactive(None)
     patterns: reactive[object | None] = reactive(None)
+
+    def watch_insights(self, old_insights: object | None, new_insights: object | None) -> None:
+        """Called when insights changes."""
+        self.refresh()
+
+    def watch_patterns(self, old_patterns: object | None, new_patterns: object | None) -> None:
+        """Called when patterns changes."""
+        self.refresh()
 
     def render(self) -> Panel:
         if not self.insights and not self.patterns:
@@ -673,6 +730,26 @@ class PortfolioSummary(Static):
     risk_summary: reactive[dict] = reactive(dict)
     show_financials: reactive[bool] = reactive(True)
 
+    def watch_total_pnl(self, old_value: float, new_value: float) -> None:
+        """Called when total_pnl changes."""
+        self.refresh()
+
+    def watch_total_theta(self, old_value: float, new_value: float) -> None:
+        """Called when total_theta changes."""
+        self.refresh()
+
+    def watch_total_delta(self, old_value: float, new_value: float) -> None:
+        """Called when total_delta changes."""
+        self.refresh()
+
+    def watch_risk_summary(self, old_value: dict, new_value: dict) -> None:
+        """Called when risk_summary changes."""
+        self.refresh()
+
+    def watch_show_financials(self, old_value: bool, new_value: bool) -> None:
+        """Called when show_financials changes."""
+        self.refresh()
+
     def render(self) -> Panel:
         # P/L styling and masking
         pnl_style = "green" if self.total_pnl >= 0 else "red"
@@ -712,10 +789,31 @@ class StatusBar(Static):
 
     last_update: reactive[datetime | None] = reactive(None)
     loading: reactive[bool] = reactive(False)
+    message: reactive[str | None] = reactive(None)
+    message_timeout: reactive[int] = reactive(0)
+
+    def watch_message(self, old_value: str | None, new_value: str | None) -> None:
+        """Auto-clear message after 5 seconds."""
+        if new_value and not old_value:
+            self.message_timeout = 5
+
+    def watch_message_timeout(self, old_value: int, new_value: int) -> None:
+        """Handle message timeout countdown."""
+        if new_value > 0:
+            self.set_timer(1.0, self._decrement_timeout)
+
+    def _decrement_timeout(self) -> None:
+        """Decrement timeout and clear when reaches 0."""
+        if self.message_timeout > 0:
+            self.message_timeout -= 1
+            if self.message_timeout == 0:
+                self.message = None
 
     def render(self) -> str:
         if self.loading:
             return "[yellow]Refreshing...[/yellow]"
+        if self.message:
+            return self.message
         if self.last_update:
             return f"[dim]Last updated: {self.last_update.strftime('%H:%M:%S')}[/dim]"
         return ""
@@ -732,7 +830,7 @@ class PilotDashboard(App):
     Screen {
         layout: grid;
         grid-size: 2 3;
-        grid-columns: 2fr 1fr;
+        grid-columns: 3fr 2fr;
         grid-rows: auto 1fr auto;
     }
 
@@ -772,6 +870,16 @@ class PilotDashboard(App):
         max-height: 12;
     }
 
+    #roll-history-panel {
+        height: 1fr;
+        min-height: 10;
+    }
+
+    #roll-insights-panel {
+        height: 1fr;
+        min-height: 10;
+    }
+
     #status-bar {
         column-span: 2;
         height: 1;
@@ -800,13 +908,13 @@ class PilotDashboard(App):
         Binding("r", "refresh", "Refresh"),
         Binding("g", "toggle_group", "Group"),
         Binding("s", "toggle_stocks", "Stocks"),
-        Binding("f", "toggle_financials", "Financials"),
+        Binding("h", "toggle_financials", "Financials"),
         Binding("c", "toggle_all_strategies", "Collapse All"),
         Binding("enter", "toggle_expand", "Expand", show=False),
         Binding("a", "analyze", "AI Rec"),
         Binding("A", "regenerate", "AI Rec (Refresh)"),
-        Binding("h", "show_roll_history", "Roll History"),
-        Binding("i", "show_roll_insights", "Roll Insights"),
+        Binding("H", "show_roll_history", "Roll History"),
+        Binding("I", "show_roll_insights", "Roll Insights"),
         Binding("C", "show_chain_heatmap", "Chain Heatmap"),
     ]
 
@@ -833,7 +941,7 @@ class PilotDashboard(App):
         with Container(id="heatmap-container", classes="hidden"):
             yield OptionChainHeatmap(id="chain-heatmap-widget")
 
-        with Vertical(id="side-panels"):
+        with ScrollableContainer(id="side-panels"):
             yield RecommendationsPanel(id="recommendations-panel")
             yield MarketPanel(id="market-panel")
             yield RollHistoryPanel(id="roll-history-panel")
@@ -1082,6 +1190,43 @@ class PilotDashboard(App):
         positions_widget = self.query_one(PositionsTable)
         positions_widget._toggle_all_strategies()
 
+    def _get_strategy_variants_for_lookup(self, strategy_type) -> list[str]:
+        """Generate possible strategy type keys for roll history lookup.
+
+        Supports both new format (StrategyType enum values like "Bull Put Spread")
+        and old format (simple strings like "put_spread", "call_spread") for backward compatibility.
+
+        Args:
+            strategy_type: StrategyType enum or string
+
+        Returns:
+            List of strategy type strings to try for lookup (most specific first)
+        """
+        # Convert to string value if it's an enum
+        if hasattr(strategy_type, 'value'):
+            strategy_str = strategy_type.value
+        else:
+            strategy_str = str(strategy_type)
+
+        # Start with the exact strategy type
+        variants = [strategy_str]
+
+        # Add old format variants for backward compatibility
+        strategy_lower = strategy_str.lower()
+
+        if "put spread" in strategy_lower:
+            variants.append("put_spread")
+        elif "call spread" in strategy_lower:
+            variants.append("call_spread")
+        elif "iron condor" in strategy_lower:
+            variants.append("iron_condor")
+        elif "iron butterfly" in strategy_lower:
+            variants.append("iron_butterfly")
+        elif "custom" in strategy_lower:
+            variants.append("unknown")
+
+        return variants
+
     def action_show_roll_history(self) -> None:
         """Show roll history for the selected strategy."""
         positions_widget = self.query_one(PositionsTable)
@@ -1096,19 +1241,28 @@ class PilotDashboard(App):
         # Get roll history
         roll_history = get_roll_history()
         if self.account:
-            chain = roll_history.get_chain(symbol, strategy.strategy_type, self.account.account_number)
+            # Try each strategy type variant for backward compatibility
+            chain = None
+            variants = self._get_strategy_variants_for_lookup(strategy.strategy_type)
+            for variant in variants:
+                chain = roll_history.get_chain(symbol, variant, self.account.account_number)
+                if chain:
+                    break
+
             roll_history_panel = self.query_one(RollHistoryPanel)
 
-            if chain:
+            if chain and chain.roll_count > 0:
                 roll_history_panel.roll_chain = chain
                 # Calculate P/L Open with current position
                 current_pnl = sum(pos.unrealized_pnl for pos in strategy.positions)
                 roll_history_panel.current_pnl = current_pnl
-                self.query_one(StatusBar).message = f"Loaded roll history for {symbol} {strategy.strategy_type}"
+                roll_history_panel.refresh()
+                self.query_one(StatusBar).message = f"Loaded roll history for {symbol} {strategy.strategy_type.value}"
             else:
-                roll_history_panel.roll_chain = None
+                roll_history_panel.roll_chain = chain  # Still set it so panel shows the empty state
                 roll_history_panel.current_pnl = None
-                self.query_one(StatusBar).message = f"No roll history found for {symbol} {strategy.strategy_type}"
+                roll_history_panel.refresh()
+                self.query_one(StatusBar).message = f"No roll history found for {symbol} {strategy.strategy_type.value}"
 
     @work(exclusive=True)
     async def action_show_roll_insights(self) -> None:
@@ -1130,7 +1284,11 @@ class PilotDashboard(App):
             roll_history = get_roll_history()
             chain = None
             if self.account:
-                chain = roll_history.get_chain(symbol, strategy.strategy_type, self.account.account_number)
+                # Try each strategy type variant for backward compatibility
+                for variant in self._get_strategy_variants_for_lookup(strategy.strategy_type):
+                    chain = roll_history.get_chain(symbol, variant, self.account.account_number)
+                    if chain:
+                        break
 
             # Analyze patterns
             patterns = None
@@ -1182,7 +1340,12 @@ class PilotDashboard(App):
         # Get roll history
         roll_history = get_roll_history()
         if self.account:
-            chain = roll_history.get_chain(symbol, strategy.strategy_type, self.account.account_number)
+            # Try each strategy type variant for backward compatibility
+            chain = None
+            for variant in self._get_strategy_variants_for_lookup(strategy.strategy_type):
+                chain = roll_history.get_chain(symbol, variant, self.account.account_number)
+                if chain:
+                    break
 
             if chain and chain.roll_count > 0:
                 # Get current position (first leg of strategy)

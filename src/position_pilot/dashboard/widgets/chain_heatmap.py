@@ -1,6 +1,7 @@
 """Option chain heatmap widget for visualizing roll activity."""
 
 from typing import Optional
+from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -23,6 +24,34 @@ class OptionChainHeatmap(Static):
         super().__init__(**kwargs)
         # Default DTE buckets
         self.dte_buckets = [(0, 7), (8, 14), (15, 21), (22, 35), (36, 999)]
+
+    def watch_roll_data(self, old_value: dict, new_value: dict) -> None:
+        """Called when roll_data changes."""
+        self.refresh()
+
+    def watch_strikes(self, old_value: list, new_value: list) -> None:
+        """Called when strikes changes."""
+        self.refresh()
+
+    def watch_dte_buckets(self, old_value: list, new_value: list) -> None:
+        """Called when dte_buckets changes."""
+        self.refresh()
+
+    def watch_current_strike(self, old_value: Optional[float], new_value: Optional[float]) -> None:
+        """Called when current_strike changes."""
+        self.refresh()
+
+    def watch_current_dte(self, old_value: Optional[int], new_value: Optional[int]) -> None:
+        """Called when current_dte changes."""
+        self.refresh()
+
+    def watch_best_strike(self, old_value: Optional[float], new_value: Optional[float]) -> None:
+        """Called when best_strike changes."""
+        self.refresh()
+
+    def watch_best_dte(self, old_value: Optional[tuple], new_value: Optional[tuple]) -> None:
+        """Called when best_dte changes."""
+        self.refresh()
 
     def render(self) -> Panel:
         """Render the heatmap as a panel."""
@@ -106,8 +135,10 @@ class OptionChainHeatmap(Static):
                 # Highlight current DTE position
                 if self.current_dte and bucket[0] <= self.current_dte <= bucket[1]:
                     cell = f"[{style} on blue]{cell}[/{style} on blue]"
+                    cell_text = Text.from_markup(cell)  # Use from_markup for markup strings
+                else:
+                    cell_text = Text(cell, style=style)  # Use regular Text for plain strings
 
-                cell_text = Text(cell, style=style)
                 row.append(cell_text)
 
             # Add total
@@ -125,9 +156,9 @@ class OptionChainHeatmap(Static):
         legend += "[yellow]▓▓[/yellow] [dim]= 5-6[/dim] "
         legend += "[red]██[/red] [dim]= 7+[/dim] "
         legend += "[dim]← = Current[/dim] "
-        legend += "[yellow]★ = Best[/dim]"
+        legend += "[yellow]★ = Best[/yellow]"
 
-        content = Text.assemble(table, legend)
+        content = Group(table, Text.from_markup(legend))
         return Panel(content, title="Option Chain - Roll Activity", border_style="blue")
 
     def load_from_chain(self, chain, current_position=None):
@@ -171,6 +202,9 @@ class OptionChainHeatmap(Static):
         self._find_best_combination()
 
         self.strikes = list(self.strikes)
+
+        # Refresh the widget to display the updated data
+        self.refresh()
 
     def _get_dte_bucket(self, dte: int) -> Optional[tuple[int, int]]:
         """Get the DTE bucket for a given DTE value.

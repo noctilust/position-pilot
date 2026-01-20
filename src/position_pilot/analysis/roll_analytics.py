@@ -3,7 +3,7 @@
 import logging
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from statistics import mean
 
@@ -11,6 +11,45 @@ from ..models.position import Position
 from ..models.roll import RollChain, RollEvent
 
 logger = logging.getLogger(__name__)
+
+
+def group_rolls_by_timestamp(rolls: list[RollEvent], tolerance_seconds: int = 60) -> list[list[RollEvent]]:
+    """Group roll events that occurred within a short time window (multi-leg strategies).
+
+    For strategies like short strangles, both legs are typically rolled within
+    seconds/minutes of each other. This function groups them for display purposes.
+
+    Args:
+        rolls: List of roll events to group
+        tolerance_seconds: Time window for grouping (default: 60 seconds)
+
+    Returns:
+        List of roll groups (each group is a list of 1-2 roll events)
+    """
+    if not rolls:
+        return []
+
+    # Sort by timestamp
+    sorted_rolls = sorted(rolls, key=lambda r: r.timestamp)
+
+    groups: list[list[RollEvent]] = []
+    current_group: list[RollEvent] = [sorted_rolls[0]]
+
+    for roll in sorted_rolls[1:]:
+        # Check if this roll is within tolerance of the first roll in current group
+        time_diff = (roll.timestamp - current_group[0].timestamp).total_seconds()
+        if time_diff <= tolerance_seconds and len(current_group) < 2:
+            # Add to current group (max 2 legs for strangle)
+            current_group.append(roll)
+        else:
+            # Start new group
+            groups.append(current_group)
+            current_group = [roll]
+
+    # Add the last group
+    groups.append(current_group)
+
+    return groups
 
 
 @dataclass
@@ -319,17 +358,47 @@ def format_roll_summary(chain: RollChain, current_pnl: Optional[float] = None) -
     if current_pnl is not None:
         lines.append(f"P/L Open: ${current_pnl:+,.2f}")
 
-    # Roll history
+    # Roll history - group multi-leg strategy rolls
     if chain.rolls:
         lines.append("\nRoll History:")
-        for i, roll in enumerate(chain.rolls, 1):
-            lines.append(
-                f"  {i}. {roll.timestamp.strftime('%Y-%m-%d')}: "
-                f"${roll.old_strike} → ${roll.new_strike} "
-                f"({roll.old_dte} → {roll.new_dte} DTE, "
-                f"Δ{roll.dte_change:+d} days) "
-                f"P/L: ${roll.roll_pnl:+,.2f}"
-            )
+        roll_groups = group_rolls_by_timestamp(chain.rolls)
+
+        for i, group in enumerate(roll_groups, 1):
+            if len(group) == 2:
+                # Paired roll (strangle) - display combined
+                # Sort by option type to ensure consistent order (put first)
+                put_roll = next((r for r in group if r.option_type == "PUT"), group[0])
+                call_roll = next((r for r in group if r.option_type == "CALL"), group[1])
+
+                combined_premium = put_roll.premium_effect + call_roll.premium_effect
+                combined_roll_pnl = put_roll.roll_pnl + call_roll.roll_pnl
+
+                # Calculate per-share value (for 100-share options contract)
+                per_share = combined_premium / (put_roll.new_quantity * 100)
+
+                is_credit = combined_premium >= 0
+                label = "credit" if is_credit else "debit"
+
+                lines.append(
+                    f"  {i}. {put_roll.timestamp.strftime('%Y-%m-%d')}: "
+                    f"${put_roll.old_strike:.0f}P/${call_roll.old_strike:.0f}C → "
+                    f"${put_roll.new_strike:.0f}P/${call_roll.new_strike:.0f}C "
+                    f"({put_roll.old_dte} → {put_roll.new_dte} DTE, "
+                    f"Δ{put_roll.dte_change:+d} days) "
+                    f"Net: ${combined_premium:+,.2f} {label} "
+                    f"(${per_share:+.2f}/share, ${combined_roll_pnl:+,.2f} roll P/L)"
+                )
+            else:
+                # Single roll - display as before
+                roll = group[0]
+                lines.append(
+                    f"  {i}. {roll.timestamp.strftime('%Y-%m-%d')}: "
+                    f"${roll.old_strike}{roll.option_indicator} → ${roll.new_strike}{roll.option_indicator} "
+                    f"({roll.old_dte} → {roll.new_dte} DTE, "
+                    f"Δ{roll.dte_change:+d} days) "
+                    f"P/L: ${roll.roll_pnl:+,.2f} "
+                    f"(${roll.pnl_per_contract:+.2f}/contract)"
+                )
 
     return "\n".join(lines)
 

@@ -261,7 +261,6 @@ class TastytradeClient:
         if not force_refresh:
             cached = self._cache.get(cache_key)
             if cached is not None:
-                logger.debug(f"Cache hit for market metrics: {symbol}")
                 return cached
 
         # Fetch from API
@@ -284,7 +283,6 @@ class TastytradeClient:
 
         # Store in cache
         self._cache.set(cache_key, result)
-        logger.debug(f"Cached market metrics: {symbol}")
 
         return result
 
@@ -296,7 +294,6 @@ class TastytradeClient:
         if not force_refresh:
             cached = self._cache.get(cache_key)
             if cached is not None:
-                logger.debug(f"Cache hit for quote: {symbol}")
                 return cached
 
         # Fetch from API
@@ -323,7 +320,6 @@ class TastytradeClient:
 
         # Store in cache
         self._cache.set(cache_key, result)
-        logger.debug(f"Cached quote: {symbol}")
 
         return result
 
@@ -345,7 +341,6 @@ class TastytradeClient:
                 cached = self._cache.get(cache_key)
                 if cached is not None:
                     quotes[symbol] = cached
-                    logger.debug(f"Cache hit for quote: {symbol}")
                 else:
                     symbols_to_fetch.append(symbol)
         else:
@@ -375,7 +370,6 @@ class TastytradeClient:
                         # Store in cache
                         cache_key = f"quote:{symbol}"
                         self._cache.set(cache_key, quote_data)
-                        logger.debug(f"Cached quote: {symbol}")
 
         return quotes
 
@@ -463,7 +457,6 @@ class TastytradeClient:
         if not force_refresh:
             cached = self._cache.get(cache_key)
             if cached is not None:
-                logger.debug(f"Cache hit for transactions: {account_number}")
                 # Return all cached transactions (filtering by date in Python)
                 transactions = [Transaction(**t) for t in cached.get("transactions", [])]
                 if start_date or end_date:
@@ -495,7 +488,6 @@ class TastytradeClient:
             "cached_at": datetime.now().isoformat()
         }
         self._cache.set(cache_key, cache_data)
-        logger.debug(f"Cached {len(transactions)} transactions for {account_number}")
 
         return transactions
 
@@ -612,11 +604,11 @@ class TastytradeClient:
                 price=self._float(item.get("price")),
                 commission=self._float(item.get("commission", item.get("fees"))),
                 order_id=str(item.get("order-id")) if item.get("order-id") else None,
-                account_number=account_number
+                account_number=account_number,
+                action=item.get("action")  # "Buy to Open", "Sell to Open", "Buy to Close", "Sell to Close"
             )
         except Exception as e:
             logger.error(f"Error parsing transaction: {e}")
-            logger.debug(f"Problematic transaction data: {item}")
             return None
 
     def _parse_order(self, item: dict, account_number: str) -> Optional[Order]:

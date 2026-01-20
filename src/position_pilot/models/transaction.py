@@ -34,6 +34,7 @@ class Transaction(BaseModel):
     commission: Optional[float] = None
     order_id: Optional[str] = Field(default=None, alias="order-id")
     account_number: str = Field(default="", alias="account-number")
+    action: Optional[str] = None  # "Buy to Open", "Sell to Open", "Buy to Close", "Sell to Close"
 
     class Config:
         populate_by_name = True

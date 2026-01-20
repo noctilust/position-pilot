@@ -7,6 +7,32 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+def parse_option_type(occ_symbol: str) -> str:
+    """Extract option type (CALL/PUT) from OCC symbol format.
+
+    OCC format: SYMBOL  YYMMDD[C/P]SSSSSSS
+    The C/P character is 9 positions from the right.
+
+    Args:
+        occ_symbol: OCC option symbol
+
+    Returns:
+        "CALL" or "PUT" or "UNKNOWN"
+    """
+    if not occ_symbol or len(occ_symbol) < 10:
+        return "UNKNOWN"
+    # The option type indicator is the 9th character from the right
+    try:
+        indicator = occ_symbol[-9]
+        if indicator == "C":
+            return "CALL"
+        elif indicator == "P":
+            return "PUT"
+    except (IndexError, TypeError):
+        pass
+    return "UNKNOWN"
+
+
 @dataclass
 class RollEvent:
     """A single roll operation."""
@@ -50,6 +76,31 @@ class RollEvent:
     def strike_change(self) -> float:
         """Strike price change."""
         return self.new_strike - self.old_strike
+
+    @property
+    def option_type(self) -> str:
+        """Option type (CALL/PUT) from symbol."""
+        return parse_option_type(self.old_symbol)
+
+    @property
+    def option_indicator(self) -> str:
+        """Single character option indicator (C/P) from symbol."""
+        if not self.old_symbol or len(self.old_symbol) < 10:
+            return "?"
+        try:
+            indicator = self.old_symbol[-9]
+            if indicator in ("C", "P"):
+                return indicator
+        except (IndexError, TypeError):
+            pass
+        return "?"
+
+    @property
+    def pnl_per_contract(self) -> float:
+        """P/L per contract (normalized for quantity)."""
+        if self.old_quantity and self.old_quantity > 0:
+            return self.roll_pnl / self.old_quantity
+        return self.roll_pnl
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""

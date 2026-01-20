@@ -46,7 +46,6 @@ class RollHistory:
                     return
 
                 self._data = data
-                logger.debug(f"Loaded roll history from {self.cache_file}")
 
             except (json.JSONDecodeError, ValueError) as e:
                 logger.error(f"Invalid roll history cache: {e}")
@@ -59,7 +58,6 @@ class RollHistory:
         try:
             with open(self.cache_file, "w") as f:
                 json.dump(self._data, f, indent=2)
-            logger.debug(f"Saved roll history to {self.cache_file}")
         except Exception as e:
             logger.error(f"Failed to save roll history: {e}")
 
@@ -106,7 +104,6 @@ class RollHistory:
         account_data["last_updated"] = datetime.now().isoformat()
 
         self._save_cache()
-        logger.debug(f"Added roll {roll.roll_id} to chain {chain_key}")
 
     def get_chain(
         self,
@@ -202,7 +199,6 @@ class RollHistory:
         account_data["last_updated"] = datetime.now().isoformat()
 
         self._save_cache()
-        logger.debug(f"Added chain {chain_key} with {len(chain.rolls)} rolls")
 
     def clear(self, account_number: Optional[str] = None) -> None:
         """Clear roll history.
