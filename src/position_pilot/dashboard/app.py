@@ -854,6 +854,7 @@ class PilotDashboard(App):
 
     PositionsTable {
         height: 1fr;
+        overflow-x: auto;
     }
 
     #side-panels {
@@ -908,7 +909,7 @@ class PilotDashboard(App):
         Binding("r", "refresh", "Refresh"),
         Binding("g", "toggle_group", "Group"),
         Binding("s", "toggle_stocks", "Stocks"),
-        Binding("h", "toggle_financials", "Financials"),
+        Binding("p", "toggle_financials", "Privacy"),
         Binding("c", "toggle_all_strategies", "Collapse All"),
         Binding("enter", "toggle_expand", "Expand", show=False),
         Binding("a", "analyze", "AI Rec"),
@@ -916,6 +917,10 @@ class PilotDashboard(App):
         Binding("H", "show_roll_history", "Roll History"),
         Binding("I", "show_roll_insights", "Roll Insights"),
         Binding("C", "show_chain_heatmap", "Chain Heatmap"),
+        Binding("h", "viewport_left", "←", show=False),
+        Binding("j", "cursor_down", "↓", show=False),
+        Binding("k", "cursor_up", "↑", show=False),
+        Binding("l", "viewport_right", "→", show=False),
     ]
 
     def __init__(self):
@@ -1381,6 +1386,35 @@ class PilotDashboard(App):
             heatmap_container.remove_class("hidden")
             positions_container.add_class("hidden")
             self.query_one(StatusBar).message = "Showing chain heatmap"
+
+    def action_viewport_left(self) -> None:
+        """Pan viewport left (vim-style l) - reveals content on the right."""
+        positions_widget = self.query_one(PositionsTable)
+        # Get current scroll position and subtract for left scroll
+        current_x, current_y = positions_widget.scroll_offset
+        new_x = max(0, current_x - 20)  # Scroll left by 20 columns
+        positions_widget.scroll_to(x=new_x, y=current_y, animate=False)
+
+    def action_viewport_right(self) -> None:
+        """Pan viewport right (vim-style h) - reveals content on the left."""
+        positions_widget = self.query_one(PositionsTable)
+        # Get current scroll position and add for right scroll
+        current_x, current_y = positions_widget.scroll_offset
+        new_x = current_x + 20  # Scroll right by 20 columns
+        positions_widget.scroll_to(x=new_x, y=current_y, animate=False)
+
+    def action_cursor_down(self) -> None:
+        """Move cursor down (vim-style j)."""
+        positions_widget = self.query_one(PositionsTable)
+        if positions_widget.cursor_row < len(positions_widget.rows) - 1:
+            positions_widget.move_cursor(row=positions_widget.cursor_row + 1)
+
+    def action_cursor_up(self) -> None:
+        """Move cursor up (vim-style k)."""
+        positions_widget = self.query_one(PositionsTable)
+        if positions_widget.cursor_row > 0:
+            positions_widget.move_cursor(row=positions_widget.cursor_row - 1)
+
 
     async def on_event(self, event: events.Event) -> None:
         """Handle all events at the app level."""
