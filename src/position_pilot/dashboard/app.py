@@ -2,7 +2,7 @@
 
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, ScrollableContainer
 from textual.widget import Widget
@@ -28,6 +28,7 @@ from ..config import get_default_account, get_watchlist
 from ..models import Account, Position
 from ..analysis import get_analyzer, RiskLevel, detect_strategies, StrategyGroup, get_llm_analyzer
 from ..analysis.roll_history import get_roll_history
+from ..analysis.roll_tracker import RollTracker
 from ..analysis.roll_analytics import analyze_patterns, format_roll_summary, format_patterns_summary, group_rolls_by_timestamp
 from ..models.roll import RollChain
 
@@ -40,7 +41,7 @@ class AccountPanel(Static):
     """Displays account summary."""
 
     account: reactive[Account | None] = reactive(None)
-    show_financials: reactive[bool] = reactive(True)
+    show_financials: reactive[bool] = reactive(False)
 
     def render(self) -> Panel:
         if not self.account:
@@ -796,7 +797,7 @@ class PortfolioSummary(Static):
     total_theta: reactive[float] = reactive(0.0)
     total_delta: reactive[float] = reactive(0.0)
     risk_summary: reactive[dict] = reactive(dict)
-    show_financials: reactive[bool] = reactive(True)
+    show_financials: reactive[bool] = reactive(False)
 
     def watch_total_pnl(self, old_value: float, new_value: float) -> None:
         """Called when total_pnl changes."""
@@ -1066,6 +1067,26 @@ class PilotDashboard(App):
                 # Update account panel
                 account_panel = self.query_one(AccountPanel)
                 account_panel.account = self.account
+
+                # Auto-fetch roll history from transactions
+                try:
+                    start_date = datetime.now() - timedelta(days=90)
+                    transactions = self.client.get_transactions(
+                        self.account.account_number,
+                        start_date=start_date,
+                        limit=1000,
+                        force_refresh=force_refresh,
+                    )
+                    if transactions:
+                        tracker = RollTracker()
+                        roll_chains = tracker.detect_rolls(
+                            transactions, positions, self.account.account_number
+                        )
+                        roll_history = get_roll_history()
+                        for chain in roll_chains:
+                            roll_history.add_chain(chain, self.account.account_number)
+                except Exception:
+                    pass  # Roll fetch failure should not block dashboard
 
                 # Build roll chain credit lookup map
                 roll_pnl_map = {}

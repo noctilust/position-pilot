@@ -138,7 +138,7 @@ class TastytradeClient:
             "buying_power": self._float(bal.get("derivative-buying-power")),
             "maintenance_excess": self._float(bal.get("maintenance-excess")),
             "day_trading_buying_power": self._float(bal.get("day-trading-buying-power")),
-            "pnl_today": self._float(bal.get("pending-cash")),
+            "pnl_today": self._float(bal.get("realized-day-gain")),
         }
 
     def get_positions(self, account_number: str) -> list[Position]:
