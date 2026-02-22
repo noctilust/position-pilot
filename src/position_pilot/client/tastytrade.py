@@ -161,7 +161,7 @@ class TastytradeClient:
             symbol = item.get("symbol", "")
             underlying = item.get("underlying-symbol", symbol)
             instrument_type = item.get("instrument-type", "")
-            quantity = int(item.get("quantity", 0))
+            quantity = int(float(item.get("quantity", 0)))
             quantity_dir = item.get("quantity-direction", "Long")
 
             # Determine position type
@@ -211,7 +211,7 @@ class TastytradeClient:
             avg_open = self._float(item.get("average-open-price")) or 0.0
             close = self._float(item.get("close-price")) or 0.0
             mark = self._float(item.get("mark-price"))
-            multiplier = int(item.get("multiplier", 100 if pos_type == PositionType.EQUITY_OPTION else 1))
+            multiplier = int(float(item.get("multiplier", 100 if pos_type == PositionType.EQUITY_OPTION else 1)))
 
             # P/L calculations
             cost_basis = avg_open * abs(quantity) * multiplier
@@ -463,24 +463,38 @@ class TastytradeClient:
                     transactions = self._filter_transactions_by_date(transactions, start_date, end_date)
                 return transactions
 
-        # Fetch from API
-        params = {"limit": limit}
+        # Fetch from API with pagination
+        per_page = min(limit, 250)  # API max per page
+        params = {"per-page": per_page}
         if start_date:
             params["start-date"] = start_date.strftime("%Y-%m-%d")
         if end_date:
             params["end-date"] = end_date.strftime("%Y-%m-%d")
 
-        data = self._get(f"/accounts/{account_number}/transactions", params=params)
-        if not data:
-            return []
-
         transactions = []
-        items = data.get("data", {}).get("items", [])
+        page_offset = 0
 
-        for item in items:
-            tx = self._parse_transaction(item, account_number)
-            if tx:
-                transactions.append(tx)
+        while len(transactions) < limit:
+            params["page-offset"] = page_offset
+            data = self._get(f"/accounts/{account_number}/transactions", params=params)
+            if not data:
+                break
+
+            items = data.get("data", {}).get("items", [])
+            if not items:
+                break
+
+            for item in items:
+                tx = self._parse_transaction(item, account_number)
+                if tx:
+                    transactions.append(tx)
+
+            # Check if more pages
+            pagination = data.get("pagination", {})
+            total_pages = pagination.get("total-pages", 1)
+            page_offset += 1
+            if page_offset >= total_pages:
+                break
 
         # Store in cache (store all transactions without date filtering)
         cache_data = {

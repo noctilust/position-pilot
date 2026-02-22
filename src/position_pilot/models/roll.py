@@ -166,11 +166,23 @@ class RollChain(BaseModel):
     account_number: str
     rolls: list[RollEvent] = Field(default_factory=list)
     original_open_date: Optional[datetime] = None
+    original_open_credit: Optional[float] = None  # Net credit from original STO order
 
     @property
     def roll_count(self) -> int:
         """Total number of rolls."""
         return len(self.rolls)
+
+    @property
+    def chain_total_credit(self) -> Optional[float]:
+        """Total credit collected over chain lifetime.
+
+        = original_open_credit + sum(premium_effect for all rolls)
+        Returns None if original_open_credit is unknown.
+        """
+        if self.original_open_credit is None:
+            return None
+        return self.original_open_credit + sum(r.premium_effect for r in self.rolls)
 
     @property
     def total_roll_pnl(self) -> float:
@@ -223,6 +235,7 @@ class RollChain(BaseModel):
             "strategy_type": self.strategy_type,
             "account_number": self.account_number,
             "original_open_date": self.original_open_date.isoformat() if self.original_open_date else None,
+            "original_open_credit": self.original_open_credit,
             "rolls": [roll.to_dict() for roll in self.rolls],
         }
 
@@ -240,4 +253,5 @@ class RollChain(BaseModel):
                 if data.get("original_open_date")
                 else None
             ),
+            original_open_credit=data.get("original_open_credit"),
         )

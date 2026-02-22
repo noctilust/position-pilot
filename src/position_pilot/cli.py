@@ -1060,10 +1060,14 @@ def rolls_fetch(
     # Summary
     console.print("\n[bold]Roll History Summary:[/bold]")
     for chain in roll_chains:
-        pnl_style = "green" if chain.net_pnl >= 0 else "red"
+        credit = chain.chain_total_credit
+        if credit is not None:
+            credit_str = f"chain credit: ${credit:,.2f}"
+        else:
+            credit_str = "chain credit: unknown"
         console.print(
             f"  {chain.underlying:6} {chain.strategy_type:15}: "
-            f"[{pnl_style}]${chain.net_pnl:+,.2f}[/{pnl_style}] "
+            f"{credit_str} "
             f"({chain.roll_count} rolls)"
         )
 

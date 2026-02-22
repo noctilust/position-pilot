@@ -74,6 +74,7 @@ class PositionsTable(DataTable):
 
     positions: reactive[list[Position]] = reactive(list)
     show_strategies: reactive[bool] = reactive(True)
+    roll_pnl_map: reactive[dict] = reactive(dict)  # {(underlying, strategy_type_str): chain_total_credit}
 
     BINDINGS = []
 
@@ -199,6 +200,43 @@ class PositionsTable(DataTable):
         """Set positions and trigger table update via reactive system."""
         self.positions = positions
 
+    def _get_chain_credit(self, underlying: str, strategy_type) -> float | None:
+        """Look up chain_total_credit for a strategy. Returns None if no roll data."""
+        if not self.roll_pnl_map:
+            return None
+
+        strategy_str = strategy_type.value if hasattr(strategy_type, 'value') else str(strategy_type)
+
+        # Try exact match
+        result = self.roll_pnl_map.get((underlying, strategy_str))
+        if result is not None:
+            return result
+
+        # Try old-format variant keys
+        strategy_lower = strategy_str.lower()
+        variants = []
+        if "put spread" in strategy_lower:
+            variants.append("put_spread")
+        elif "call spread" in strategy_lower:
+            variants.append("call_spread")
+        elif "iron condor" in strategy_lower:
+            variants.append("iron_condor")
+        elif "iron butterfly" in strategy_lower:
+            variants.append("iron_butterfly")
+        elif "strangle" in strategy_lower:
+            variants.append("strangle")
+        elif "straddle" in strategy_lower:
+            variants.append("straddle")
+        elif "custom" in strategy_lower:
+            variants.append("unknown")
+
+        for variant in variants:
+            result = self.roll_pnl_map.get((underlying, variant))
+            if result is not None:
+                return result
+
+        return None
+
     def watch_show_strategies(self, old_value: bool, new_value: bool) -> None:
         """React to view mode change."""
         if not self._initialized:
@@ -255,7 +293,17 @@ class PositionsTable(DataTable):
         sorted_symbols = sorted(by_symbol.keys())
         for i, symbol in enumerate(sorted_symbols):
             symbol_strategies = by_symbol[symbol]
-            total_pnl = sum(s.unrealized_pnl for s in symbol_strategies)
+            # Compute total P/L including roll adjustments
+            total_pnl = 0.0
+            has_roll_pnl = False
+            for s in symbol_strategies:
+                chain_credit = self._get_chain_credit(symbol, s.strategy_type)
+                if chain_credit is not None:
+                    adjustment = chain_credit - abs(s.total_cost_basis)
+                    total_pnl += s.unrealized_pnl + adjustment
+                    has_roll_pnl = True
+                else:
+                    total_pnl += s.unrealized_pnl
             pnl_style = "green" if total_pnl >= 0 else "red"
 
             # Get underlying price from first position
@@ -269,6 +317,12 @@ class PositionsTable(DataTable):
             if underlying_price:
                 price_str = Text(f"${underlying_price:.2f}", style="cyan")
 
+            # Build P/L text with roll indicator
+            pnl_text = Text()
+            pnl_text.append(f"${total_pnl:+,.2f}", style=f"bold {pnl_style}")
+            if has_roll_pnl:
+                pnl_text.append(" R", style="dim cyan")
+
             # Add symbol summary row
             self.add_row(
                 Text(f" {symbol}", style="bold magenta"),
@@ -276,7 +330,7 @@ class PositionsTable(DataTable):
                 "",
                 Text(f"{len(symbol_strategies)} strategies", style="dim"),
                 "",
-                Text(f"${total_pnl:+,.2f}", style=f"bold {pnl_style}"),
+                pnl_text,
                 "",
                 "",
                 "",
@@ -305,12 +359,26 @@ class PositionsTable(DataTable):
                 # Don't show DTE on collapsed strategy row - it's shown on each leg instead
                 dte = ""
 
-                pnl_style = "green" if strat.unrealized_pnl >= 0 else "red"
-                pnl = Text(f"${strat.unrealized_pnl:+,.2f}", style=pnl_style)
+                chain_credit = self._get_chain_credit(symbol, strat.strategy_type)
+                if chain_credit is not None:
+                    adjustment = chain_credit - abs(strat.total_cost_basis)
+                    total_strat_pnl = strat.unrealized_pnl + adjustment
+                else:
+                    adjustment = 0.0
+                    total_strat_pnl = strat.unrealized_pnl
+                pnl_style = "green" if total_strat_pnl >= 0 else "red"
+                pnl = Text()
+                pnl.append(f"${total_strat_pnl:+,.2f}", style=pnl_style)
+                if chain_credit is not None:
+                    pnl.append(" R", style="dim cyan")
 
                 pnl_pct = "-"
-                if strat.unrealized_pnl_percent is not None:
-                    pnl_pct = Text(f"{strat.unrealized_pnl_percent:+.1f}%", style=pnl_style)
+                if chain_credit is not None and chain_credit > 0.01:
+                    total_pnl_pct = (total_strat_pnl / chain_credit) * 100
+                    pnl_pct = Text(f"{total_pnl_pct:+.1f}%", style=pnl_style)
+                elif abs(strat.total_cost_basis) > 0.01:
+                    total_pnl_pct = (total_strat_pnl / abs(strat.total_cost_basis)) * 100
+                    pnl_pct = Text(f"{total_pnl_pct:+.1f}%", style=pnl_style)
 
                 delta = f"{strat.total_delta:.2f}" if strat.total_delta else "-"
 
@@ -582,12 +650,12 @@ class RollHistoryPanel(Static):
         ]
 
         if self.roll_chain.roll_count > 0:
-            pnl_style = "green" if self.roll_chain.net_pnl >= 0 else "red"
-            lines.extend([
-                f"Total Roll P/L: [{pnl_style}]${self.roll_chain.total_roll_pnl:+,.2f}[/{pnl_style}]",
-                f"Total Commission: ${self.roll_chain.total_commission:+,.2f}",
-                f"Net P/L: [{pnl_style}]${self.roll_chain.net_pnl:+,.2f}[/{pnl_style}]",
-            ])
+            chain_credit = self.roll_chain.chain_total_credit
+            if chain_credit is not None:
+                lines.append(f"Chain Total Credit: [cyan]${chain_credit:,.2f}[/cyan]")
+            lines.append(
+                f"Total Commission: ${self.roll_chain.total_commission:+,.2f}"
+            )
 
         if self.current_pnl is not None:
             pnl_style = "green" if self.current_pnl >= 0 else "red"
@@ -999,9 +1067,18 @@ class PilotDashboard(App):
                 account_panel = self.query_one(AccountPanel)
                 account_panel.account = self.account
 
+                # Build roll chain credit lookup map
+                roll_pnl_map = {}
+                roll_history = get_roll_history()
+                all_chains = roll_history.get_all_chains(self.account.account_number)
+                for chain in all_chains:
+                    if chain.roll_count > 0 and chain.chain_total_credit is not None:
+                        roll_pnl_map[(chain.underlying, chain.strategy_type)] = chain.chain_total_credit
+
                 # Update positions table (filter stocks if hidden)
                 positions_widget = self.query_one(PositionsTable)
                 filtered_positions = positions if self.show_stocks else [p for p in positions if p.is_option]
+                positions_widget.roll_pnl_map = roll_pnl_map
                 positions_widget.set_positions(filtered_positions)
 
                 # Calculate portfolio metrics directly (no LLM calls on initial load)
@@ -1018,8 +1095,19 @@ class PilotDashboard(App):
                             total_delta += pos.greeks.delta * pos.multiplier * qty
 
                 # Update portfolio summary
+                # Compute total P/L including roll adjustments
                 portfolio = self.query_one(PortfolioSummary)
-                portfolio.total_pnl = sum(p.unrealized_pnl for p in positions)
+                base_pnl = sum(p.unrealized_pnl for p in positions)
+                # Add roll adjustments per strategy (chain_credit - cost_basis)
+                total_roll_adjustment = 0.0
+                if roll_pnl_map:
+                    strategies = detect_strategies(positions)
+                    for strat in strategies:
+                        key = (strat.underlying, strat.strategy_type.value)
+                        chain_credit = roll_pnl_map.get(key)
+                        if chain_credit is not None:
+                            total_roll_adjustment += chain_credit - abs(strat.total_cost_basis)
+                portfolio.total_pnl = base_pnl + total_roll_adjustment
                 portfolio.total_theta = total_theta
                 portfolio.total_delta = total_delta
                 portfolio.risk_summary = {}  # Empty until user requests analysis

@@ -116,10 +116,11 @@ class RollTracker:
 
         Algorithm:
         1. Group transactions by order-id
-        2. For each order, classify legs as closing or opening based on action field
-        3. Detect single orders with both closing and opening legs (roll orders)
-        4. Match closing legs with opening legs within the same order
-        5. Build roll chains from matched leg pairs
+        2. Classify each order as open (STO-only), roll (BTC+STO), or close (BTC-only)
+        3. Build chains: open → [rolls...] → close
+        4. Filter to only keep currently-open chains (skip completed/closed chains)
+        5. Compute original_open_credit from the opening order(s)
+        6. Build roll events with correct premium_effect signs
         """
         # Sort by date
         fills.sort(key=lambda t: t.transaction_date)
@@ -127,19 +128,127 @@ class RollTracker:
         # Group by order-id
         order_groups = self._group_by_order_id(fills)
 
-        # Detect roll orders (single orders with both close and open legs)
-        roll_orders = []
-
+        # Classify all orders
+        all_orders = []
         for order_id, transactions in order_groups.items():
-            # Classify legs as closing or opening based on action field
             closing_legs, opening_legs = self._classify_order_legs(transactions)
+            date = min(t.transaction_date for t in transactions)
 
-            # Only consider orders with both closing and opening legs as roll orders
             if closing_legs and opening_legs:
-                roll_orders.append((order_id, closing_legs, opening_legs))
+                order_type = "roll"
+            elif opening_legs:
+                order_type = "open"
+            elif closing_legs:
+                order_type = "close"
+            else:
+                continue
 
-        # Build roll chains from roll orders
-        return self._build_roll_chains_from_roll_orders(roll_orders, account_number)
+            all_orders.append({
+                "order_id": order_id,
+                "type": order_type,
+                "date": date,
+                "closing": closing_legs,
+                "opening": opening_legs,
+            })
+
+        all_orders.sort(key=lambda o: o["date"])
+
+        # Build chains: open → [rolls...] → close
+        chains_data: list[dict] = []
+        current_chain: dict | None = None
+
+        for order in all_orders:
+            if order["type"] == "open":
+                if (current_chain is None
+                        or current_chain.get("closed")
+                        or current_chain["rolls"]):
+                    # Start new chain. Also start new if current chain already has rolls
+                    # (an STO-only after rolls means old chain ended via expiration/assignment
+                    # and a new chain is starting).
+                    if current_chain and current_chain["rolls"]:
+                        chains_data.append(current_chain)
+                    current_chain = {
+                        "open_orders": [order],
+                        "rolls": [],
+                        "closed": False,
+                    }
+                else:
+                    # Additional open within same chain (adding to position before first roll)
+                    current_chain["open_orders"].append(order)
+            elif order["type"] == "roll":
+                if current_chain is None:
+                    # Roll without preceding open (history too short)
+                    current_chain = {
+                        "open_orders": [],
+                        "rolls": [],
+                        "closed": False,
+                    }
+                current_chain["rolls"].append(order)
+            elif order["type"] == "close":
+                if current_chain and current_chain["rolls"]:
+                    # Chain with rolls is being closed → save and reset
+                    current_chain["closed"] = True
+                    chains_data.append(current_chain)
+                    current_chain = None
+                # If chain has no rolls, this close likely belongs to a different
+                # chain's positions (e.g., old chain closed after new chain opened).
+                # Ignore it — don't reset current_chain.
+
+        # Don't forget last chain if still open and has rolls
+        if current_chain and current_chain["rolls"]:
+            chains_data.append(current_chain)
+
+        # Convert to RollChain objects, skipping closed chains
+        result = []
+        for chain_data in chains_data:
+            if chain_data["closed"]:
+                continue  # Skip completed chains — not relevant for dashboard P/L
+
+            # Calculate original_open_credit (net credit from opening orders)
+            original_open_credit: float | None = None
+            if chain_data["open_orders"]:
+                original_open_credit = 0.0
+                for open_order in chain_data["open_orders"]:
+                    for tx in open_order["opening"]:
+                        action = (tx.action or "").lower()
+                        amt = tx.amount if tx.amount else 0.0
+                        if "sell" in action:
+                            original_open_credit += amt  # STO = credit
+                        elif "buy" in action:
+                            original_open_credit -= amt  # BTO = debit
+
+            # Build roll orders list for _build_roll_chains_from_roll_orders
+            roll_orders = [
+                (order["order_id"], order["closing"], order["opening"])
+                for order in chain_data["rolls"]
+            ]
+
+            # Get original open date
+            open_date = None
+            if chain_data["open_orders"]:
+                open_date = chain_data["open_orders"][0]["date"]
+
+            chains = self._build_roll_chains_from_roll_orders(
+                roll_orders, account_number, original_open_credit, open_date
+            )
+            result.extend(chains)
+
+        # Filter to only keep chains matching current positions
+        if current_positions:
+            current_symbols = {p.symbol for p in current_positions if p.symbol}
+            filtered = []
+            for chain in result:
+                if not chain.rolls:
+                    continue
+                # Check if last roll's new symbols match any current position
+                last_roll = chain.rolls[-1]
+                if (last_roll.new_symbol in current_symbols
+                        or last_roll.old_symbol in current_symbols):
+                    filtered.append(chain)
+            if filtered:
+                result = filtered
+
+        return result
 
     def _group_by_order_id(self, transactions: list[Transaction]) -> dict[str, list[Transaction]]:
         """Group transactions by order-id."""
@@ -185,7 +294,9 @@ class RollTracker:
     def _build_roll_chains_from_roll_orders(
         self,
         roll_orders: list[tuple[str, list[Transaction], list[Transaction]]],
-        account_number: str
+        account_number: str,
+        original_open_credit: float | None = None,
+        open_date: datetime | None = None,
     ) -> list[RollChain]:
         """Build roll chains from roll orders.
 
@@ -195,6 +306,8 @@ class RollTracker:
         Args:
             roll_orders: List of (order_id, closing_legs, opening_legs) tuples
             account_number: Account number
+            original_open_credit: Net credit from the original opening order(s)
+            open_date: Date of the original opening order
 
         Returns:
             List of RollChain objects
@@ -225,7 +338,8 @@ class RollTracker:
                     underlying=underlying,
                     strategy_type=strategy_type,
                     account_number=account_number,
-                    original_open_date=close_legs[0].transaction_date
+                    original_open_date=open_date or close_legs[0].transaction_date,
+                    original_open_credit=original_open_credit,
                 )
 
             # Create roll events by matching close and open legs
@@ -247,6 +361,16 @@ class RollTracker:
                     open_tx = open_type_legs[i]
                     roll = self._create_roll_event(close_tx, open_tx, account_number)
                     chains_by_underlying[underlying].add_roll(roll)
+
+        # Update strategy types using option types from ALL rolls (not just first)
+        for underlying, chain in chains_by_underlying.items():
+            all_opt_types = set()
+            for roll in chain.rolls:
+                old_opt = self._get_option_type(roll.old_symbol)
+                if old_opt:
+                    all_opt_types.add(old_opt)
+            if all_opt_types:
+                chain.strategy_type = self._infer_strategy_type_from_option_types(all_opt_types)
 
         return list(chains_by_underlying.values())
 
@@ -368,13 +492,23 @@ class RollTracker:
             open_qty = abs(open_tx.quantity) if open_tx.quantity and open_tx.quantity != 0 else 1.0
 
             # Safely extract amounts with defaults
-            # P/L from closing old position (positive = profit)
-            roll_pnl = close_tx.amount if close_tx.amount is not None else 0.0
+            open_amount = open_tx.amount if open_tx.amount is not None else 0.0
+            close_amount = close_tx.amount if close_tx.amount is not None else 0.0
 
-            # Net premium effect: opening premium - closing cost
-            # For credit spreads: opening > closing (positive net credit)
-            # For debit spreads: opening < closing (negative net debit)
-            premium_effect = (open_tx.amount if open_tx.amount is not None else 0.0) - (close_tx.amount if close_tx.amount is not None else 0.0)
+            # Compute net cash flow from this roll leg (positive = net credit received)
+            # Amounts from API are always positive (absolute values).
+            # Sign depends on action: STO = credit (+), BTO = debit (-)
+            #                          BTC = debit (-), STC = credit (+)
+            open_action = (open_tx.action or "").lower()
+            close_action = (close_tx.action or "").lower()
+
+            open_cash = open_amount if "sell" in open_action else -open_amount
+            close_cash = close_amount if "sell" in close_action else -close_amount
+            premium_effect = open_cash + close_cash
+
+            # roll_pnl: realized P/L from closing old position (not meaningful without
+            # knowing original open price, kept for backward compat)
+            roll_pnl = close_amount
 
             # Safely extract commissions with defaults
             close_commission = close_tx.commission if close_tx.commission is not None else 0.0
