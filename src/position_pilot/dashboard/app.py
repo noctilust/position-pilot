@@ -1,5 +1,6 @@
 """Interactive Textual dashboard for Position Pilot."""
 
+import asyncio
 import logging
 import sys
 from datetime import datetime, timedelta
@@ -27,6 +28,7 @@ from ..client import get_client
 from ..config import get_default_account, get_watchlist
 from ..models import Account, Position
 from ..analysis import get_analyzer, RiskLevel, detect_strategies, StrategyGroup, get_llm_analyzer
+from ..analysis.recommendation_cache import get_recommendation_cache
 from ..analysis.roll_history import get_roll_history
 from ..analysis.roll_tracker import RollTracker
 from ..analysis.roll_analytics import analyze_patterns, format_roll_summary, format_patterns_summary, group_rolls_by_timestamp
@@ -195,7 +197,7 @@ class PositionsTable(DataTable):
         self.z_stripes = True
 
         # Set up initial columns
-        self.add_columns("Position", "Price", "Qty", "Strikes", "DTE", "P/L", "P/L %", "/Δ", "Extrinsic", "Intrinsic")
+        self.add_columns("Position", "Qty", "TrdPrc", "Mrk", "DTE", "P/L", "P/L %", "/Δ", "Extrinsic", "Intrinsic")
 
     def set_positions(self, positions: list[Position]) -> None:
         """Set positions and trigger table update via reactive system."""
@@ -247,9 +249,9 @@ class PositionsTable(DataTable):
         self.clear(columns=True)
 
         if self.show_strategies:
-            self.add_columns("Position", "Price", "Qty", "Strikes", "DTE", "P/L", "P/L %", "/Δ", "Extrinsic", "Intrinsic")
+            self.add_columns("Position", "Qty", "TrdPrc", "Mrk", "DTE", "P/L", "P/L %", "/Δ", "Extrinsic", "Intrinsic")
         else:
-            self.add_columns("Symbol", "Price", "Qty", "DTE", "P/L", "P/L %", "/Δ", "Extrinsic", "Intrinsic")
+            self.add_columns("Symbol", "Qty", "TrdPrc", "Mrk", "DTE", "P/L", "P/L %", "/Δ", "Extrinsic", "Intrinsic")
 
         self._populate_table()
 
@@ -352,15 +354,31 @@ class PositionsTable(DataTable):
                 indicator = "▼" if is_expanded else "▶"
                 name = Text(f"  {indicator} {strat.strategy_type.value}", style="")
 
-                # For multi-leg strategies, don't show a single price (each leg has its own price)
-                price_str = "-"
-
-                strikes_display = strat.strikes_display or "-"
                 qty = str(strat.total_quantity)
                 # Don't show DTE on collapsed strategy row - it's shown on each leg instead
                 dte = ""
 
+                # Get chain credit first (needed for TrdPrc calculation)
                 chain_credit = self._get_chain_credit(symbol, strat.strategy_type)
+
+                # Calculate per-unit TrdPrc and Mrk (consistent with leg per-share values)
+                base_qty = strat.total_quantity
+                multiplier = strat.positions[0].multiplier if strat.positions else 100
+                if base_qty > 0:
+                    if chain_credit is not None:
+                        per_unit_trd_prc = chain_credit / (base_qty * multiplier)
+                    else:
+                        per_unit_trd_prc = -strat.total_cost_basis / (base_qty * multiplier)
+                    trade_price_str = f"${per_unit_trd_prc:.2f}"
+                else:
+                    trade_price_str = "-"
+
+                if base_qty > 0 and any(p.mark_price for p in strat.positions):
+                    per_unit_mrk = strat.total_market_value / (base_qty * multiplier)
+                    price_str = f"${per_unit_mrk:.2f}"
+                else:
+                    price_str = "-"
+
                 if chain_credit is not None:
                     adjustment = chain_credit - abs(strat.total_cost_basis)
                     total_strat_pnl = strat.unrealized_pnl + adjustment
@@ -412,7 +430,7 @@ class PositionsTable(DataTable):
                 else:
                     intrinsic_str = "-"
 
-                self.add_row(name, price_str, qty, strikes_display, dte, pnl, pnl_pct, delta, extrinsic_str, intrinsic_str)
+                self.add_row(name, qty, trade_price_str, price_str, dte, pnl, pnl_pct, delta, extrinsic_str, intrinsic_str)
 
                 # Track row index for this strategy (current row count after adding)
                 row_index = len(self.rows) - 1
@@ -442,7 +460,15 @@ class PositionsTable(DataTable):
                         pos_dte = str(pos.days_to_expiration) if pos.days_to_expiration is not None else "-"
 
                         pos_price = pos.mark_price or pos.close_price
-                        pos_price_str = f"${pos_price:.2f}" if pos_price else "-"
+                        if pos_price is not None:
+                            signed_price = -pos_price if pos.is_short else pos_price
+                            pos_price_str = f"${signed_price:.2f}"
+                        else:
+                            pos_price_str = "-"
+
+                        # Trade price (average open price)
+                        pos_trade_price = pos.average_open_price if pos.average_open_price else 0.0
+                        pos_trade_price_str = f"${pos_trade_price:.2f}" if pos_trade_price else "-"
 
                         pos_pnl_style = "green" if pos.unrealized_pnl >= 0 else "red"
                         pos_pnl = Text(f"${pos.unrealized_pnl:+,.2f}", style=pos_pnl_style)
@@ -469,9 +495,9 @@ class PositionsTable(DataTable):
 
                         self.add_row(
                             Text(pos_symbol, style="dim"),  # Strategy
-                            pos_price_str,  # Price
                             pos_qty,  # Qty
-                            "",  # Empty for strikes column
+                            pos_trade_price_str,  # TrdPrc
+                            pos_price_str,  # Mrk
                             pos_dte,  # DTE
                             pos_pnl,  # P/L
                             pos_pnl_pct,  # P/L %
@@ -503,6 +529,10 @@ class PositionsTable(DataTable):
             price = pos.mark_price or pos.close_price
             price_str = f"${price:.2f}" if price else "-"
 
+            # Trade price (average open price)
+            trade_price = pos.average_open_price if pos.average_open_price else 0.0
+            trade_price_str = f"${trade_price:.2f}" if trade_price else "-"
+
             pnl_style = "green" if pos.unrealized_pnl >= 0 else "red"
             pnl = Text(f"${pos.unrealized_pnl:+,.2f}", style=pnl_style)
 
@@ -526,7 +556,7 @@ class PositionsTable(DataTable):
             if pos.intrinsic_value is not None:
                 intrinsic = f"${pos.intrinsic_value:.2f}"
 
-            self.add_row(symbol, price_str, qty, dte, pnl, pnl_pct, delta, extrinsic, intrinsic)
+            self.add_row(symbol, qty, trade_price_str, price_str, dte, pnl, pnl_pct, delta, extrinsic, intrinsic)
 
 
 class RecommendationsPanel(Static):
@@ -539,7 +569,7 @@ class RecommendationsPanel(Static):
 
         if not rec:
             return Panel(
-                "[dim]Press 'a' on a strategy row to generate AI recommendation[/dim]",
+                "[dim]Select a strategy row — press A to generate AI recommendation[/dim]",
                 title="AI Recommendation",
                 border_style="yellow"
             )
@@ -572,9 +602,16 @@ class RecommendationsPanel(Static):
         if generated_at:
             time_str = generated_at.strftime("%H:%M:%S")
             date_str = generated_at.strftime("%Y-%m-%d") if generated_at.date() != datetime.now().date() else "Today"
-            timestamp_str = f"[dim]Generated: {date_str} at {time_str}[/dim]"
+            age = datetime.now() - generated_at
+            if age.total_seconds() < 3600:
+                age_label = f"{int(age.total_seconds() // 60)}m ago"
+            elif age.total_seconds() < 86400:
+                age_label = f"{int(age.total_seconds() // 3600)}h ago"
+            else:
+                age_label = f"{age.days}d ago"
+            timestamp_str = f"[bold yellow]Generated {age_label}[/bold yellow]  [dim]({date_str} {time_str})[/dim]"
         else:
-            timestamp_str = "[dim]Recently generated[/dim]"
+            timestamp_str = "[yellow]Recently generated[/yellow]"
 
         lines = [
             f"{icon} [bold]{name}[/bold] {urgency}",
@@ -991,8 +1028,8 @@ class PilotDashboard(App):
         Binding("p", "toggle_financials", "Privacy"),
         Binding("c", "toggle_all_strategies", "Collapse All"),
         Binding("enter", "toggle_expand", "Expand", show=False),
-        Binding("a", "analyze", "AI Rec"),
-        Binding("A", "regenerate", "AI Rec (Refresh)"),
+        Binding("a", "analyze", "AI Rec (cached)"),
+        Binding("A", "regenerate", "AI Rec (fresh)"),
         Binding("H", "show_roll_history", "Roll History"),
         Binding("I", "show_roll_insights", "Roll Insights"),
         Binding("C", "show_chain_heatmap", "Chain Heatmap"),
@@ -1175,57 +1212,35 @@ class PilotDashboard(App):
         self.load_data(force_refresh=True)
 
     def action_analyze(self) -> None:
-        """Generate AI recommendation for selected strategy/position."""
+        """Show cached AI recommendation for selected strategy (no API call)."""
         positions_widget = self.query_one(PositionsTable)
         cursor_row = positions_widget.cursor_row
-
-        # Get recommendations panel
         recs_panel = self.query_one(RecommendationsPanel)
+        status = self.query_one(StatusBar)
 
-        if cursor_row < 0:
-            # No row selected
-            recs_panel.recommendation = (None, None)
-            return
-
-        # Check if a strategy row is selected
-        if cursor_row in positions_widget._row_to_strategy:
-            symbol, strategy = positions_widget._row_to_strategy[cursor_row]
-
-            # Generate recommendation for this strategy (use first position)
-            if not strategy.positions:
-                recs_panel.recommendation = (None, None)
-                return
-
-            # Lazy initialize LLM analyzer if needed
-            if self._analyzer is None:
-                self._analyzer = get_llm_analyzer()
-
-            # Show loading status
-            status = self.query_one(StatusBar)
-            status.loading = True
-
-            try:
-                rec, generated_at = self._analyzer.generate_recommendation(strategy.positions[0])
-                # Update recommendations panel
-                recs_panel.recommendation = (rec, generated_at)
-                # Explicitly refresh the panel
-                recs_panel.refresh()
-            except Exception as e:
-                import sys
-                import traceback
-                traceback.print_exc(file=sys.stderr)
-                # On error, show empty panel
-                recs_panel.recommendation = (None, None)
-                recs_panel.refresh()
-            finally:
-                status.loading = False
-                status.last_update = datetime.now()
-        else:
-            # Individual position row - not implemented yet
+        if cursor_row < 0 or cursor_row not in positions_widget._row_to_strategy:
             recs_panel.recommendation = (None, None)
             recs_panel.refresh()
+            return
 
-    def action_regenerate(self) -> None:
+        symbol, strategy = positions_widget._row_to_strategy[cursor_row]
+        if not strategy.positions:
+            recs_panel.recommendation = (None, None)
+            recs_panel.refresh()
+            return
+
+        cache = get_recommendation_cache()
+        cached = cache.get(strategy.positions[0])
+        if cached:
+            recs_panel.recommendation = cached
+            recs_panel.refresh()
+        else:
+            recs_panel.recommendation = (None, None)
+            recs_panel.refresh()
+            status.message = f"No cached rec for {symbol} {strategy.strategy_type.value} — press A to generate"
+
+    @work(exclusive=True)
+    async def action_regenerate(self) -> None:
         """Regenerate AI recommendation for selected strategy (bypass cache)."""
         positions_widget = self.query_one(PositionsTable)
         cursor_row = positions_widget.cursor_row
@@ -1251,27 +1266,57 @@ class PilotDashboard(App):
             if self._analyzer is None:
                 self._analyzer = get_llm_analyzer()
 
-            # Show loading status
+            # Clear any stale hint and show progress
             status = self.query_one(StatusBar)
+            status.message = None
             status.loading = True
+            status.message = f"Generating AI rec for {symbol} {strategy.strategy_type.value}..."
 
             try:
+                # Get roll history for this strategy
+                roll_chain = None
+                current_pnl = None
+                if self.account:
+                    roll_history = get_roll_history()
+                    for variant in self._get_strategy_variants_for_lookup(strategy.strategy_type):
+                        chain = roll_history.get_chain(symbol, variant, self.account.account_number)
+                        if chain:
+                            roll_chain = chain
+                            break
+
+                    # Calculate current P/L with roll adjustments
+                    if roll_chain:
+                        adjustment = roll_chain.chain_total_credit - abs(strategy.total_cost_basis) if roll_chain.chain_total_credit else 0.0
+                        current_pnl = strategy.unrealized_pnl + adjustment
+                    else:
+                        current_pnl = strategy.unrealized_pnl
+
                 # Force refresh: bypass cache and regenerate
-                rec, generated_at = self._analyzer.generate_recommendation(
-                    strategy.positions[0],
-                    force_refresh=True
+                # Pass all strategy positions for multi-leg analysis
+                strategy_type = strategy.strategy_type.value if hasattr(strategy, 'strategy_type') else None
+                loop = asyncio.get_event_loop()
+                rec, generated_at = await loop.run_in_executor(
+                    None,
+                    lambda: self._analyzer.generate_recommendation(
+                        strategy.positions[0],  # Primary position for cache key
+                        force_refresh=True,
+                        strategy_positions=strategy.positions,
+                        strategy_type=strategy_type,
+                        roll_chain=roll_chain,
+                        current_pnl=current_pnl,
+                    ),
                 )
                 # Update recommendations panel
                 recs_panel.recommendation = (rec, generated_at)
-                # Explicitly refresh the panel
                 recs_panel.refresh()
+                status.message = None
             except Exception as e:
                 import sys
                 import traceback
                 traceback.print_exc(file=sys.stderr)
-                # On error, show empty panel
                 recs_panel.recommendation = (None, None)
                 recs_panel.refresh()
+                status.message = f"Error generating rec: {e}"
             finally:
                 status.loading = False
                 status.last_update = datetime.now()
@@ -1534,6 +1579,9 @@ class PilotDashboard(App):
         if positions_widget.cursor_row > 0:
             positions_widget.move_cursor(row=positions_widget.cursor_row - 1)
 
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Auto-show cached recommendation when cursor moves to a new row."""
+        self.action_analyze()
 
     async def on_event(self, event: events.Event) -> None:
         """Handle all events at the app level."""

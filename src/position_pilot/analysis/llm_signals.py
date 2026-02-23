@@ -137,12 +137,24 @@ class LLMPositionAnalyzer:
                     issues=[f"Analysis error: {error_msg}"],
                 )
 
-    def generate_recommendation(self, position: Position, force_refresh: bool = False) -> tuple[Recommendation, datetime]:
+    def generate_recommendation(
+        self,
+        position: Position,
+        force_refresh: bool = False,
+        strategy_positions: list[Position] | None = None,
+        strategy_type: str | None = None,
+        roll_chain: object | None = None,
+        current_pnl: float | None = None,
+    ) -> tuple[Recommendation, datetime]:
         """Generate a trading recommendation using LLM analysis.
 
         Args:
-            position: The position to analyze
+            position: The primary position to analyze (for cache key)
             force_refresh: If True, bypass cache and generate new recommendation
+            strategy_positions: Optional list of all positions in a multi-leg strategy
+            strategy_type: Optional strategy type name (e.g., "Short Strangle")
+            roll_chain: Optional roll history for the strategy
+            current_pnl: Optional current P/L open (including roll adjustments)
 
         Returns:
             Tuple of (Recommendation, generated_at timestamp)
@@ -157,11 +169,16 @@ class LLMPositionAnalyzer:
             if cached_result:
                 return cached_result
 
-        # Gather market context
+        # Gather market context from primary position
         market_context = self._gather_market_context(position)
 
-        # Build comprehensive prompt
-        prompt = self._build_recommendation_prompt(position, market_context)
+        # Build comprehensive prompt - include all strategy legs if provided
+        if strategy_positions and len(strategy_positions) > 1:
+            prompt = self._build_strategy_recommendation_prompt(
+                strategy_positions, strategy_type, market_context, roll_chain, current_pnl
+            )
+        else:
+            prompt = self._build_recommendation_prompt(position, market_context)
 
         # Call Claude API with error handling
         try:
@@ -373,6 +390,126 @@ Prioritize capital preservation.""".format(details="\n".join(details))
 
         return prompt
 
+    def _build_strategy_recommendation_prompt(
+        self,
+        positions: list[Position],
+        strategy_type: str | None,
+        market_context: dict,
+        roll_chain: object | None = None,
+        current_pnl: float | None = None,
+    ) -> str:
+        """Build comprehensive prompt for multi-leg strategy analysis."""
+        # Determine strategy name
+        strategy_name = strategy_type or "Multi-leg Strategy"
+        underlying = positions[0].underlying_symbol if positions else "Unknown"
+
+        # Build leg details
+        leg_details = []
+        position_pnl = 0.0
+        net_delta = 0.0
+        net_theta = 0.0
+
+        for i, pos in enumerate(positions, 1):
+            pos_type = f"{'Short ' if pos.is_short else 'Long'}{pos.option_type if pos.is_option else pos.position_type}"
+
+            leg_info = [
+                f"Leg {i}: {pos_type}",
+            ]
+
+            if pos.is_option:
+                leg_info.extend([
+                    f"  Strike: ${pos.strike_price}",
+                    f"  DTE: {pos.days_to_expiration}",
+                ])
+
+            leg_info.extend([
+                f"  Qty: {pos.display_quantity}",
+                f"  P/L: ${pos.unrealized_pnl:+,.2f}",
+            ])
+
+            if pos.greeks:
+                if pos.greeks.delta:
+                    adjusted_delta = -pos.greeks.delta if pos.is_short else pos.greeks.delta
+                    leg_info.append(f"  Delta: {adjusted_delta:.2f}")
+                    net_delta += adjusted_delta * abs(pos.quantity)
+                if pos.greeks.theta:
+                    adjusted_theta = -pos.greeks.theta if pos.is_short else pos.greeks.theta
+                    daily_theta = adjusted_theta * pos.multiplier * abs(pos.quantity)
+                    leg_info.append(f"  Theta: {adjusted_theta:.3f} (${daily_theta:+.2f}/day)")
+                    net_theta += daily_theta
+
+            leg_details.append("\n".join(leg_info))
+            position_pnl += pos.unrealized_pnl
+
+        # Use adjusted P/L if provided (includes roll adjustments), otherwise use position P/L
+        total_pnl = current_pnl if current_pnl is not None else position_pnl
+
+        # Combine into prompt
+        details = [
+            f"Strategy: {strategy_name}",
+            f"Underlying: {underlying}",
+            f"Current P/L: ${total_pnl:+,.2f}",
+            f"Net Delta: {net_delta:.2f}",
+            f"Net Theta: ${net_theta:+.2f}/day",
+            "",
+            "Legs:",
+        ]
+        details.extend(leg_details)
+
+        # Add roll history if available
+        roll_info = []
+        if roll_chain and hasattr(roll_chain, 'rolls') and roll_chain.rolls:
+            roll_info.append("\nRoll History:")
+            roll_info.append(f"Total Rolls: {len(roll_chain.rolls)}")
+
+            if hasattr(roll_chain, 'chain_total_credit') and roll_chain.chain_total_credit is not None:
+                roll_info.append(f"Chain Total Credit: ${roll_chain.chain_total_credit:+,.2f}")
+
+            # Show recent rolls (last 3)
+            recent_rolls = roll_chain.rolls[-3:]
+            for i, roll in enumerate(recent_rolls, 1):
+                roll_date = roll.timestamp.strftime('%Y-%m-%d') if hasattr(roll.timestamp, 'strftime') else str(roll.timestamp)
+                roll_info.append(
+                    f"  {i}. {roll_date}: ${roll.old_strike:.0f} → ${roll.new_strike:.0f} "
+                    f"({roll.old_dte} → {roll.new_dte} DTE) "
+                    f"${roll.premium_effect:+.2f}"
+                )
+
+        # Add market context
+        market_info = []
+        if market_context.get("iv_rank"):
+            market_info.append(f"IV Rank: {market_context['iv_rank']:.0f}")
+        if market_context.get("distance_to_strike") is not None:
+            market_info.append(f"Distance to nearest strike: {market_context['distance_to_strike']:+.1f}%")
+
+        # Build final prompt
+        all_details = details + roll_info
+        if market_info:
+            all_details.append("\nMarket Context:")
+            all_details.extend(market_info)
+
+        prompt = """Analyze this options strategy:
+
+{details}
+
+Respond in this format:
+SIGNAL: [HOLD/ROLL/SELL/CLOSE/BUY]
+REASON: [2-3 sentence rationale considering ALL legs]
+URGENCY: [1-5]
+SUGGESTED_ACTION: [specific action for the strategy]
+ALTERNATIVE_ACTIONS: [2-3 alternatives]
+
+Important: This is a multi-leg strategy. Consider how the legs work together:
+- Short strangles: Both short call and short put benefit from theta decay
+- Iron condors: Wings provide protection; rolling may involve multiple legs
+- Spreads: Limited risk/reward profile differs from single leg
+
+Factor in the roll history when making recommendations. If the position has been rolled multiple times, consider whether continued rolling makes sense or if it's time to take the loss/profit.
+
+Prioritize capital preservation and consider managing as a complete strategy.""".format(details="\n".join(all_details))
+
+        return prompt
+
     def _parse_health_response(self, position: Position, response_text: str) -> PositionHealth:
         """Parse LLM response into PositionHealth object."""
         health = PositionHealth(position=position)
@@ -437,7 +574,8 @@ Prioritize capital preservation.""".format(details="\n".join(details))
                     reason = line.split(':', 1)[1].strip()
                 elif line.startswith('URGENCY:'):
                     urgency_str = line.split(':', 1)[1].strip()
-                    urgency = int(urgency_str)
+                    # Handle fraction format like '4/5' by taking the numerator
+                    urgency = int(urgency_str.split('/')[0].strip())
                     # Clamp urgency to 1-5 range
                     urgency = max(1, min(5, urgency))
                 elif line.startswith('SUGGESTED_ACTION:'):
