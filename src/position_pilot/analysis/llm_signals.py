@@ -495,7 +495,7 @@ Prioritize capital preservation.""".format(details="\n".join(details))
         patterns_text = f"""
 Typical roll DTE targets: {patterns.typical_roll_days if patterns.typical_roll_days else 'N/A'}
 Avg DTE at roll: {patterns.avg_dte_at_roll:.1f} days
-Best DTE window: {patterns.best_dte_window[0]}-{patterns.best_dTE_window[1]} days
+Best DTE window: {patterns.best_dte_window[0]}-{patterns.best_dte_window[1]} days
 Avg strike change: ${patterns.avg_strike_adjustment:+.2f}
 Win rate: {patterns.win_rate:.1%}
 Total rolls: {patterns.total_rolls}
