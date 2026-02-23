@@ -653,7 +653,15 @@ class RollHistoryPanel(Static):
         if self.roll_chain.roll_count > 0:
             chain_credit = self.roll_chain.chain_total_credit
             if chain_credit is not None:
-                lines.append(f"Chain Total Credit: [cyan]${chain_credit:,.2f}[/cyan]")
+                if self.roll_chain.rolls:
+                    qty = self.roll_chain.rolls[0].new_quantity
+                    per_share = chain_credit / (qty * 100) if qty > 0 else None
+                    if per_share is not None:
+                        lines.append(f"Chain Total Credit: [cyan]${chain_credit:,.2f}[/cyan] [dim](${per_share:.2f}/share)[/dim]")
+                    else:
+                        lines.append(f"Chain Total Credit: [cyan]${chain_credit:,.2f}[/cyan]")
+                else:
+                    lines.append(f"Chain Total Credit: [cyan]${chain_credit:,.2f}[/cyan]")
             lines.append(
                 f"Total Commission: ${self.roll_chain.total_commission:+,.2f}"
             )
@@ -696,11 +704,13 @@ class RollHistoryPanel(Static):
                             f"([dim]${per_share:+.2f}/share, ${combined_roll_pnl:+,.2f} roll P/L[/dim])"
                         )
                     else:
-                        # Single roll - display as before
+                        # Single roll - display with per-share value
                         roll = group[0]
                         is_credit = roll.premium_effect >= 0
                         style = "green" if is_credit else "red"
                         label = "credit" if is_credit else "debit"
+                        per_share = roll.premium_effect / (roll.new_quantity * 100) if roll.new_quantity > 0 else None
+                        per_share_str = f"${per_share:+.2f}/share" if per_share is not None else ""
 
                         lines.append(
                             f"  {i}. {roll.timestamp.strftime('%Y-%m-%d')}: "
@@ -708,7 +718,7 @@ class RollHistoryPanel(Static):
                             f"({roll.old_dte} → {roll.new_dte} DTE, "
                             f"Δ{roll.dte_change:+d} days) "
                             f"[{style}]${roll.premium_effect:+,.2f} {label}[/{style}] "
-                            f"([dim]${roll.pnl_per_contract:+.2f}/contract[/dim])"
+                            f"([dim]{per_share_str}[/dim])"
                         )
             except Exception as e:
                 logger.error(f"RollHistoryPanel: Error building roll entries: {e}", exc_info=True)
