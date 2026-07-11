@@ -2,16 +2,17 @@
 
 from datetime import datetime, timedelta
 from typing import Optional
+
 import typer
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich.text import Text
 from rich import box
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
 from .client import get_client
 from .config import get_default_account, set_default_account
-from .models import Position
+from .domain.snapshots import PositionSnapshot, StrategySnapshot
 
 app = typer.Typer(
     name="pilot",
@@ -48,11 +49,17 @@ def format_pnl(value: float, percent: float | None = None) -> Text:
     return Text(text, style=color)
 
 
-def format_position_row(pos: Position) -> list:
+def format_position_row(pos: PositionSnapshot) -> list:
     """Format a position as a table row."""
     # Symbol display
-    if pos.is_option:
-        exp = pos.expiration_date.strftime("%m/%d") if pos.expiration_date else "?"
+    is_option = pos.position_type.value.endswith("Option")
+    is_short = pos.quantity_direction.value == "Short" or pos.quantity < 0
+    if is_option:
+        exp = (
+            datetime.fromisoformat(pos.expiration_date).strftime("%m/%d")
+            if pos.expiration_date
+            else "?"
+        )
         opt_type = "C" if pos.option_type == "C" else "P"
         strike = f"${pos.strike_price:.0f}" if pos.strike_price else "?"
         symbol = f"{pos.underlying_symbol} {exp} {strike}{opt_type}"
@@ -62,21 +69,20 @@ def format_position_row(pos: Position) -> list:
         dte = "-"
 
     # Quantity with direction
-    qty_color = "red" if pos.is_short else "green"
-    qty = Text(pos.display_quantity, style=qty_color)
+    qty_color = "red" if is_short else "green"
+    qty = Text(f"{'-' if is_short else '+'}{abs(pos.quantity)}", style=qty_color)
 
     # Price
-    price = pos.mark_price or pos.close_price
+    price = pos.mark_price
     price_str = f"${price:.2f}" if price else "-"
 
     # P/L
     pnl = format_pnl(pos.unrealized_pnl, pos.unrealized_pnl_percent)
 
     # Greeks (if option)
-    delta = f"{pos.greeks.delta:.2f}" if pos.greeks and pos.greeks.delta else "-"
-    if pos.greeks and pos.greeks.theta:
-        # Adjust theta for short positions (positive theta = gains from time decay)
-        adjusted_theta = -pos.greeks.theta if pos.is_short else pos.greeks.theta
+    delta = f"{pos.delta:.2f}" if pos.delta else "-"
+    if pos.theta:
+        adjusted_theta = -pos.theta if is_short else pos.theta
         theta = f"${adjusted_theta * pos.multiplier * abs(pos.quantity):.0f}"
     else:
         theta = "-"
@@ -84,24 +90,15 @@ def format_position_row(pos: Position) -> list:
     return [symbol, qty, dte, price_str, pnl, delta, theta]
 
 
-def format_strategy_row(strategy) -> list:
+def format_strategy_row(strategy: StrategySnapshot) -> list:
     """Format a strategy as a table row."""
-    from .analysis import StrategyGroup
-
-    # Strategy name with underlying and expiration
-    exp_str = ""
-    if strategy.expiration:
-        exp_str = strategy.expiration.strftime("%m/%d")
-    elif strategy.days_to_expiration is not None:
-        exp_str = f"{strategy.days_to_expiration}d"
-
-    name = f"{strategy.underlying} {strategy.strategy_type.value}"
+    name = f"{strategy.underlying} {strategy.strategy_type}"
 
     # Strikes
-    strikes = strategy.strikes_display
+    strikes = strategy.strikes
 
     # Quantity
-    qty = str(strategy.total_quantity)
+    qty = str(strategy.quantity)
 
     # DTE
     dte = f"{strategy.days_to_expiration}d" if strategy.days_to_expiration is not None else "-"
@@ -124,8 +121,8 @@ def positions(
     enrich: bool = typer.Option(False, "--enrich", "-e", help="Fetch live Greeks (slower)"),
     group: bool = typer.Option(False, "--group", "-g", help="Group positions by strategy"),
 ):
-    """Show current positions."""
-    from .analysis import detect_strategies
+    """Show positions from the shared versioned portfolio service."""
+    from .domain.factory import get_database, get_portfolio_service
 
     client = get_client()
 
@@ -134,41 +131,27 @@ def positions(
         console.print("Set TASTYTRADE_CLIENT_SECRET and TASTYTRADE_REFRESH_TOKEN in .env")
         raise typer.Exit(1)
 
-    with console.status("Fetching accounts..."):
-        accts = client.get_accounts()
-
-    if not accts:
+    with console.status("Refreshing versioned portfolio snapshot..."):
+        snapshot = get_portfolio_service().refresh(enrich=enrich)
+    if not snapshot.accounts:
         console.print("[yellow]No accounts found[/yellow]")
         raise typer.Exit(0)
 
-    # Resolve account: CLI flag > config default > first account
-    account_num, source = resolve_account(account)
-
-    if account_num:
-        selected = next((a for a in accts if a.account_number == account_num), None)
-        if not selected:
-            console.print(f"[red]Account {account_num} not found[/red]")
-            raise typer.Exit(1)
-    else:
-        selected = accts[0]
-
-    # Fetch balances and positions
-    with console.status(f"Fetching positions for {selected.display_name}..."):
-        balances = client.get_account_balances(selected.account_number)
-        positions = client.get_positions(selected.account_number)
-
-        if enrich:
-            for i, pos in enumerate(positions):
-                if pos.is_option:
-                    console.status.update(f"Enriching {i+1}/{len(positions)}...")
-                    positions[i] = client.enrich_position_greeks(pos)
-
-    if balances:
-        selected.net_liquidating_value = balances.get("net_liquidating_value") or 0
-        selected.cash_balance = balances.get("cash_balance") or 0
-        selected.buying_power = balances.get("buying_power") or 0
-
-    selected.positions = positions
+    account_num, _ = resolve_account(account)
+    selected_id = (
+        get_database().account_id_for_broker_number(account_num) if account_num else None
+    )
+    selected = next(
+        (item for item in snapshot.accounts if item.account_id == selected_id),
+        snapshot.accounts[0] if selected_id is None else None,
+    )
+    if selected is None:
+        console.print("[red]Requested account not found[/red]")
+        raise typer.Exit(1)
+    positions = selected.positions
+    strategies = [
+        strategy for strategy in snapshot.strategies if strategy.account_id == selected.account_id
+    ]
 
     # Display account summary
     summary = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
@@ -180,7 +163,7 @@ def positions(
     summary.add_row("Buying Power", f"${selected.buying_power:,.2f}")
     summary.add_row("Positions", str(len(positions)))
 
-    console.print(Panel(summary, title=f"[bold]{selected.display_name}[/bold]", border_style="blue"))
+    console.print(Panel(summary, title=f"[bold]{selected.label}[/bold]", border_style="blue"))
 
     if not positions:
         console.print("[dim]No open positions[/dim]")
@@ -189,9 +172,6 @@ def positions(
     total_pnl = 0.0
 
     if group:
-        # Detect and display strategies
-        strategies = detect_strategies(positions)
-
         table = Table(title="Strategies", box=box.ROUNDED)
         table.add_column("Strategy", style="cyan")
         table.add_column("Strikes", style="dim")
@@ -222,7 +202,11 @@ def positions(
         # Sort: options first, then by underlying
         sorted_positions = sorted(
             positions,
-            key=lambda p: (not p.is_option, p.underlying_symbol, p.expiration_date or ""),
+            key=lambda p: (
+                not p.position_type.value.endswith("Option"),
+                p.underlying_symbol,
+                p.expiration_date or "",
+            ),
         )
 
         for pos in sorted_positions:

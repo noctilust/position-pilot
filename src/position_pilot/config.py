@@ -1,18 +1,19 @@
-"""Configuration management for Position Pilot."""
+"""SQLite-backed configuration management for Position Pilot."""
 
-import json
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Any
 
-# Default config location
+from .domain.factory import get_database
+
 CONFIG_DIR = Path.home() / ".config" / "position-pilot"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
-# Default configuration
 DEFAULT_CONFIG = {
     "watchlist": ["SPY", "QQQ", "IWM", "VIX"],
     "default_account": None,
-    "refresh_interval": 60,  # seconds
+    "refresh_interval": 60,
     "alerts": {
         "dte_warning": 21,
         "dte_critical": 7,
@@ -23,87 +24,80 @@ DEFAULT_CONFIG = {
 }
 
 
+def get_settings_database():
+    """Return the process-wide settings repository."""
+
+    return get_database()
+
+
 def ensure_config_dir() -> None:
-    """Ensure config directory exists."""
+    """Ensure the legacy configuration directory exists for compatibility."""
+
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_config() -> dict[str, Any]:
-    """Load configuration from file, creating defaults if needed."""
-    ensure_config_dir()
+    """Load all supported settings from SQLite with durable defaults."""
 
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE) as f:
-                config = json.load(f)
-            # Merge with defaults to ensure all keys exist
-            return {**DEFAULT_CONFIG, **config}
-        except (json.JSONDecodeError, IOError):
-            return DEFAULT_CONFIG.copy()
-
-    # Create default config file
-    save_config(DEFAULT_CONFIG)
-    return DEFAULT_CONFIG.copy()
+    database = get_settings_database()
+    return {
+        key: database.get_setting(key, default)
+        for key, default in DEFAULT_CONFIG.items()
+    }
 
 
 def save_config(config: dict[str, Any]) -> None:
-    """Save configuration to file."""
-    ensure_config_dir()
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2)
+    """Persist supported settings atomically per key."""
+
+    database = get_settings_database()
+    for key, value in config.items():
+        database.set_setting(key, value)
 
 
 def get_watchlist() -> list[str]:
     """Get the current watchlist."""
-    config = load_config()
-    return config.get("watchlist", DEFAULT_CONFIG["watchlist"])
+
+    return load_config()["watchlist"]
 
 
 def set_watchlist(symbols: list[str]) -> None:
-    """Set the watchlist."""
-    config = load_config()
-    config["watchlist"] = [s.upper() for s in symbols]
-    save_config(config)
+    """Set the watchlist, capped at the confirmed 100-symbol scale target."""
+
+    normalized = list(dict.fromkeys(symbol.upper() for symbol in symbols))
+    if len(normalized) > 100:
+        raise ValueError("Watchlist supports at most 100 symbols")
+    get_settings_database().set_setting("watchlist", normalized)
 
 
 def add_to_watchlist(symbol: str) -> bool:
-    """Add a symbol to watchlist. Returns True if added, False if already exists."""
-    config = load_config()
-    symbol = symbol.upper()
-    watchlist = config.get("watchlist", [])
+    """Add a symbol to the watchlist if capacity permits."""
 
-    if symbol in watchlist:
+    normalized = symbol.upper()
+    watchlist = get_watchlist()
+    if normalized in watchlist:
         return False
-
-    watchlist.append(symbol)
-    config["watchlist"] = watchlist
-    save_config(config)
+    set_watchlist([*watchlist, normalized])
     return True
 
 
 def remove_from_watchlist(symbol: str) -> bool:
-    """Remove a symbol from watchlist. Returns True if removed, False if not found."""
-    config = load_config()
-    symbol = symbol.upper()
-    watchlist = config.get("watchlist", [])
+    """Remove a symbol from the watchlist."""
 
-    if symbol not in watchlist:
+    normalized = symbol.upper()
+    watchlist = get_watchlist()
+    if normalized not in watchlist:
         return False
-
-    watchlist.remove(symbol)
-    config["watchlist"] = watchlist
-    save_config(config)
+    set_watchlist([item for item in watchlist if item != normalized])
     return True
 
 
 def get_default_account() -> str | None:
-    """Get the default account number."""
-    config = load_config()
-    return config.get("default_account")
+    """Get the broker account selected for CLI compatibility."""
+
+    return get_settings_database().get_setting("default_account")
 
 
 def set_default_account(account_number: str | None) -> None:
-    """Set the default account number."""
-    config = load_config()
-    config["default_account"] = account_number
-    save_config(config)
+    """Set the broker account selected for CLI compatibility."""
+
+    get_settings_database().set_setting("default_account", account_number)

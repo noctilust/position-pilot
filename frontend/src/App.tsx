@@ -18,7 +18,7 @@ import {
   Unplug,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 type ProviderState = "configured" | "not_configured" | "not_checked";
 
@@ -37,13 +37,45 @@ type BootstrapPayload = {
     risk_refresh_seconds: number;
   };
   navigation: string[];
+  primary_account_id: string;
   data_state: string;
   server_time: string;
+};
+
+type PortfolioAccount = {
+  account_id: string;
+  label: string;
+  account_type: string;
+  net_liquidating_value: number;
+  cash_balance: number;
+  buying_power: number;
+  positions: Array<{ unrealized_pnl: number }>;
+};
+
+type PortfolioSnapshot = {
+  snapshot_id: string;
+  captured_at: string;
+  state: "live" | "cached";
+  accounts: PortfolioAccount[];
+  strategies: Array<{ strategy_id: string }>;
+  totals: {
+    net_liquidating_value: number;
+    cash_balance: number;
+    buying_power: number;
+    unrealized_pnl: number;
+  };
+  selected_account_id: string;
+  notice: string | null;
 };
 
 type AppState =
   | { kind: "loading"; message: string }
   | { kind: "ready"; payload: BootstrapPayload }
+  | { kind: "error"; message: string };
+
+type PortfolioState =
+  | { kind: "loading" }
+  | { kind: "ready"; snapshot: PortfolioSnapshot }
   | { kind: "error"; message: string };
 
 const navigationIcons: Record<string, LucideIcon> = {
@@ -95,6 +127,35 @@ function getBootstrap() {
   return bootstrapPromise;
 }
 
+async function fetchPortfolio(accountId = "all", refresh = false): Promise<PortfolioSnapshot> {
+  const search = new URLSearchParams({ account_id: accountId });
+  if (refresh) search.set("refresh", "true");
+  const response = await fetch(`/api/v1/portfolio?${search}`, {
+    credentials: "same-origin",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) throw new Error("Portfolio data is currently unavailable.");
+  return response.json() as Promise<PortfolioSnapshot>;
+}
+
+async function savePrimaryAccount(accountId: string) {
+  const response = await fetch("/api/v1/settings/primary-account", {
+    method: "PUT",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ account_id: accountId }),
+  });
+  if (!response.ok) throw new Error("The primary account preference could not be saved.");
+}
+
+function currency(value: number) {
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+  }).format(value);
+}
+
 function App() {
   const [state, setState] = useState<AppState>({
     kind: "loading",
@@ -102,6 +163,27 @@ function App() {
   });
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [activeSection, setActiveSection] = useState("Overview");
+  const [portfolio, setPortfolio] = useState<PortfolioState>({ kind: "loading" });
+  const [accountOptions, setAccountOptions] = useState<PortfolioAccount[]>([]);
+
+  const loadPortfolio = useCallback(
+    async (accountId = "all", refresh = false, background = false) => {
+      if (!background) setPortfolio({ kind: "loading" });
+      try {
+        const snapshot = await fetchPortfolio(accountId, refresh);
+        if (accountId === "all") setAccountOptions(snapshot.accounts);
+        setPortfolio({ kind: "ready", snapshot });
+      } catch (error: unknown) {
+        if (!background) {
+          setPortfolio({
+            kind: "error",
+            message: error instanceof Error ? error.message : "Portfolio data is unavailable.",
+          });
+        }
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     getBootstrap()
@@ -118,6 +200,18 @@ function App() {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
 
+  useEffect(() => {
+    if (state.kind !== "ready") return;
+    void loadPortfolio().then(() =>
+      loadPortfolio(state.payload.primary_account_id || "all", true, true),
+    );
+  }, [loadPortfolio, state.kind]);
+
+  const selectAccount = (accountId: string) => {
+    void savePrimaryAccount(accountId);
+    void loadPortfolio(accountId);
+  };
+
   if (state.kind !== "ready") {
     return <LaunchState state={state} />;
   }
@@ -132,14 +226,20 @@ function App() {
       <div className="workspace">
         <WorkspaceHeader
           payload={state.payload}
+          portfolio={portfolio}
+          accountOptions={accountOptions}
+          onAccountChange={selectAccount}
           theme={theme}
           onThemeChange={() => setTheme(theme === "dark" ? "light" : "dark")}
         />
         <main id="main-content" className="overview" tabIndex={-1}>
           <FoundationNotice />
-          <PortfolioMasthead payload={state.payload} />
+          <PortfolioMasthead portfolio={portfolio} />
+          {portfolio.kind === "ready" && portfolio.snapshot.notice ? (
+            <p className="offline-notice" role="status">{portfolio.snapshot.notice}</p>
+          ) : null}
           <div className="overview-grid">
-            <RiskField />
+            <RiskField portfolio={portfolio} />
             <CatalystField />
             <ProviderLedger providers={state.payload.providers} />
             <MonitoringStrip monitoring={state.payload.monitoring} />
@@ -207,10 +307,16 @@ function NavigationRail({
 
 function WorkspaceHeader({
   payload,
+  portfolio,
+  accountOptions,
+  onAccountChange,
   theme,
   onThemeChange,
 }: {
   payload: BootstrapPayload;
+  portfolio: PortfolioState;
+  accountOptions: PortfolioAccount[];
+  onAccountChange: (accountId: string) => void;
   theme: "dark" | "light";
   onThemeChange: () => void;
 }) {
@@ -227,9 +333,19 @@ function WorkspaceHeader({
     <header className="workspace-header">
       <div className="account-context">
         <span>Workspace</span>
-        <button type="button">
-          All accounts <ChevronRight aria-hidden="true" />
-        </button>
+        <select
+          aria-label="Account scope"
+          value={portfolio.kind === "ready" ? portfolio.snapshot.selected_account_id : "all"}
+          onChange={(event) => onAccountChange(event.target.value)}
+          disabled={portfolio.kind !== "ready"}
+        >
+          <option value="all">All accounts</option>
+          {accountOptions.map((account) => (
+                <option value={account.account_id} key={account.account_id}>
+                  {account.label}
+                </option>
+              ))}
+        </select>
       </div>
       <div className="header-actions">
         <span className="local-clock">
@@ -253,32 +369,59 @@ function FoundationNotice() {
     <section className="foundation-notice" aria-label="Implementation status">
       <span className="status-pip" aria-hidden="true" />
       <p>
-        <strong>Web foundation online.</strong> Secure local session established; live portfolio snapshots arrive in the next phase.
+        <strong>Snapshot service online.</strong> Portfolio state is versioned, account-scoped, and available from durable local cache.
       </p>
-      <span>Phase 1 / 7</span>
+      <span>Phase 2 / 7</span>
     </section>
   );
 }
 
-function PortfolioMasthead({ payload }: { payload: BootstrapPayload }) {
+function PortfolioMasthead({ portfolio }: { portfolio: PortfolioState }) {
+  const snapshot = portfolio.kind === "ready" ? portfolio.snapshot : null;
   return (
     <section className="portfolio-masthead">
       <div>
         <p className="eyebrow">Portfolio overview</p>
         <h1>Decision field</h1>
       </div>
+      {snapshot ? (
+        <div className="portfolio-total">
+          <span>Net liquidating value</span>
+          <strong>{currency(snapshot.totals.net_liquidating_value)}</strong>
+        </div>
+      ) : null}
       <div className="snapshot-state">
         <Clock3 aria-hidden="true" />
         <div>
           <span>Portfolio snapshot</span>
-          <strong>{payload.data_state === "awaiting_portfolio_snapshot" ? "Awaiting first load" : "Available"}</strong>
+          <strong>
+            {snapshot
+              ? `${snapshot.state === "cached" ? "Cached" : "Live"} · ${new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(snapshot.captured_at))}`
+              : portfolio.kind === "error"
+                ? "Unavailable"
+                : "Loading"}
+          </strong>
         </div>
       </div>
     </section>
   );
 }
 
-function RiskField() {
+function RiskField({ portfolio }: { portfolio: PortfolioState }) {
+  const snapshot = portfolio.kind === "ready" ? portfolio.snapshot : null;
+  const metrics = snapshot
+    ? [
+        ["Accounts", String(snapshot.accounts.length)],
+        ["Strategies", String(snapshot.strategies.length)],
+        ["Unrealized P/L", currency(snapshot.totals.unrealized_pnl)],
+        ["Buying power", currency(snapshot.totals.buying_power)],
+      ]
+    : [
+        ["Accounts", "—"],
+        ["Strategies", "—"],
+        ["Unrealized P/L", "—"],
+        ["Buying power", "—"],
+      ];
   return (
     <section className="risk-field panel-section" aria-labelledby="risk-heading">
       <div className="section-heading">
@@ -286,7 +429,7 @@ function RiskField() {
           <p className="eyebrow">01 / Exposure</p>
           <h2 id="risk-heading">Risk field</h2>
         </div>
-        <span className="section-state">Data pending</span>
+        <span className="section-state">{snapshot ? `${snapshot.accounts.length} account scope` : "Data pending"}</span>
       </div>
       <div className="empty-measure">
         <div className="measure-axis" aria-hidden="true">
@@ -297,17 +440,18 @@ function RiskField() {
         </div>
         <div>
           <Gauge aria-hidden="true" />
-          <h3>No portfolio snapshot yet</h3>
-          <p>Exposure, Greeks, stress scenarios, and strategy urgency will resolve here as one coherent snapshot.</p>
+          <h3>{snapshot ? "Atomic portfolio snapshot" : "No portfolio snapshot yet"}</h3>
+          <p>
+            {snapshot
+              ? `${snapshot.strategies.length} account-scoped strategies are loaded from one coherent generation.`
+              : portfolio.kind === "error"
+                ? portfolio.message
+                : "Exposure, Greeks, stress scenarios, and strategy urgency will resolve here as one coherent snapshot."}
+          </p>
         </div>
       </div>
       <div className="metric-rail" aria-label="Pending portfolio metrics">
-        {[
-          ["Net delta", "—"],
-          ["Daily theta", "—"],
-          ["Gamma risk", "—"],
-          ["Buying power", "—"],
-        ].map(([label, value]) => (
+        {metrics.map(([label, value]) => (
           <div key={label}>
             <span>{label}</span>
             <strong>{value}</strong>

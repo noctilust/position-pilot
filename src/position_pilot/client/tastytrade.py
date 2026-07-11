@@ -143,9 +143,15 @@ class TastytradeClient:
 
     def get_positions(self, account_number: str) -> list[Position]:
         """Fetch all positions for an account."""
+        _, positions = self.get_positions_checked(account_number)
+        return positions
+
+    def get_positions_checked(self, account_number: str) -> tuple[bool, list[Position]]:
+        """Fetch positions while preserving empty-success versus provider failure."""
+
         data = self._get(f"/accounts/{account_number}/positions")
         if not data:
-            return []
+            return False, []
 
         positions = []
         for item in data.get("data", {}).get("items", []):
@@ -153,7 +159,7 @@ class TastytradeClient:
             if pos:
                 positions.append(pos)
 
-        return positions
+        return True, positions
 
     def _parse_position(self, item: dict) -> Optional[Position]:
         """Parse a position from API response."""

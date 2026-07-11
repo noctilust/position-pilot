@@ -1,5 +1,11 @@
 from fastapi.testclient import TestClient
 
+from position_pilot.domain.snapshots import (
+    AccountSnapshot,
+    DataFreshness,
+    PortfolioSnapshot,
+    SnapshotState,
+)
 from position_pilot.web.app import WebSettings, create_app
 
 
@@ -175,3 +181,73 @@ def test_root_serves_the_packaged_dashboard() -> None:
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
     assert "<title>Position Pilot</title>" in response.text
+
+
+class StubPortfolioService:
+    def __init__(self) -> None:
+        self.refresh_count = 0
+        self.snapshot = PortfolioSnapshot(
+            snapshot_id="snapshot-1",
+            captured_at="2026-07-11T16:30:00Z",
+            state=SnapshotState.LIVE,
+            freshness=DataFreshness(
+                as_of="2026-07-11T16:30:00Z",
+                provider="tastytrade",
+            ),
+            accounts=[
+                AccountSnapshot(
+                    account_id="public-account-id",
+                    label="Individual 1",
+                    account_type="Individual",
+                    net_liquidating_value=25_000,
+                )
+            ],
+        )
+
+    def latest(self, account_id: str = "all") -> PortfolioSnapshot | None:
+        return self.snapshot.for_account(account_id)
+
+    def refresh(self) -> PortfolioSnapshot:
+        self.refresh_count += 1
+        return self.snapshot
+
+
+def test_authenticated_portfolio_endpoint_returns_scoped_browser_safe_snapshot() -> None:
+    service = StubPortfolioService()
+    app = create_app(
+        WebSettings(
+            launch_token="launch-secret",
+            session_token="session-secret",
+            enforce_loopback=False,
+        ),
+        portfolio_service=service,
+    )
+    client = TestClient(app)
+    client.post("/api/v1/session/exchange", json={"launch_token": "launch-secret"})
+
+    response = client.get("/api/v1/portfolio?account_id=public-account-id")
+
+    assert response.status_code == 200
+    assert response.json()["selected_account_id"] == "public-account-id"
+    assert response.json()["accounts"][0]["label"] == "Individual 1"
+    assert "5WT" not in response.text
+    assert service.refresh_count == 0
+
+
+def test_portfolio_endpoint_can_request_a_live_refresh() -> None:
+    service = StubPortfolioService()
+    app = create_app(
+        WebSettings(
+            launch_token="launch-secret",
+            session_token="session-secret",
+            enforce_loopback=False,
+        ),
+        portfolio_service=service,
+    )
+    client = TestClient(app)
+    client.post("/api/v1/session/exchange", json={"launch_token": "launch-secret"})
+
+    response = client.get("/api/v1/portfolio?refresh=true")
+
+    assert response.status_code == 200
+    assert service.refresh_count == 1

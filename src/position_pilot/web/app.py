@@ -9,15 +9,19 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Protocol
 
 from dotenv import load_dotenv
 from fastapi import Cookie, FastAPI, HTTPException, Response, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from .. import __version__
+from ..domain.factory import get_portfolio_service
+from ..domain.portfolio import PortfolioService
+from ..domain.snapshots import PortfolioSnapshot, PositionHorizon, StrategySnapshot
 
 STATIC_DIR = Path(__file__).with_name("static")
 
@@ -37,6 +41,32 @@ class SessionExchangeRequest(BaseModel):
     launch_token: str
 
 
+class PrimaryAccountRequest(BaseModel):
+    account_id: str
+
+
+class StrategyHorizonRequest(BaseModel):
+    horizon: PositionHorizon
+
+
+class PortfolioReader(Protocol):
+    """Web-facing portfolio service contract."""
+
+    def latest(self, account_id: str = "all") -> PortfolioSnapshot | None: ...
+
+    def refresh(self) -> PortfolioSnapshot: ...
+
+    def primary_account_id(self) -> str: ...
+
+    def set_primary_account(self, account_id: str) -> None: ...
+
+    def set_strategy_horizon(
+        self,
+        strategy_id: str,
+        horizon: PositionHorizon,
+    ) -> StrategySnapshot: ...
+
+
 def _configured(*environment_keys: str) -> str:
     return (
         "configured"
@@ -45,7 +75,15 @@ def _configured(*environment_keys: str) -> str:
     )
 
 
-def create_app(settings: WebSettings | None = None) -> FastAPI:
+def _default_portfolio_service() -> PortfolioService:
+    return get_portfolio_service()
+
+
+def create_app(
+    settings: WebSettings | None = None,
+    *,
+    portfolio_service: PortfolioReader | None = None,
+) -> FastAPI:
     """Create an isolated local dashboard application."""
 
     load_dotenv(Path.cwd() / ".env", override=False)
@@ -58,6 +96,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         openapi_url=None,
     )
     app.state.web_settings = active_settings
+    app.state.portfolio_service = portfolio_service
     app.state.launch_token_available = True
     app.state.launch_token_lock = asyncio.Lock()
     assets_directory = STATIC_DIR / "assets"
@@ -179,10 +218,91 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
                     "Alerts",
                     "Settings",
                 ],
+                "primary_account_id": (
+                    app.state.portfolio_service.primary_account_id()
+                    if app.state.portfolio_service
+                    and hasattr(app.state.portfolio_service, "primary_account_id")
+                    else "all"
+                ),
                 "data_state": "awaiting_portfolio_snapshot",
                 "server_time": datetime.now(UTC).isoformat(),
             }
         )
+
+    @app.get("/api/v1/portfolio", response_model=PortfolioSnapshot)
+    async def portfolio(
+        refresh: bool = False,
+        account_id: str = "all",
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> PortfolioSnapshot:
+        if session is None or not secrets.compare_digest(
+            session,
+            active_settings.session_token,
+        ):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        service = app.state.portfolio_service
+        if service is None:
+            service = _default_portfolio_service()
+            app.state.portfolio_service = service
+        try:
+            if refresh:
+                snapshot = await run_in_threadpool(service.refresh)
+                return snapshot.for_account(account_id)
+            snapshot = await run_in_threadpool(service.latest, account_id)
+            if snapshot is None:
+                snapshot = await run_in_threadpool(service.refresh)
+                return snapshot.for_account(account_id)
+            return snapshot
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
+        except Exception as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Portfolio data is currently unavailable.",
+            ) from error
+
+    @app.put("/api/v1/settings/primary-account", status_code=status.HTTP_204_NO_CONTENT)
+    async def save_primary_account(
+        payload: PrimaryAccountRequest,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> Response:
+        if session is None or not secrets.compare_digest(session, active_settings.session_token):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        service = app.state.portfolio_service or _default_portfolio_service()
+        app.state.portfolio_service = service
+        try:
+            await run_in_threadpool(service.set_primary_account, payload.account_id)
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.patch("/api/v1/strategies/{strategy_id}/horizon", response_model=StrategySnapshot)
+    async def save_strategy_horizon(
+        strategy_id: str,
+        payload: StrategyHorizonRequest,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> StrategySnapshot:
+        if session is None or not secrets.compare_digest(session, active_settings.session_token):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        service = app.state.portfolio_service or _default_portfolio_service()
+        app.state.portfolio_service = service
+        try:
+            return await run_in_threadpool(
+                service.set_strategy_horizon,
+                strategy_id,
+                payload.horizon,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
 
     @app.get("/{path:path}", include_in_schema=False)
     async def dashboard_shell(path: str) -> Response:
