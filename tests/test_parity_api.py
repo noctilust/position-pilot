@@ -156,7 +156,7 @@ def test_parity_endpoints_are_authenticated_and_redacted(monkeypatch, tmp_path) 
                 iv_summary={"normal": 1},
             )
 
-        def chart(self, symbol):
+        def chart(self, symbol, **kwargs):
             from position_pilot.domain.market import ChartSnapshot, MarketBar
 
             return ChartSnapshot(
@@ -168,9 +168,13 @@ def test_parity_endpoints_are_authenticated_and_redacted(monkeypatch, tmp_path) 
                         high=501,
                         low=498,
                         close=500,
+                        volume=1_000_000,
                     )
                 ],
                 source="tastytrade",
+                prior_close=kwargs.get("prior_close", 500.0),
+                include_extended_hours=kwargs.get("include_extended_hours", True),
+                event_markers=kwargs.get("event_markers") or [],
             )
 
     class StubRolls:
@@ -258,6 +262,43 @@ def test_parity_endpoints_are_authenticated_and_redacted(monkeypatch, tmp_path) 
         def list_symbols(self):
             return ["SPY"]
 
+    class StubCatalysts:
+        def analyze_symbol(self, symbol: str):
+            from position_pilot.domain.catalysts import (
+                AttributionLevel,
+                CatalystConfidence,
+                CoverageState,
+                SymbolCatalystResult,
+            )
+
+            return SymbolCatalystResult(
+                symbol=symbol.upper(),
+                confidence=CatalystConfidence.NO_CONFIRMED_CATALYST,
+                attribution=AttributionLevel.NONE,
+                summary="No confirmed catalyst found",
+                freshness=DataFreshness(
+                    as_of=datetime(2026, 7, 11, 16, 30, tzinfo=UTC),
+                    provider="catalyst-service",
+                ),
+                coverage=CoverageState.COMPLETE,
+                prior_close=500.0,
+                last_price=500.0,
+                move_percent=0.0,
+                quiet=True,
+            )
+
+        def event_markers(self, symbol: str):
+            return []
+
+        def public_settings(self):
+            return {
+                "stock_move_threshold_pct": 2.0,
+                "etf_move_threshold_pct": 1.0,
+                "news_cadence_seconds": 300,
+                "benzinga": {"enabled": False, "status": "disabled"},
+                "scheduled_window_hours": 72,
+            }
+
     monkeypatch.setattr("position_pilot.web.app.get_market_service", lambda: StubMarket())
     monkeypatch.setattr("position_pilot.web.app.get_roll_service", lambda: StubRolls())
     monkeypatch.setattr("position_pilot.web.app.get_order_service", lambda: StubOrders())
@@ -265,6 +306,7 @@ def test_parity_endpoints_are_authenticated_and_redacted(monkeypatch, tmp_path) 
     monkeypatch.setattr("position_pilot.web.app.get_watchlist_service", lambda: StubWatchlist())
     monkeypatch.setattr("position_pilot.web.app.get_risk_service", lambda: RiskService())
     monkeypatch.setattr("position_pilot.web.app.get_database", lambda: database)
+    monkeypatch.setattr("position_pilot.web.app.get_catalyst_service", lambda: StubCatalysts())
     monkeypatch.setattr(
         "position_pilot.web.app.get_field_router",
         lambda: type(
@@ -351,4 +393,4 @@ def test_parity_endpoints_are_authenticated_and_redacted(monkeypatch, tmp_path) 
     assert heatmap.json()["cells"]
 
     bootstrap = client.get("/api/v1/bootstrap")
-    assert bootstrap.json()["application"]["phase"] == "portfolio-parity"
+    assert bootstrap.json()["application"]["phase"] == "catalyst-intelligence"

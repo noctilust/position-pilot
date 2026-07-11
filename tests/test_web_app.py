@@ -76,6 +76,21 @@ def test_authenticated_bootstrap_reports_capabilities_without_secrets(monkeypatc
     monkeypatch.setenv("TASTYTRADE_REFRESH_TOKEN", "private-refresh-token")
     monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
     monkeypatch.delenv("BENZINGA_API_KEY", raising=False)
+
+    class CatalystSettingsStub:
+        def public_settings(self):
+            return {
+                "stock_move_threshold_pct": 2.0,
+                "etf_move_threshold_pct": 1.0,
+                "news_cadence_seconds": 300,
+                "benzinga": {"enabled": False, "status": "disabled"},
+                "scheduled_window_hours": 72,
+            }
+
+    monkeypatch.setattr(
+        "position_pilot.web.app.get_catalyst_service",
+        lambda: CatalystSettingsStub(),
+    )
     app = create_app(
         WebSettings(
             launch_token="launch-secret",
@@ -93,7 +108,7 @@ def test_authenticated_bootstrap_reports_capabilities_without_secrets(monkeypatc
     assert payload["application"] == {
         "name": "Position Pilot",
         "version": "0.1.0",
-        "phase": "portfolio-parity",
+        "phase": "catalyst-intelligence",
     }
     assert payload["providers"] == {
         "tastytrade": "configured",

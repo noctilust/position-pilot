@@ -1266,6 +1266,136 @@ a:focus-visible {
   text-transform: capitalize;
 }
 
+.catalyst-list {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.65rem;
+}
+
+.catalyst-list.compact {
+  gap: 0.5rem;
+}
+
+.catalyst-list li {
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.65rem 0.75rem;
+  background: color-mix(in oklab, var(--panel) 92%, transparent);
+}
+
+.catalyst-list li.catalyst-quiet {
+  opacity: 0.72;
+}
+
+.catalyst-list li.catalyst-promoted {
+  border-color: color-mix(in oklab, var(--accent) 45%, var(--border));
+}
+
+.catalyst-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.7rem;
+  align-items: center;
+  margin-bottom: 0.25rem;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  padding: 0.1rem 0.5rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.01em;
+}
+
+.pill.confidence-confirmed {
+  border-color: color-mix(in oklab, var(--accent) 50%, var(--border));
+}
+
+.pill.confidence-likely {
+  border-color: color-mix(in oklab, var(--warning, #c9a227) 45%, var(--border));
+}
+
+.pill.confidence-no_confirmed_catalyst_found {
+  opacity: 0.8;
+}
+
+.catalyst-inline {
+  font-size: 0.78rem;
+}
+
+.catalyst-inline.quiet {
+  color: var(--text-dim);
+}
+
+.catalyst-inline.promoted {
+  font-weight: 600;
+}
+
+.row-promoted th,
+.row-promoted td {
+  background: color-mix(in oklab, var(--accent) 6%, transparent);
+}
+
+.coverage-notice {
+  border-left: 3px solid color-mix(in oklab, var(--warning, #c9a227) 70%, var(--border));
+  padding: 0.4rem 0.65rem;
+  margin: 0.5rem 0;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.feedback-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+}
+
+.feedback-row button,
+.mechanism-block button {
+  font: inherit;
+  font-size: 0.78rem;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  border-radius: 0.3rem;
+  padding: 0.2rem 0.45rem;
+  cursor: pointer;
+}
+
+.mechanism-block,
+.social-side-note {
+  margin-top: 0.75rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--border);
+}
+
+.mechanism-block h4,
+.social-side-note h4 {
+  margin: 0 0 0.25rem;
+  font-size: 0.85rem;
+}
+
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.primary-action {
+  font: inherit;
+  border: 1px solid color-mix(in oklab, var(--accent) 55%, var(--border));
+  background: color-mix(in oklab, var(--accent) 18%, transparent);
+  color: inherit;
+  border-radius: 0.35rem;
+  padding: 0.4rem 0.75rem;
+  cursor: pointer;
+}
+
 @media (max-width: 960px) {
   .two-col {
     grid-template-columns: 1fr;

@@ -10,7 +10,7 @@ test("secure dashboard shell renders without console or accessibility errors", a
     route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
-        application: { name: "Position Pilot", version: "test", phase: "portfolio-parity" },
+        application: { name: "Position Pilot", version: "test", phase: "catalyst-intelligence" },
         providers: {
           tastytrade: "configured",
           codex: "not_checked",
@@ -23,6 +23,13 @@ test("secure dashboard shell renders without console or accessibility errors", a
           window_end: "18:00",
           evaluation_minutes: 30,
           risk_refresh_seconds: 60,
+        },
+        catalysts: {
+          stock_move_threshold_pct: 2,
+          etf_move_threshold_pct: 1,
+          news_cadence_seconds: 300,
+          benzinga: { enabled: false, status: "disabled" },
+          scheduled_window_hours: 72,
         },
         navigation: ["Overview", "Positions", "Roll analytics", "Markets", "Alerts", "Settings"],
         primary_account_id: "public-account-id",
@@ -172,6 +179,76 @@ test("secure dashboard shell renders without console or accessibility errors", a
       }),
     }),
   );
+  await page.route("**/api/v1/catalysts**", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        captured_at: "2026-07-11T16:30:00Z",
+        results: [
+          {
+            symbol: "SPY",
+            confidence: "no_confirmed_catalyst_found",
+            attribution: "none",
+            summary: "No confirmed catalyst found",
+            catalysts: [],
+            option_mechanisms: [],
+            social_side_notes: [],
+            move_percent: 0.2,
+            prior_close: 500,
+            last_price: 501,
+            meaningful_move: false,
+            promoted: false,
+            coverage: "complete",
+            coverage_notes: [],
+            quiet: true,
+            freshness: {
+              as_of: "2026-07-11T16:30:00Z",
+              provider: "catalyst-service",
+              state: "fresh",
+            },
+          },
+        ],
+        settings: {
+          stock_move_threshold_pct: 2,
+          etf_move_threshold_pct: 1,
+          news_cadence_seconds: 300,
+          benzinga: { enabled: false, status: "disabled" },
+          scheduled_window_hours: 72,
+        },
+        coverage: "complete",
+        coverage_notes: [],
+        freshness: {
+          as_of: "2026-07-11T16:30:00Z",
+          provider: "catalyst-service",
+          state: "fresh",
+        },
+      }),
+    }),
+  );
+  await page.route("**/api/v1/settings/catalysts", (route) => {
+    if (route.request().method() === "PUT") {
+      return route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          stock_move_threshold_pct: 2,
+          etf_move_threshold_pct: 1,
+          news_cadence_seconds: 180,
+          benzinga: { enabled: false, status: "disabled" },
+          scheduled_window_hours: 72,
+        }),
+      });
+    }
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        stock_move_threshold_pct: 2,
+        etf_move_threshold_pct: 1,
+        news_cadence_seconds: 300,
+        benzinga: { enabled: false, status: "disabled" },
+        scheduled_window_hours: 72,
+      }),
+    });
+  });
   await page.route("**/api/v1/accounts/*/orders", (route) =>
     route.fulfill({
       contentType: "application/json",
@@ -251,7 +328,37 @@ test("secure dashboard shell renders without console or accessibility errors", a
           stress: [{ name: "theta_1d", label: "1-day theta", estimated_pnl_change: 4, description: "theta" }],
         },
         market: { symbol: "SPY", price: 500, bid: 499.9, ask: 500.1, iv: 0.2, iv_rank: 35, iv_percentile: 40, liquidity_rating: 4, iv_environment: "normal", spread_percent: 0.04 },
-        chart: { symbol: "SPY", bars: [{ timestamp: "2026-07-11T16:30:00Z", open: 499, high: 501, low: 498, close: 500 }], source: "massive-stocks", notice: null },
+        chart: {
+          symbol: "SPY",
+          bars: [{ timestamp: "2026-07-11T16:30:00Z", open: 499, high: 501, low: 498, close: 500, volume: 1000 }],
+          source: "massive-stocks",
+          notice: null,
+          prior_close: 498,
+          include_extended_hours: true,
+          event_markers: [],
+        },
+        catalyst: {
+          symbol: "SPY",
+          confidence: "no_confirmed_catalyst_found",
+          attribution: "none",
+          summary: "No confirmed catalyst found",
+          catalysts: [],
+          option_mechanisms: [],
+          social_side_notes: [],
+          move_percent: 0.2,
+          prior_close: 498,
+          last_price: 500,
+          meaningful_move: false,
+          promoted: false,
+          coverage: "complete",
+          coverage_notes: [],
+          quiet: true,
+          freshness: {
+            as_of: "2026-07-11T16:30:00Z",
+            provider: "catalyst-service",
+            state: "fresh",
+          },
+        },
         thesis: null,
         trade_plan: null,
         audit: [],
@@ -270,16 +377,19 @@ test("secure dashboard shell renders without console or accessibility errors", a
   await expect(page.getByText("Provider ledger")).toBeVisible();
   await expect(page.getByRole("combobox", { name: "Account scope" })).toBeVisible();
   await expect(page.getByText("$25,000.00").first()).toBeVisible();
-  await expect(page.getByText("Portfolio feature parity.")).toBeVisible();
+  await expect(page.getByText("Catalyst intelligence.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Held-symbol catalysts" })).toBeVisible();
 
   await page.getByRole("button", { name: "Positions" }).click();
   await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
   await expect(page.getByText("Short Put")).toBeVisible();
+  await expect(page.getByText("No confirmed catalyst found").first()).toBeVisible();
   await expect(page.getByRole("heading", { name: "Order activity" })).toBeVisible();
 
   await page.getByRole("button", { name: "SPY" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await expect(page.getByText("Remaining max profit")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Catalysts" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Close", exact: true })).toBeFocused();
   await expect(page.getByLabel("Decision horizon")).toHaveValue("tactical");
   await expect(page.getByLabel("Profit target")).toBeVisible();
@@ -299,6 +409,7 @@ test("secure dashboard shell renders without console or accessibility errors", a
 
   await page.getByRole("button", { name: "Settings" }).click();
   await expect(page.getByRole("heading", { name: "Saved identities" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "News cadence and thresholds" })).toBeVisible();
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(accessibility.violations).toEqual([]);

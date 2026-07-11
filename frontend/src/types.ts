@@ -1,5 +1,16 @@
 export type ProviderState = "configured" | "not_configured" | "not_checked";
 
+export type CatalystSettings = {
+  stock_move_threshold_pct: number;
+  etf_move_threshold_pct: number;
+  news_cadence_seconds: number;
+  benzinga: {
+    enabled: boolean;
+    status: string;
+  };
+  scheduled_window_hours: number;
+};
+
 export type BootstrapPayload = {
   application: {
     name: string;
@@ -14,10 +25,99 @@ export type BootstrapPayload = {
     evaluation_minutes: number;
     risk_refresh_seconds: number;
   };
+  catalysts?: CatalystSettings;
   navigation: string[];
   primary_account_id: string;
   data_state: string;
   server_time: string;
+};
+
+export type CatalystSource = {
+  source_id: string;
+  name: string;
+  tier: string;
+  url: string;
+  provider: string;
+  published_at: string;
+  excerpt: string | null;
+};
+
+export type CatalystEvent = {
+  catalyst_id: string;
+  symbol: string;
+  headline: string;
+  summary: string;
+  taxonomy: string;
+  confidence: string;
+  attribution: string;
+  evidence_kind: string;
+  event_at: string;
+  sources: CatalystSource[];
+  rank_score: number;
+  high_impact: boolean;
+};
+
+export type OptionMechanism = {
+  kind: string;
+  label: string;
+  summary: string;
+  evidence_kind: string;
+  magnitude: number | null;
+};
+
+export type SocialSideNote = {
+  note_id: string;
+  headline: string;
+  summary: string;
+  evidence_kind: string;
+  source_name: string;
+  url: string | null;
+  confidence_note: string;
+};
+
+export type OptionMechanismCoverage = {
+  kind: string;
+  label: string;
+  availability: string;
+  detail: string;
+};
+
+export type SymbolCatalystResult = {
+  symbol: string;
+  confidence: string;
+  attribution: string;
+  summary: string;
+  catalysts: CatalystEvent[];
+  option_mechanisms: OptionMechanism[];
+  option_mechanism_coverage?: OptionMechanismCoverage[];
+  social_side_notes: SocialSideNote[];
+  move_percent: number | null;
+  prior_close: number | null;
+  last_price: number | null;
+  meaningful_move: boolean;
+  promoted: boolean;
+  coverage: string;
+  coverage_notes: string[];
+  quiet: boolean;
+  cached?: boolean;
+  freshness: {
+    as_of: string;
+    provider: string;
+    state: string;
+  };
+};
+
+export type CatalystScanSnapshot = {
+  captured_at: string;
+  results: SymbolCatalystResult[];
+  settings: CatalystSettings;
+  coverage: string;
+  coverage_notes: string[];
+  freshness: {
+    as_of: string;
+    provider: string;
+    state: string;
+  };
 };
 
 export type PositionLeg = {
@@ -240,10 +340,25 @@ export type StrategyDetail = {
       high: number;
       low: number;
       close: number;
+      volume?: number | null;
     }>;
     source: string;
     notice: string | null;
+    prior_close?: number | null;
+    include_extended_hours?: boolean;
+    extended_hours_truthful?: boolean;
+    volume_series?: number[];
+    window_start?: string | null;
+    window_end?: string | null;
+    event_markers?: Array<{
+      catalyst_id: string;
+      timestamp: string;
+      headline: string;
+      confidence: string;
+      attribution: string;
+    }>;
   };
+  catalyst?: SymbolCatalystResult | null;
   thesis: {
     purpose: string;
     expected_duration: string;

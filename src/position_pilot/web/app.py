@@ -21,7 +21,14 @@ from starlette.concurrency import run_in_threadpool
 
 from .. import __version__
 from ..client import get_client
+from ..domain.catalysts import (
+    CatalystFeedbackEvent,
+    CatalystFeedbackKind,
+    CatalystScanSnapshot,
+    SymbolCatalystResult,
+)
 from ..domain.factory import (
+    get_catalyst_service,
     get_database,
     get_field_router,
     get_market_service,
@@ -93,6 +100,20 @@ class TradePlanRequest(BaseModel):
 
 class WatchlistRequest(BaseModel):
     symbols: list[str] = Field(max_length=100)
+
+
+class CatalystFeedbackRequest(BaseModel):
+    kind: CatalystFeedbackKind
+    catalyst_id: str | None = None
+    symbol: str | None = None
+    note: str = Field(default="", max_length=2_000)
+
+
+class CatalystSettingsRequest(BaseModel):
+    stock_move_threshold_pct: float | None = Field(default=None, ge=0.1, le=50)
+    etf_move_threshold_pct: float | None = Field(default=None, ge=0.1, le=50)
+    news_cadence_seconds: int | None = Field(default=None, ge=60, le=3600)
+    benzinga_enabled: bool | None = None
 
 
 class PortfolioReader(Protocol):
@@ -288,6 +309,11 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
+        # Safe retention pass on startup (never blocks portfolio panels on failure).
+        try:
+            get_catalyst_service().apply_retention()
+        except Exception:
+            pass
         await _start_streaming_runtime(application, active_settings)
         try:
             yield
@@ -409,7 +435,7 @@ def create_app(
                 "application": {
                     "name": "Position Pilot",
                     "version": __version__,
-                    "phase": "portfolio-parity",
+                    "phase": "catalyst-intelligence",
                 },
                 "providers": {
                     "tastytrade": _configured(
@@ -427,6 +453,7 @@ def create_app(
                     "evaluation_minutes": 30,
                     "risk_refresh_seconds": 60,
                 },
+                "catalysts": get_catalyst_service().public_settings(),
                 "navigation": [
                     "Overview",
                     "Positions",
@@ -539,7 +566,24 @@ def create_app(
                 underlying_price=underlying_price,
             )
         )
-        chart = await run_in_threadpool(get_market_service().chart, strategy.underlying)
+        catalyst = await run_in_threadpool(
+            get_catalyst_service().analyze_symbol,
+            strategy.underlying,
+        )
+        markers = await run_in_threadpool(
+            get_catalyst_service().event_markers,
+            strategy.underlying,
+        )
+        chart = await run_in_threadpool(
+            lambda: get_market_service().chart(
+                strategy.underlying,
+                prior_close=catalyst.prior_close,
+                event_markers=markers,
+                include_extended_hours=True,
+                window_start=catalyst.lookback_start,
+                window_end=catalyst.lookback_end,
+            )
+        )
         thesis = await run_in_threadpool(get_plans_service().get_thesis, strategy_id)
         trade_plan = await run_in_threadpool(get_plans_service().get_trade_plan, strategy_id)
         audit = await run_in_threadpool(get_plans_service().audit_history, strategy_id)
@@ -555,11 +599,21 @@ def create_app(
             "risk": risk.model_dump(mode="json"),
             "market": market.model_dump(mode="json") if market else None,
             "chart": chart.model_dump(mode="json"),
+            "catalyst": catalyst.model_dump(mode="json"),
             "thesis": thesis.model_dump(mode="json") if thesis else None,
             "trade_plan": trade_plan.model_dump(mode="json") if trade_plan else None,
             "audit": [event.model_dump(mode="json") for event in audit],
             "rolls": [chain.model_dump(mode="json") for chain in rolls],
             "events": [
+                {
+                    "kind": "catalyst",
+                    "timestamp": event.event_at.isoformat(),
+                    "summary": event.headline,
+                    "action": event.confidence.value,
+                }
+                for event in catalyst.catalysts
+            ]
+            + [
                 {
                     "kind": "audit",
                     "timestamp": event.recorded_at.isoformat(),
@@ -702,7 +756,103 @@ def create_app(
         ] = None,
     ) -> ChartSnapshot:
         _require_session(session, active_settings.session_token)
-        return await run_in_threadpool(get_market_service().chart, symbol)
+        catalyst = await run_in_threadpool(get_catalyst_service().analyze_symbol, symbol)
+        markers = await run_in_threadpool(get_catalyst_service().event_markers, symbol)
+        return await run_in_threadpool(
+            lambda: get_market_service().chart(
+                symbol,
+                prior_close=catalyst.prior_close,
+                event_markers=markers,
+                include_extended_hours=True,
+                window_start=catalyst.lookback_start,
+                window_end=catalyst.lookback_end,
+            )
+        )
+
+    @app.get("/api/v1/catalysts", response_model=CatalystScanSnapshot)
+    async def catalysts_scan(
+        account_id: str = "all",
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> CatalystScanSnapshot:
+        _require_session(session, active_settings.session_token)
+        service = app.state.portfolio_service or _default_portfolio_service()
+        app.state.portfolio_service = service
+        try:
+            snapshot = await _portfolio_or_503(service, account_id=account_id)
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
+        symbols = sorted({strategy.underlying for strategy in snapshot.strategies})
+        return await run_in_threadpool(get_catalyst_service().scan_held, symbols)
+
+    @app.get("/api/v1/catalysts/{symbol}", response_model=SymbolCatalystResult)
+    async def catalyst_for_symbol(
+        symbol: str,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> SymbolCatalystResult:
+        _require_session(session, active_settings.session_token)
+        return await run_in_threadpool(get_catalyst_service().analyze_symbol, symbol)
+
+    @app.post("/api/v1/catalysts/feedback", response_model=CatalystFeedbackEvent)
+    async def catalyst_feedback(
+        payload: CatalystFeedbackRequest,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> CatalystFeedbackEvent:
+        _require_session(session, active_settings.session_token)
+        if payload.kind is CatalystFeedbackKind.MISSING_CATALYST and not payload.symbol:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing catalyst feedback requires a symbol.",
+            )
+        if payload.kind is not CatalystFeedbackKind.MISSING_CATALYST and not payload.catalyst_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Feedback requires a catalyst_id.",
+            )
+        try:
+            return await run_in_threadpool(
+                lambda: get_catalyst_service().submit_feedback(
+                    payload.catalyst_id,
+                    payload.kind,
+                    symbol=payload.symbol,
+                    note=payload.note,
+                )
+            )
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+
+    @app.get("/api/v1/settings/catalysts")
+    async def get_catalyst_settings(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        return get_catalyst_service().public_settings()
+
+    @app.put("/api/v1/settings/catalysts")
+    async def put_catalyst_settings(
+        payload: CatalystSettingsRequest,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        updates = {key: value for key, value in payload.model_dump().items() if value is not None}
+        return await run_in_threadpool(get_catalyst_service().update_settings, updates)
 
     @app.get("/api/v1/watchlist", response_model=WatchlistSnapshot)
     async def watchlist(
@@ -765,9 +915,7 @@ def create_app(
         ] = None,
     ) -> list[RollChainSnapshot]:
         _require_session(session, active_settings.session_token)
-        return await run_in_threadpool(
-            lambda: get_roll_service().chains(account_id, symbol=symbol)
-        )
+        return await run_in_threadpool(lambda: get_roll_service().chains(account_id, symbol=symbol))
 
     @app.get(
         "/api/v1/accounts/{account_id}/rolls/patterns",

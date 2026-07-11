@@ -1,5 +1,7 @@
 import type {
   BootstrapPayload,
+  CatalystScanSnapshot,
+  CatalystSettings,
   MarketOverview,
   MarketQuote,
   OrderRow,
@@ -9,6 +11,7 @@ import type {
   RollHeatmap,
   RollPatterns,
   StrategyDetail,
+  SymbolCatalystResult,
   WatchlistSnapshot,
 } from "./types";
 
@@ -147,6 +150,43 @@ export function fetchRollPatterns(accountId: string, symbol?: string) {
 export function fetchRollHeatmap(accountId: string, symbol: string) {
   const search = new URLSearchParams({ symbol });
   return api<RollHeatmap>(`/api/v1/accounts/${accountId}/rolls/heatmap?${search}`);
+}
+
+export function fetchCatalysts(accountId = "all") {
+  const search = new URLSearchParams({ account_id: accountId });
+  return api<CatalystScanSnapshot>(`/api/v1/catalysts?${search}`);
+}
+
+export function fetchCatalyst(symbol: string) {
+  return api<SymbolCatalystResult>(`/api/v1/catalysts/${encodeURIComponent(symbol)}`);
+}
+
+export function submitCatalystFeedback(payload: {
+  kind: "relevant" | "not_related" | "missing_catalyst";
+  catalyst_id?: string | null;
+  symbol?: string | null;
+  note?: string;
+}) {
+  return api("/api/v1/catalysts/feedback", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchCatalystSettings() {
+  return api<CatalystSettings>("/api/v1/settings/catalysts");
+}
+
+export function saveCatalystSettings(payload: {
+  benzinga_enabled?: boolean;
+  news_cadence_seconds?: number;
+  stock_move_threshold_pct?: number;
+  etf_move_threshold_pct?: number;
+}) {
+  return api<CatalystSettings>("/api/v1/settings/catalysts", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function fetchStreamingState(): Promise<

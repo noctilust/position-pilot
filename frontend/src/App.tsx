@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   currency,
+  fetchCatalysts,
   fetchMarkets,
   fetchOrders,
   fetchPortfolio,
@@ -32,15 +33,19 @@ import {
   fetchWatchlist,
   getBootstrap,
   pct,
+  saveCatalystSettings,
   savePrimaryAccount,
   saveStrategyHorizon,
   saveThesis,
   saveTradePlan,
   saveWatchlist,
   signed,
+  submitCatalystFeedback,
 } from "./api";
 import type {
   BootstrapPayload,
+  CatalystScanSnapshot,
+  CatalystSettings,
   LiveMarketTick,
   MarketOverview,
   OrderRow,
@@ -51,6 +56,7 @@ import type {
   RollHeatmap,
   RollPatterns,
   StrategyDetail,
+  SymbolCatalystResult,
   WatchlistSnapshot,
 } from "./types";
 
@@ -91,6 +97,8 @@ function App() {
   const [heatmap, setHeatmap] = useState<RollHeatmap | null>(null);
   const [selectedStrategyId, setSelectedStrategyId] = useState<string | null>(null);
   const [strategyDetail, setStrategyDetail] = useState<StrategyDetail | null>(null);
+  const [catalysts, setCatalysts] = useState<CatalystScanSnapshot | null>(null);
+  const [catalystError, setCatalystError] = useState<string | null>(null);
   const [liveState, setLiveState] = useState<"connecting" | "live" | "degraded" | "disabled">(
     "connecting",
   );
@@ -98,6 +106,7 @@ function App() {
   const portfolioRequest = useRef(0);
   const rollsRequest = useRef(0);
   const detailRequest = useRef(0);
+  const catalystRequest = useRef(0);
 
   const selectedAccountId =
     portfolio.kind === "ready" ? portfolio.snapshot.selected_account_id : "all";
@@ -140,6 +149,25 @@ function App() {
       setWatchlist(list);
     } catch {
       /* panels remain empty with explicit empty states */
+    }
+  }, []);
+
+  const loadCatalysts = useCallback(async (accountId = "all") => {
+    const request = ++catalystRequest.current;
+    // Clear prior account's catalyst state so results never remain "fresh" across accounts.
+    setCatalysts(null);
+    setCatalystError(null);
+    try {
+      const scan = await fetchCatalysts(accountId);
+      if (request !== catalystRequest.current) return;
+      setCatalysts(scan);
+      setCatalystError(null);
+    } catch (error: unknown) {
+      if (request !== catalystRequest.current) return;
+      setCatalysts(null);
+      setCatalystError(
+        error instanceof Error ? error.message : "Catalyst coverage is unavailable.",
+      );
     }
   }, []);
 
@@ -210,7 +238,8 @@ function App() {
   useEffect(() => {
     if (portfolio.kind !== "ready") return;
     void loadRolls(portfolio.snapshot.selected_account_id);
-  }, [loadRolls, portfolio]);
+    void loadCatalysts(portfolio.snapshot.selected_account_id);
+  }, [loadRolls, loadCatalysts, portfolio]);
 
   useEffect(() => {
     if (state.kind !== "ready") return;
@@ -227,6 +256,7 @@ function App() {
       };
       if (event.event_type === "portfolio.reconciled") {
         void loadPortfolio(selectedAccountId, false, true);
+        void loadCatalysts(selectedAccountId);
       }
       if (event.event_type.startsWith("market.") && event.payload?.symbol) {
         const values = event.payload.values ?? {};
@@ -242,7 +272,7 @@ function App() {
       events.close();
       window.clearInterval(statusTimer);
     };
-  }, [loadPortfolio, selectedAccountId, state.kind]);
+  }, [loadCatalysts, loadPortfolio, selectedAccountId, state.kind]);
 
   const openStrategy = async (strategyId: string) => {
     const request = ++detailRequest.current;
@@ -257,6 +287,8 @@ function App() {
   };
 
   const selectAccount = (accountId: string) => {
+    setCatalysts(null);
+    setCatalystError(null);
     void savePrimaryAccount(accountId);
     void loadPortfolio(accountId);
   };
@@ -306,6 +338,8 @@ function App() {
               portfolio={portfolio}
               risk={risk}
               markets={markets}
+              catalysts={catalysts}
+              catalystError={catalystError}
               providers={state.payload.providers}
               monitoring={state.payload.monitoring}
             />
@@ -316,6 +350,7 @@ function App() {
               snapshot={snapshot}
               onSelectStrategy={(id) => void openStrategy(id)}
               orders={orders}
+              catalysts={catalysts}
             />
           ) : null}
 
@@ -345,14 +380,38 @@ function App() {
                 </div>
               </div>
               <p className="muted">
-                Risk, catalyst, and provider alerts arrive in Phase 5–6. Core portfolio panels remain
-                fully usable without them.
+                Catalyst coverage and provider health surface on Overview and Positions. Dedicated
+                alert routing arrives with monitoring in Phase 6.
               </p>
+              {catalysts?.results?.filter((row) => row.promoted).length ? (
+                <ul className="plain-list">
+                  {catalysts.results
+                    .filter((row) => row.promoted)
+                    .slice(0, 8)
+                    .map((row) => (
+                      <li key={row.symbol}>
+                        <strong>{row.symbol}</strong>
+                        <span className="muted"> · {row.summary}</span>
+                      </li>
+                    ))}
+                </ul>
+              ) : (
+                <p className="muted">No promoted catalyst alerts in the current scan.</p>
+              )}
             </section>
           ) : null}
 
           {activeSection === "Settings" ? (
-            <SettingsSection payload={state.payload} accountOptions={accountOptions} />
+            <SettingsSection
+              payload={state.payload}
+              accountOptions={accountOptions}
+              catalystSettings={catalysts?.settings ?? state.payload.catalysts ?? null}
+              onCatalystSettingsSaved={(next) =>
+                setCatalysts((current) =>
+                  current ? { ...current, settings: next } : current,
+                )
+              }
+            />
           ) : null}
         </main>
       </div>
@@ -526,9 +585,9 @@ function FoundationNotice({
     <section className="foundation-notice" aria-label="Implementation status">
       <span className="status-pip" aria-hidden="true" />
       <p>
-        <strong>Portfolio feature parity.</strong> {message}
+        <strong>Catalyst intelligence.</strong> {message}
       </p>
-      <span>Phase 4 / 7</span>
+      <span>Phase 5 / 7</span>
     </section>
   );
 }
@@ -537,16 +596,22 @@ function OverviewSection({
   portfolio,
   risk,
   markets,
+  catalysts,
+  catalystError,
   providers,
   monitoring,
 }: {
   portfolio: PortfolioState;
   risk: PortfolioRisk | null;
   markets: MarketOverview | null;
+  catalysts: CatalystScanSnapshot | null;
+  catalystError: string | null;
   providers: BootstrapPayload["providers"];
   monitoring: BootstrapPayload["monitoring"];
 }) {
   const snapshot = portfolio.kind === "ready" ? portfolio.snapshot : null;
+  const promoted = (catalysts?.results ?? []).filter((row) => row.promoted);
+  const quietCount = (catalysts?.results ?? []).filter((row) => row.quiet).length;
   return (
     <>
       <section className="portfolio-masthead">
@@ -731,6 +796,72 @@ function OverviewSection({
           </div>
         </section>
 
+        <section className="panel-section" aria-labelledby="catalyst-heading">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">05 / Catalysts</p>
+              <h2 id="catalyst-heading">Held-symbol catalysts</h2>
+            </div>
+            <CatalystFreshness scan={catalysts} error={catalystError} />
+          </div>
+          {catalystError ? (
+            <p className="muted" role="status">
+              {catalystError}
+            </p>
+          ) : null}
+          {catalysts?.coverage === "incomplete" || catalysts?.coverage === "offline" ? (
+            <p className="coverage-notice" role="status">
+              Coverage {catalysts.coverage}
+              {catalysts.coverage_notes.length
+                ? ` — ${catalysts.coverage_notes.slice(0, 2).join("; ")}`
+                : ""}
+              . Stale or partial news is never used as sole proof of a new move.
+            </p>
+          ) : null}
+          <div className="metric-rail" aria-label="Catalyst summary">
+            <div>
+              <span>Promoted</span>
+              <strong className="tabular">{promoted.length}</strong>
+            </div>
+            <div>
+              <span>Quiet</span>
+              <strong className="tabular">{quietCount}</strong>
+            </div>
+            <div>
+              <span>Scanned</span>
+              <strong className="tabular">{catalysts?.results.length ?? "—"}</strong>
+            </div>
+          </div>
+          <ul className="catalyst-list">
+            {(catalysts?.results ?? []).map((row) => (
+              <li key={row.symbol} className={row.quiet ? "catalyst-quiet" : "catalyst-promoted"}>
+                <div className="catalyst-row-head">
+                  <strong>{row.symbol}</strong>
+                  <span className={`pill confidence-${row.confidence}`}>
+                    {formatConfidence(row.confidence)}
+                  </span>
+                  {row.move_percent != null ? (
+                    <span className="tabular muted">{signed(row.move_percent, 2)}%</span>
+                  ) : null}
+                  {row.freshness?.state === "stale" || row.cached ? (
+                    <span className="pill">Stale cache</span>
+                  ) : null}
+                </div>
+                <p>{row.summary || "No confirmed catalyst found"}</p>
+                <p className="microcopy">
+                  {formatAttribution(row.attribution)}
+                  {row.option_mechanisms.length
+                    ? ` · ${row.option_mechanisms.length} option mechanism(s)`
+                    : ""}
+                </p>
+              </li>
+            ))}
+            {!catalysts?.results.length && !catalystError ? (
+              <li className="muted">Catalysts load after the portfolio snapshot.</li>
+            ) : null}
+          </ul>
+        </section>
+
         <ProviderLedger providers={providers} />
         <MonitoringStrip monitoring={monitoring} />
       </div>
@@ -742,12 +873,19 @@ function PositionsSection({
   snapshot,
   onSelectStrategy,
   orders,
+  catalysts,
 }: {
   snapshot: PortfolioSnapshot | null;
   onSelectStrategy: (id: string) => void;
   orders: OrderRow[];
+  catalysts: CatalystScanSnapshot | null;
 }) {
   const strategies = snapshot?.strategies ?? [];
+  const catalystBySymbol = useMemo(() => {
+    const map = new Map<string, SymbolCatalystResult>();
+    for (const row of catalysts?.results ?? []) map.set(row.symbol, row);
+    return map;
+  }, [catalysts]);
   return (
     <div className="stack-lg">
       <section className="panel-section" aria-labelledby="positions-heading">
@@ -768,37 +906,56 @@ function PositionsSection({
                 <th scope="col">Horizon</th>
                 <th scope="col">DTE</th>
                 <th scope="col">Strikes</th>
+                <th scope="col">Catalyst</th>
                 <th scope="col">Δ</th>
                 <th scope="col">Θ</th>
                 <th scope="col">P/L</th>
               </tr>
             </thead>
             <tbody>
-              {strategies.map((strategy) => (
-                <tr key={strategy.strategy_id}>
-                  <th scope="row">
-                    <button
-                      type="button"
-                      className="linkish"
-                      onClick={() => onSelectStrategy(strategy.strategy_id)}
-                    >
-                      {strategy.underlying}
-                    </button>
-                  </th>
-                  <td>{strategy.strategy_type}</td>
-                  <td>
-                    <span className={`chip horizon-${strategy.horizon}`}>{strategy.horizon}</span>
-                  </td>
-                  <td className="tabular">{strategy.days_to_expiration ?? "—"}</td>
-                  <td className="tabular">{strategy.strikes || "—"}</td>
-                  <td className="tabular">{signed(strategy.total_delta, 2)}</td>
-                  <td className="tabular">{signed(strategy.total_theta, 0)}</td>
-                  <td className="tabular">{currency(strategy.unrealized_pnl)}</td>
-                </tr>
-              ))}
+              {strategies.map((strategy) => {
+                const catalyst = catalystBySymbol.get(strategy.underlying);
+                return (
+                  <tr
+                    key={strategy.strategy_id}
+                    className={catalyst?.quiet === false ? "row-promoted" : undefined}
+                  >
+                    <th scope="row">
+                      <button
+                        type="button"
+                        className="linkish"
+                        onClick={() => onSelectStrategy(strategy.strategy_id)}
+                      >
+                        {strategy.underlying}
+                      </button>
+                    </th>
+                    <td>{strategy.strategy_type}</td>
+                    <td>
+                      <span className={`chip horizon-${strategy.horizon}`}>{strategy.horizon}</span>
+                    </td>
+                    <td className="tabular">{strategy.days_to_expiration ?? "—"}</td>
+                    <td className="tabular">{strategy.strikes || "—"}</td>
+                    <td>
+                      <span
+                        className={`catalyst-inline ${
+                          catalyst ? (catalyst.quiet ? "quiet" : "promoted") : "quiet"
+                        }`}
+                        title={catalyst?.summary ?? "No confirmed catalyst found"}
+                      >
+                        {catalyst
+                          ? formatConfidence(catalyst.confidence)
+                          : "No confirmed catalyst found"}
+                      </span>
+                    </td>
+                    <td className="tabular">{signed(strategy.total_delta, 2)}</td>
+                    <td className="tabular">{signed(strategy.total_theta, 0)}</td>
+                    <td className="tabular">{currency(strategy.unrealized_pnl)}</td>
+                  </tr>
+                );
+              })}
               {!strategies.length ? (
                 <tr>
-                  <td colSpan={8} className="muted">
+                  <td colSpan={9} className="muted">
                     No strategies in the current account scope.
                   </td>
                 </tr>
@@ -1141,10 +1298,36 @@ function MarketsSection({
 function SettingsSection({
   payload,
   accountOptions,
+  catalystSettings,
+  onCatalystSettingsSaved,
 }: {
   payload: BootstrapPayload;
   accountOptions: PortfolioAccount[];
+  catalystSettings: CatalystSettings | null;
+  onCatalystSettingsSaved: (settings: CatalystSettings) => void;
 }) {
+  const [cadence, setCadence] = useState(
+    String(catalystSettings?.news_cadence_seconds ?? 300),
+  );
+  const [stockThreshold, setStockThreshold] = useState(
+    String(catalystSettings?.stock_move_threshold_pct ?? 2),
+  );
+  const [etfThreshold, setEtfThreshold] = useState(
+    String(catalystSettings?.etf_move_threshold_pct ?? 1),
+  );
+  const [benzingaEnabled, setBenzingaEnabled] = useState(
+    catalystSettings?.benzinga.enabled ?? true,
+  );
+  const [saveState, setSaveState] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!catalystSettings) return;
+    setCadence(String(catalystSettings.news_cadence_seconds));
+    setStockThreshold(String(catalystSettings.stock_move_threshold_pct));
+    setEtfThreshold(String(catalystSettings.etf_move_threshold_pct));
+    setBenzingaEnabled(catalystSettings.benzinga.enabled);
+  }, [catalystSettings]);
+
   return (
     <div className="stack-lg">
       <ProviderLedger providers={payload.providers} />
@@ -1167,6 +1350,85 @@ function SettingsSection({
           Brokerage account numbers never leave the local service. Credentials stay in{" "}
           <code>.env</code>.
         </p>
+      </section>
+
+      <section className="panel-section" aria-labelledby="catalyst-settings-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Catalysts</p>
+            <h2 id="catalyst-settings-heading">News cadence and thresholds</h2>
+          </div>
+        </div>
+        <form
+          className="stack-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void (async () => {
+              setSaveState(null);
+              try {
+                const next = await saveCatalystSettings({
+                  news_cadence_seconds: Number(cadence),
+                  stock_move_threshold_pct: Number(stockThreshold),
+                  etf_move_threshold_pct: Number(etfThreshold),
+                  benzinga_enabled: benzingaEnabled,
+                });
+                onCatalystSettingsSaved(next);
+                setSaveState("Saved locally.");
+              } catch (error: unknown) {
+                setSaveState(
+                  error instanceof Error ? error.message : "Could not save catalyst settings.",
+                );
+              }
+            })();
+          }}
+        >
+          <label className="compact-field">
+            News cadence (seconds)
+            <input
+              type="number"
+              min={60}
+              max={3600}
+              value={cadence}
+              onChange={(event) => setCadence(event.target.value)}
+            />
+          </label>
+          <label className="compact-field">
+            Stock move threshold (%)
+            <input
+              type="number"
+              min={0.1}
+              step={0.1}
+              value={stockThreshold}
+              onChange={(event) => setStockThreshold(event.target.value)}
+            />
+          </label>
+          <label className="compact-field">
+            Broad ETF move threshold (%)
+            <input
+              type="number"
+              min={0.1}
+              step={0.1}
+              value={etfThreshold}
+              onChange={(event) => setEtfThreshold(event.target.value)}
+            />
+          </label>
+          <label className="compact-field checkbox-field">
+            <input
+              type="checkbox"
+              checked={benzingaEnabled}
+              onChange={(event) => setBenzingaEnabled(event.target.checked)}
+            />
+            Enable Benzinga premium catalysts when configured
+          </label>
+          <p className="microcopy">
+            Benzinga status: {catalystSettings?.benzinga.status ?? "unknown"}. Provider keys never
+            appear in the browser.
+          </p>
+          <button type="submit" className="primary-action">
+            Save catalyst settings
+          </button>
+          {saveState ? <p role="status">{saveState}</p> : null}
+        </form>
       </section>
     </div>
   );
@@ -1281,14 +1543,115 @@ function StrategyDetailDrawer({
         <div className="drawer-body stack-lg">
           <section>
             <h3>Chart</h3>
-            <svg className="sparkline" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+            <svg
+              className="sparkline"
+              viewBox="0 0 100 100"
+              preserveAspectRatio="none"
+              role="img"
+              aria-label={`Price chart for ${strategy.underlying} with volume`}
+            >
+              <title>
+                {strategy.underlying} price and volume
+                {detail.chart.prior_close != null
+                  ? `, prior close ${detail.chart.prior_close.toFixed(2)}`
+                  : ""}
+              </title>
               <path d={path || "M0 50 L100 50"} fill="none" stroke="currentColor" strokeWidth="1.5" />
+              {detail.chart.prior_close != null && max !== min ? (
+                <line
+                  x1="0"
+                  x2="100"
+                  y1={100 - ((detail.chart.prior_close - min) / (max - min)) * 100}
+                  y2={100 - ((detail.chart.prior_close - min) / (max - min)) * 100}
+                  stroke="currentColor"
+                  strokeOpacity="0.35"
+                  strokeDasharray="2 2"
+                />
+              ) : null}
+              {(detail.chart.event_markers ?? []).map((marker) => {
+                const times = detail.chart.bars.map((bar) => new Date(bar.timestamp).getTime());
+                if (times.length < 2) return null;
+                const start = times[0];
+                const end = times[times.length - 1];
+                const x =
+                  end === start
+                    ? 50
+                    : ((new Date(marker.timestamp).getTime() - start) / (end - start)) * 100;
+                if (x < 0 || x > 100) return null;
+                return (
+                  <circle
+                    key={marker.catalyst_id}
+                    cx={x}
+                    cy="12"
+                    r="1.6"
+                    fill="currentColor"
+                  >
+                    <title>{marker.headline}</title>
+                  </circle>
+                );
+              })}
+              {(() => {
+                const rawSeries = detail.chart.volume_series?.length
+                  ? detail.chart.volume_series
+                  : detail.chart.bars.map((bar) => bar.volume ?? 0);
+                const stride = Math.max(1, Math.ceil(rawSeries.length / 360));
+                const sampled = rawSeries.filter(
+                  (_, index) => index % stride === 0 || index === rawSeries.length - 1,
+                );
+                return sampled.map((volume, index, series) => {
+                const peak = Math.max(...series.map((value) => Number(value) || 0), 1);
+                const height = ((Number(volume) || 0) / peak) * 18;
+                const x =
+                  series.length <= 1 ? 0 : (index / (series.length - 1)) * 100 - 0.4;
+                return (
+                  <rect
+                    key={`vol-${index}`}
+                    x={x}
+                    y={100 - height}
+                    width={0.8}
+                    height={height}
+                    fill="currentColor"
+                    opacity={0.25}
+                  >
+                    <title>{`Volume ${Number(volume).toLocaleString()}`}</title>
+                  </rect>
+                );
+                });
+              })()}
             </svg>
             {detail.chart.notice ? <p className="muted">{detail.chart.notice}</p> : null}
             <p className="tabular">
-              Underlying {detail.risk.underlying_price?.toFixed(2) ?? "—"} · DTE{" "}
+              Underlying {detail.risk.underlying_price?.toFixed(2) ?? "—"} · Prior close{" "}
+              {detail.chart.prior_close?.toFixed(2) ?? "—"} · DTE{" "}
               {detail.risk.combined.nearest_dte ?? "—"}
             </p>
+            <p className="microcopy">
+              {detail.chart.include_extended_hours && detail.chart.extended_hours_truthful
+                ? "Extended-hours bars included in the prior-close-to-now window."
+                : "Regular-session window (extended hours not present in returned bars)."}
+            </p>
+            <table className="data-table dense volume-table">
+              <caption className="sr-only">Intraday volume series</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Bar</th>
+                  <th scope="col">Volume</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(detail.chart.volume_series?.length
+                  ? detail.chart.volume_series
+                  : detail.chart.bars.map((bar) => bar.volume ?? 0)
+                )
+                  .slice(-8)
+                  .map((volume, index) => (
+                    <tr key={`volume-row-${index}`}>
+                      <td className="tabular">{index + 1}</td>
+                      <td className="tabular">{Number(volume).toLocaleString()}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
             <label className="compact-field">
               Decision horizon
               <select
@@ -1305,6 +1668,8 @@ function StrategyDetailDrawer({
               </select>
             </label>
           </section>
+
+          <CatalystDetailPanel catalyst={detail.catalyst ?? null} symbol={strategy.underlying} />
 
           <section>
             <h3>Legs</h3>
@@ -1652,6 +2017,182 @@ function MonitoringStrip({ monitoring }: { monitoring: BootstrapPayload["monitor
           <dd>New York</dd>
         </div>
       </dl>
+    </section>
+  );
+}
+
+function formatConfidence(value: string) {
+  if (value === "no_confirmed_catalyst_found") return "No confirmed catalyst found";
+  if (value === "confirmed") return "Confirmed";
+  if (value === "likely") return "Likely";
+  return value.replaceAll("_", " ");
+}
+
+function formatAttribution(value: string) {
+  if (value === "options_market") return "Options-market driver";
+  if (value === "none") return "No confirmed catalyst";
+  if (value === "peer") return "Industry / peer-driven";
+  if (value === "macro") return "Macro / market-wide";
+  if (value === "company") return "Company-specific";
+  return value.replaceAll("_", " ");
+}
+
+function CatalystFreshness({
+  scan,
+  error,
+}: {
+  scan: CatalystScanSnapshot | null;
+  error: string | null;
+}) {
+  if (error) return <span className="section-state">Offline / incomplete</span>;
+  if (!scan) return <span className="section-state">Loading</span>;
+  const asOf = new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(scan.freshness.as_of));
+  return (
+    <span className="section-state">
+      {scan.coverage} · {asOf}
+    </span>
+  );
+}
+
+function CatalystDetailPanel({
+  catalyst,
+  symbol,
+}: {
+  catalyst: SymbolCatalystResult | null;
+  symbol: string;
+}) {
+  const [note, setNote] = useState("");
+  const [status, setStatus] = useState<string | null>(null);
+
+  if (!catalyst) {
+    return (
+      <section>
+        <h3>Catalysts</h3>
+        <p className="muted">No confirmed catalyst found</p>
+      </section>
+    );
+  }
+
+  const sendFeedback = async (
+    kind: "relevant" | "not_related" | "missing_catalyst",
+    catalystId?: string,
+  ) => {
+    setStatus(null);
+    try {
+      await submitCatalystFeedback({
+        kind,
+        catalyst_id: catalystId,
+        symbol,
+        note,
+      });
+      setStatus("Feedback recorded locally.");
+      setNote("");
+    } catch (error: unknown) {
+      setStatus(error instanceof Error ? error.message : "Feedback failed.");
+    }
+  };
+
+  return (
+    <section>
+      <h3>Catalysts</h3>
+      <div className="catalyst-row-head">
+        <span className={`pill confidence-${catalyst.confidence}`}>
+          {formatConfidence(catalyst.confidence)}
+        </span>
+        <span className="muted">{formatAttribution(catalyst.attribution)}</span>
+        {catalyst.move_percent != null ? (
+          <span className="tabular">{signed(catalyst.move_percent, 2)}%</span>
+        ) : null}
+      </div>
+      <p>{catalyst.summary}</p>
+      {catalyst.coverage !== "complete" ? (
+        <p className="coverage-notice" role="status">
+          Coverage {catalyst.coverage}
+          {catalyst.coverage_notes.length ? `: ${catalyst.coverage_notes.join("; ")}` : ""}
+        </p>
+      ) : null}
+      <ul className="catalyst-list compact">
+        {catalyst.catalysts.map((event) => (
+          <li key={event.catalyst_id}>
+            <strong>{event.headline}</strong>
+            <p className="microcopy">
+              {event.sources.map((source) => source.name).join(" · ") || "Source attributed"} ·{" "}
+              {new Intl.DateTimeFormat(undefined, {
+                month: "short",
+                day: "numeric",
+                hour: "numeric",
+                minute: "2-digit",
+              }).format(new Date(event.event_at))}
+            </p>
+            <p className="microcopy">{event.summary}</p>
+            <div className="feedback-row">
+              <button type="button" onClick={() => void sendFeedback("relevant", event.catalyst_id)}>
+                Relevant
+              </button>
+              <button
+                type="button"
+                onClick={() => void sendFeedback("not_related", event.catalyst_id)}
+              >
+                Not related
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
+      {catalyst.option_mechanisms.length ? (
+        <div className="mechanism-block">
+          <h4>Option-market mechanisms</h4>
+          <p className="microcopy">Labeled mechanisms — never presented as news.</p>
+          <ul className="plain-list">
+            {catalyst.option_mechanisms.map((item) => (
+              <li key={`${item.kind}-${item.label}`}>
+                <strong>{item.label}</strong>
+                <span className="muted"> — {item.summary}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {catalyst.option_mechanism_coverage?.length ? (
+        <div className="mechanism-block">
+          <h4>Mechanism coverage</h4>
+          <ul className="plain-list">
+            {catalyst.option_mechanism_coverage.map((item) => (
+              <li key={`${item.kind}-coverage`}>
+                <strong>{item.label}</strong>
+                <span className="muted">
+                  {" "}
+                  — {item.availability.replaceAll("_", " ")}: {item.detail}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {catalyst.social_side_notes.length ? (
+        <div className="social-side-note">
+          <h4>Social side note</h4>
+          <p className="microcopy">Not catalyst evidence.</p>
+          <ul className="plain-list">
+            {catalyst.social_side_notes.map((item) => (
+              <li key={item.note_id}>
+                {item.headline} <span className="muted">({item.source_name})</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      <label className="compact-field">
+        Feedback note
+        <input value={note} onChange={(event) => setNote(event.target.value)} />
+      </label>
+      <button type="button" onClick={() => void sendFeedback("missing_catalyst")}>
+        Missing catalyst
+      </button>
+      {status ? <p role="status">{status}</p> : null}
     </section>
   );
 }

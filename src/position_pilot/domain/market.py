@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import BaseModel, Field
 
@@ -78,11 +78,28 @@ class MarketBar(BaseModel):
     volume: float | None = None
 
 
+class ChartEventMarker(BaseModel):
+    """Lightweight event marker overlaid on intraday charts."""
+
+    catalyst_id: str
+    timestamp: datetime
+    headline: str
+    confidence: str
+    attribution: str
+
+
 class ChartSnapshot(BaseModel):
     symbol: str
     bars: list[MarketBar] = Field(default_factory=list)
     source: str = "unavailable"
     notice: str | None = None
+    prior_close: float | None = None
+    include_extended_hours: bool = True
+    extended_hours_truthful: bool = False
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+    event_markers: list[ChartEventMarker] = Field(default_factory=list)
+    volume_series: list[float] = Field(default_factory=list)
 
 
 class MarketOverview(BaseModel):
@@ -183,10 +200,23 @@ class MarketService:
             iv_summary=iv_summary,
         )
 
-    def chart(self, symbol: str) -> ChartSnapshot:
-        """Return historical bars when a bar provider is configured; else a single mark."""
+    def chart(
+        self,
+        symbol: str,
+        *,
+        prior_close: float | None = None,
+        event_markers: list[ChartEventMarker] | list[dict] | None = None,
+        include_extended_hours: bool = True,
+        window_start: datetime | None = None,
+        window_end: datetime | None = None,
+    ) -> ChartSnapshot:
+        """Return bars for the requested window with volume series and prior close."""
 
         normalized = symbol.upper()
+        markers = self._normalize_markers(event_markers)
+        resolved_prior = prior_close
+        end = window_end or self.clock()
+        start = window_start
         if self.bar_source is not None:
             try:
                 raw_bars = self.bar_source(normalized) or []
@@ -201,20 +231,45 @@ class MarketService:
                         if timestamp > 10_000_000_000:
                             timestamp /= 1000
                         timestamp = datetime.fromtimestamp(timestamp, tz=UTC)
-                    bars.append(
-                        MarketBar(
-                            timestamp=timestamp,
-                            open=float(item["open"] if "open" in item else item["o"]),
-                            high=float(item["high"] if "high" in item else item["h"]),
-                            low=float(item["low"] if "low" in item else item["l"]),
-                            close=float(item["close"] if "close" in item else item["c"]),
-                            volume=item.get("volume", item.get("v")),
-                        )
+                    elif isinstance(timestamp, datetime):
+                        timestamp = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=UTC)
+                    bar = MarketBar(
+                        timestamp=timestamp,
+                        open=float(item["open"] if "open" in item else item["o"]),
+                        high=float(item["high"] if "high" in item else item["h"]),
+                        low=float(item["low"] if "low" in item else item["l"]),
+                        close=float(item["close"] if "close" in item else item["c"]),
+                        volume=item.get("volume", item.get("v")),
                     )
+                    if start is not None and bar.timestamp < start:
+                        continue
+                    if end is not None and bar.timestamp > end:
+                        continue
+                    bars.append(bar)
                 except (KeyError, OSError, OverflowError, TypeError, ValueError):
                     continue
             if bars:
-                return ChartSnapshot(symbol=normalized, bars=bars, source="provider")
+                if resolved_prior is None:
+                    resolved_prior = self._prior_close_from_quote(normalized)
+                # Truthful extended-hours flag: bars span outside regular 09:30–16:00 ET.
+                truthful = (
+                    self._bars_include_extended_hours(bars) if include_extended_hours else False
+                )
+                volume_series = [
+                    float(bar.volume) if bar.volume is not None else 0.0 for bar in bars
+                ]
+                return ChartSnapshot(
+                    symbol=normalized,
+                    bars=bars,
+                    source="provider",
+                    prior_close=resolved_prior,
+                    include_extended_hours=include_extended_hours and truthful,
+                    extended_hours_truthful=truthful,
+                    window_start=start or bars[0].timestamp,
+                    window_end=end or bars[-1].timestamp,
+                    event_markers=markers,
+                    volume_series=volume_series,
+                )
         quote = self.snapshot(normalized)
         if quote is None:
             return ChartSnapshot(
@@ -222,7 +277,16 @@ class MarketService:
                 bars=[],
                 source="unavailable",
                 notice="No chart data is available for this symbol.",
+                prior_close=resolved_prior,
+                include_extended_hours=False,
+                extended_hours_truthful=False,
+                window_start=start,
+                window_end=end,
+                event_markers=markers,
+                volume_series=[],
             )
+        if resolved_prior is None:
+            resolved_prior = self._prior_close_from_quote(normalized)
         return ChartSnapshot(
             symbol=normalized,
             bars=[
@@ -236,7 +300,67 @@ class MarketService:
             ],
             source=quote.freshness.provider,
             notice="Only the latest mark is available; historical bars are not configured.",
+            prior_close=resolved_prior,
+            include_extended_hours=False,
+            extended_hours_truthful=False,
+            window_start=start,
+            window_end=end,
+            event_markers=markers,
+            volume_series=[],
         )
+
+    def _prior_close_from_quote(self, symbol: str) -> float | None:
+        try:
+            quote = self.source.get_quote(symbol, force_refresh=False) or {}
+        except Exception:
+            return None
+        # Never treat live "close" as official prior close.
+        for key in ("prior_close", "previous_close", "prev_close", "prevClose", "previousClose"):
+            value = quote.get(key)
+            if isinstance(value, (int, float)):
+                return float(value)
+        return None
+
+    @staticmethod
+    def _bars_include_extended_hours(bars: list[MarketBar]) -> bool:
+        from zoneinfo import ZoneInfo
+
+        et = ZoneInfo("America/New_York")
+        for bar in bars:
+            local = bar.timestamp.astimezone(et)
+            minutes = local.hour * 60 + local.minute
+            if minutes < 9 * 60 + 30 or minutes >= 16 * 60:
+                return True
+        return False
+
+    @staticmethod
+    def _normalize_markers(
+        event_markers: list[ChartEventMarker] | list[dict] | list[Any] | None,
+    ) -> list[ChartEventMarker]:
+        if not event_markers:
+            return []
+        markers: list[ChartEventMarker] = []
+        for item in event_markers:
+            if isinstance(item, ChartEventMarker):
+                markers.append(item)
+                continue
+            payload: dict | None
+            if isinstance(item, dict):
+                payload = item
+            elif hasattr(item, "model_dump"):
+                try:
+                    payload = item.model_dump(mode="json")
+                except Exception:
+                    payload = None
+            else:
+                payload = None
+            if payload is None:
+                continue
+            try:
+                markers.append(ChartEventMarker.model_validate(payload))
+            except Exception:
+                continue
+        return markers
 
     @staticmethod
     def _iv_environment(iv_rank: float | None) -> IVEnvironment:
