@@ -12,6 +12,7 @@
 
 - [Confirmed product and domain requirements](tickets/000-confirmed-requirements.md) — The grilling session resolved product scope, providers, AI, cadence, privacy, reliability, and migration policy.
 - [Web application foundation](tickets/010-web-foundation.md) — Phase 1 ships the secure local service, packaged workstation shell, web-default launcher, and regression gates.
+- [Versioned domain snapshots](tickets/020-domain-snapshots.md) — Phase 2 establishes shared account, portfolio, strategy, market, and roll services over durable SQLite state.
 
 ## Fog
 

@@ -540,10 +540,11 @@ def market(
     symbols: list[str] = typer.Argument(None, help="Symbols to check (default: SPY QQQ IWM)"),
 ):
     """Check market conditions and IV environment."""
-    from .analysis import get_analyzer, IVEnvironment
+    from .domain.factory import get_market_service
+    from .domain.market import IVEnvironment
 
     client = get_client()
-    market_analyzer = get_analyzer()
+    market_service = get_market_service()
 
     if not client.is_enabled:
         console.print("[red]Error:[/red] Tastytrade credentials not configured")
@@ -571,7 +572,7 @@ def market(
     with console.status("Fetching market data..."):
         for symbol in symbols:
             symbol = symbol.upper()
-            snapshot = market_analyzer.get_snapshot(symbol)
+            snapshot = market_service.snapshot(symbol)
 
             if snapshot:
                 price = f"${snapshot.price:.2f}"

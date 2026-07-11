@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import UTC, datetime
 
 from position_pilot.domain.snapshots import (
@@ -37,7 +38,7 @@ def test_latest_portfolio_snapshot_is_replaced_atomically(tmp_path) -> None:
     database.save_portfolio_snapshot(second)
 
     assert database.latest_portfolio_snapshot() == second
-    assert database.schema_version == 1
+    assert database.schema_version == 2
 
 
 def test_account_alias_is_stable_without_exposing_broker_number(tmp_path) -> None:
@@ -98,3 +99,19 @@ def test_legacy_market_cache_is_imported_for_migration_compatibility(tmp_path) -
     )
 
     assert database.get_legacy_cache("quote_SPY") == {"mark": 550.25}
+
+
+def test_existing_schema_is_backed_up_before_versioned_migration(tmp_path) -> None:
+    path = tmp_path / "position-pilot.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (1, '2026-07-01T00:00:00Z')"
+        )
+
+    database = PositionPilotDatabase(path)
+
+    assert database.schema_version == 2
+    assert len(list(database.backup_directory.glob("position-pilot-pre-migration-*.sqlite3"))) == 1

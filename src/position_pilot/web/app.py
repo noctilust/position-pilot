@@ -19,8 +19,10 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from .. import __version__
-from ..domain.factory import get_portfolio_service
+from ..domain.factory import get_market_service, get_portfolio_service, get_roll_service
+from ..domain.market import MarketSnapshot
 from ..domain.portfolio import PortfolioService
+from ..domain.rolls import RollChainSnapshot
 from ..domain.snapshots import PortfolioSnapshot, PositionHorizon, StrategySnapshot
 
 STATIC_DIR = Path(__file__).with_name("static")
@@ -303,6 +305,38 @@ def create_app(
             )
         except KeyError as error:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
+
+    @app.get("/api/v1/markets/{symbol}", response_model=MarketSnapshot)
+    async def market_snapshot(
+        symbol: str,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> MarketSnapshot:
+        if session is None or not secrets.compare_digest(session, active_settings.session_token):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        snapshot = await run_in_threadpool(get_market_service().snapshot, symbol)
+        if snapshot is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return snapshot
+
+    @app.get("/api/v1/accounts/{account_id}/rolls", response_model=list[RollChainSnapshot])
+    async def roll_chains(
+        account_id: str,
+        symbol: str | None = None,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> list[RollChainSnapshot]:
+        if session is None or not secrets.compare_digest(session, active_settings.session_token):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        return await run_in_threadpool(
+            get_roll_service().chains,
+            account_id,
+            symbol=symbol,
+        )
 
     @app.get("/{path:path}", include_in_schema=False)
     async def dashboard_shell(path: str) -> Response:

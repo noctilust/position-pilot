@@ -2,26 +2,24 @@
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Protocol
 from uuid import uuid4
 
-from ..analysis.strategies import StrategyGroup, detect_strategies
 from ..models import Account, Position
 from ..persistence.sqlite import PositionPilotDatabase
+from .accounts import AccountService
 from .snapshots import (
     AccountSnapshot,
     DataFreshness,
-    FieldProvenance,
     PortfolioSnapshot,
     PortfolioTotals,
     PositionHorizon,
-    PositionSnapshot,
     SnapshotState,
     StrategySnapshot,
 )
+from .strategies import StrategyService
 
 
 class PortfolioSource(Protocol):
@@ -49,6 +47,8 @@ class PortfolioService:
         self.database = database
         self.source = source
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.accounts = AccountService(database)
+        self.strategy_detector = StrategyService(database)
         self._current_snapshot: PortfolioSnapshot | None = None
 
     def refresh(self, *, enrich: bool = True) -> PortfolioSnapshot:
@@ -147,48 +147,21 @@ class PortfolioService:
         if not broker_accounts:
             raise ConnectionError("Broker returned no account data")
         for broker_account in broker_accounts:
-            identity = self.database.account_identity(
-                broker_account.account_number,
-                broker_account.account_type,
-            )
             balances = self.source.get_account_balances(broker_account.account_number) or {}
             positions = self.source.get_positions(broker_account.account_number)
             enrich_positions = getattr(self.source, "enrich_positions_greeks_batch", None)
             if enrich and positions and callable(enrich_positions):
                 positions = enrich_positions(positions)
-            position_snapshots = [
-                self._position_snapshot(position, captured_at) for position in positions
-            ]
-            account = AccountSnapshot(
-                account_id=identity.account_id,
-                label=identity.label,
-                account_type=broker_account.account_type,
-                net_liquidating_value=balances.get("net_liquidating_value") or 0,
-                cash_balance=balances.get("cash_balance") or 0,
-                buying_power=balances.get("buying_power") or 0,
-                maintenance_excess=balances.get("maintenance_excess"),
-                day_trading_buying_power=balances.get("day_trading_buying_power"),
-                pnl_today=balances.get("pnl_today") or 0,
-                positions=position_snapshots,
-                provenance={
-                    field: FieldProvenance(
-                        provider="tastytrade",
-                        observed_at=captured_at,
-                        field=field,
-                    )
-                    for field in (
-                        "net_liquidating_value",
-                        "cash_balance",
-                        "buying_power",
-                        "maintenance_excess",
-                        "day_trading_buying_power",
-                        "pnl_today",
-                    )
-                },
+            account = self.accounts.snapshot(
+                broker_account,
+                balances,
+                positions,
+                captured_at,
             )
             accounts.append(account)
-            for group in detect_strategies(positions):
-                strategies.append(self._strategy_snapshot(identity.account_id, group, captured_at))
+            strategies.extend(
+                self.strategy_detector.snapshots(account.account_id, positions, captured_at)
+            )
 
         totals = PortfolioTotals(
             net_liquidating_value=sum(account.net_liquidating_value for account in accounts),
@@ -209,92 +182,4 @@ class PortfolioService:
             accounts=accounts,
             strategies=strategies,
             totals=totals,
-        )
-
-    @staticmethod
-    def _default_horizon(position: Position) -> PositionHorizon:
-        if not position.is_option:
-            return PositionHorizon.STRATEGIC
-        if not position.is_short and (position.days_to_expiration or 0) >= 180:
-            return PositionHorizon.STRATEGIC
-        return PositionHorizon.TACTICAL
-
-    @classmethod
-    def _position_snapshot(cls, position: Position, captured_at: datetime) -> PositionSnapshot:
-        provenance = {
-            field: FieldProvenance(
-                provider="tastytrade",
-                observed_at=captured_at,
-                field=field,
-            )
-            for field in ("quantity", "mark_price", "market_value", "unrealized_pnl")
-        }
-        greeks = position.greeks
-        return PositionSnapshot(
-            symbol=position.symbol,
-            underlying_symbol=position.underlying_symbol,
-            quantity=position.quantity,
-            quantity_direction=position.quantity_direction,
-            position_type=position.position_type.value,
-            strike_price=position.strike_price,
-            option_type=position.option_type,
-            expiration_date=(
-                position.expiration_date.isoformat() if position.expiration_date else None
-            ),
-            days_to_expiration=position.days_to_expiration,
-            mark_price=position.mark_price,
-            market_value=position.market_value,
-            unrealized_pnl=position.unrealized_pnl,
-            unrealized_pnl_percent=position.unrealized_pnl_percent,
-            delta=greeks.delta if greeks else None,
-            gamma=greeks.gamma if greeks else None,
-            theta=greeks.theta if greeks else None,
-            vega=greeks.vega if greeks else None,
-            implied_volatility=greeks.implied_volatility if greeks else None,
-            multiplier=position.multiplier,
-            horizon=cls._default_horizon(position),
-            provenance=provenance,
-        )
-
-    def _strategy_snapshot(
-        self,
-        account_id: str,
-        group: StrategyGroup,
-        captured_at: datetime,
-    ) -> StrategySnapshot:
-        identity_material = "|".join(sorted(position.symbol for position in group.positions))
-        strategy_id = hashlib.sha256(
-            f"{account_id}|{group.strategy_type.value}|{identity_material}".encode()
-        ).hexdigest()[:20]
-        legs = [self._position_snapshot(position, captured_at) for position in group.positions]
-        horizon = (
-            PositionHorizon.STRATEGIC
-            if len(group.positions) == 1 and legs[0].horizon is PositionHorizon.STRATEGIC
-            else PositionHorizon.TACTICAL
-        )
-        saved_horizon = self.database.get_setting(f"horizon.strategy.{strategy_id}")
-        if saved_horizon:
-            horizon = PositionHorizon(saved_horizon)
-        return StrategySnapshot(
-            strategy_id=strategy_id,
-            account_id=account_id,
-            underlying=group.underlying,
-            strategy_type=group.strategy_type.value,
-            expiration_date=group.expiration.isoformat() if group.expiration else None,
-            days_to_expiration=group.days_to_expiration,
-            quantity=group.total_quantity,
-            strikes=group.strikes_display,
-            unrealized_pnl=group.unrealized_pnl,
-            unrealized_pnl_percent=group.unrealized_pnl_percent,
-            total_delta=group.total_delta,
-            total_theta=group.total_theta,
-            horizon=horizon,
-            legs=legs,
-            provenance={
-                "strategy_grouping": FieldProvenance(
-                    provider="position-pilot",
-                    observed_at=captured_at,
-                    field="strategy_grouping",
-                )
-            },
         )

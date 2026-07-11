@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from ..domain.snapshots import PortfolioSnapshot
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +104,14 @@ class PositionPilotDatabase:
                     payload_json TEXT NOT NULL,
                     source_timestamp REAL,
                     imported_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS roll_chains (
+                    account_id TEXT NOT NULL,
+                    chain_key TEXT NOT NULL,
+                    underlying TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(account_id, chain_key)
                 );
                 """
             )
@@ -258,6 +266,37 @@ class PositionPilotDatabase:
                 (key,),
             ).fetchone()
         return json.loads(row[0]) if row else None
+
+    def save_roll_chain(self, payload: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO roll_chains(
+                    account_id, chain_key, underlying, payload_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, chain_key) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    payload["account_id"],
+                    payload["chain_id"],
+                    payload["underlying"],
+                    json.dumps(payload),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+
+    def roll_chains(self, account_id: str, *, symbol: str | None = None) -> list[dict]:
+        query = "SELECT payload_json FROM roll_chains WHERE account_id = ?"
+        parameters: list[Any] = [account_id]
+        if symbol:
+            query += " AND underlying = ?"
+            parameters.append(symbol.upper())
+        query += " ORDER BY updated_at DESC"
+        with self._connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [json.loads(row[0]) for row in rows]
 
     def backup(self, *, reason: str = "daily") -> Path | None:
         """Create a credentials-free SQLite backup and apply retention."""

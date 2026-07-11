@@ -9,7 +9,9 @@ from pathlib import Path
 from ..client import get_client
 from ..models import Account, Position
 from ..persistence.sqlite import PositionPilotDatabase
+from .market import MarketService
 from .portfolio import PortfolioService
+from .rolls import RollService
 
 
 class TastytradePortfolioSource:
@@ -65,3 +67,15 @@ def get_database() -> PositionPilotDatabase:
 @lru_cache(maxsize=1)
 def get_portfolio_service() -> PortfolioService:
     return PortfolioService(database=get_database(), source=TastytradePortfolioSource())
+
+
+@lru_cache(maxsize=1)
+def get_market_service() -> MarketService:
+    return MarketService(source=get_client())
+
+
+@lru_cache(maxsize=1)
+def get_roll_service() -> RollService:
+    service = RollService(get_database())
+    service.migrate_legacy_cache()
+    return service
