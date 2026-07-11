@@ -38,7 +38,7 @@ def test_latest_portfolio_snapshot_is_replaced_atomically(tmp_path) -> None:
     database.save_portfolio_snapshot(second)
 
     assert database.latest_portfolio_snapshot() == second
-    assert database.schema_version == 2
+    assert database.schema_version == 3
 
 
 def test_account_alias_is_stable_without_exposing_broker_number(tmp_path) -> None:
@@ -113,5 +113,16 @@ def test_existing_schema_is_backed_up_before_versioned_migration(tmp_path) -> No
 
     database = PositionPilotDatabase(path)
 
-    assert database.schema_version == 2
+    assert database.schema_version == 3
     assert len(list(database.backup_directory.glob("position-pilot-pre-migration-*.sqlite3"))) == 1
+
+
+def test_provider_health_is_durable_and_independent(tmp_path) -> None:
+    database = PositionPilotDatabase(tmp_path / "position-pilot.sqlite3")
+    database.save_provider_health("tastytrade", {"state": "healthy"})
+    database.save_provider_health("massive-options", {"state": "unavailable"})
+
+    assert database.provider_health() == {
+        "tastytrade": {"state": "healthy"},
+        "massive-options": {"state": "unavailable"},
+    }

@@ -21,6 +21,7 @@ load_dotenv(project_root / ".env")
 logger = logging.getLogger(__name__)
 
 TASTYTRADE_API_URL = "https://api.tastyworks.com"
+TASTYTRADE_ACCOUNT_STREAMER_URL = "wss://streamer.tastyworks.com"
 
 
 class TastytradeClient:
@@ -48,6 +49,26 @@ class TastytradeClient:
         """Clear all cached market data."""
         self._cache.clear()
         logger.info("Market data cache cleared")
+
+    def get_access_token(self) -> Optional[str]:
+        """Return a valid in-memory access token for the account streamer."""
+
+        return self._access_token if self._ensure_token() else None
+
+    def get_quote_streamer_credentials(self) -> Optional[dict[str, str]]:
+        """Fetch the 24-hour DXLink token and server URL."""
+
+        payload = self._get("/api-quote-tokens")
+        data = payload.get("data", {}) if payload else {}
+        token = data.get("token")
+        url = data.get("dxlink-url")
+        if not token or not url:
+            return None
+        return {"token": token, "url": url}
+
+    @property
+    def account_streamer_url(self) -> str:
+        return TASTYTRADE_ACCOUNT_STREAMER_URL
 
     def _ensure_token(self) -> bool:
         """Ensure we have a valid access token."""

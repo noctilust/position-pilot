@@ -2,8 +2,10 @@ from datetime import UTC, datetime
 
 from position_pilot.domain.portfolio import PortfolioService
 from position_pilot.domain.snapshots import PositionHorizon, SnapshotState
-from position_pilot.models import Account, Position, PositionType
+from position_pilot.models import Account, Greeks, Position, PositionType
 from position_pilot.persistence.sqlite import PositionPilotDatabase
+from position_pilot.providers.contracts import ProviderHealth, ProviderState, ProviderValue
+from position_pilot.providers.router import FieldRouter
 
 
 class FakePortfolioSource:
@@ -113,3 +115,75 @@ def test_primary_account_and_edited_horizon_are_durable(tmp_path) -> None:
         next(item for item in refreshed.strategies if item.strategy_id == strategy_id).horizon
         is PositionHorizon.STRATEGIC
     )
+
+
+def test_missing_option_fields_use_routed_fallback_with_provenance(tmp_path) -> None:
+    observed_at = datetime(2026, 7, 11, 16, 29, tzinfo=UTC)
+
+    class OptionSource(FakePortfolioSource):
+        def get_accounts(self) -> list[Account]:
+            return [Account(account_number="5WT12345", account_type="Individual")]
+
+        def get_positions(self, account_number: str) -> list[Position]:
+            return [
+                Position(
+                    symbol="SPY   260821C00550000",
+                    underlying_symbol="SPY",
+                    quantity=1,
+                    position_type=PositionType.EQUITY_OPTION,
+                    average_open_price=3.0,
+                    cost_basis=300.0,
+                    greeks=Greeks(delta=0.4),
+                    multiplier=100,
+                )
+            ]
+
+    class EmptyProvider:
+        name = "tastytrade"
+
+        def fetch(self, field: str, symbol: str):
+            return None
+
+        def health(self) -> ProviderHealth:
+            return ProviderHealth(provider=self.name, state=ProviderState.UNAVAILABLE)
+
+    class OptionsProvider(EmptyProvider):
+        name = "massive-options"
+
+        def fetch(self, field: str, symbol: str) -> ProviderValue:
+            value = 4.25 if field == "option.mark" else {"delta": 0.52, "theta": -0.08}
+            return ProviderValue(
+                field=field,
+                value=value,
+                provider=self.name,
+                observed_at=observed_at,
+            )
+
+    providers = [EmptyProvider(), OptionsProvider()]
+    router = FieldRouter(
+        providers={provider.name: provider for provider in providers},
+        routes={
+            "option.mark": ["tastytrade", "massive-options"],
+            "option.greeks": ["tastytrade", "massive-options"],
+        },
+    )
+    service = PortfolioService(
+        database=PositionPilotDatabase(tmp_path / "position-pilot.sqlite3"),
+        source=OptionSource(),
+        field_router=router,
+    )
+
+    snapshot = service.refresh()
+    position = snapshot.accounts[0].positions[0]
+
+    assert position.mark_price == 4.25
+    assert position.market_value == 425.0
+    assert position.unrealized_pnl == 125.0
+    assert position.unrealized_pnl_percent == 125 / 300 * 100
+    assert snapshot.totals.unrealized_pnl == 125.0
+    assert position.delta == 0.4
+    assert position.theta == -0.08
+    assert position.provenance["mark_price"].provider == "massive-options"
+    assert position.provenance["mark_price"].fallback_reason == ("tastytrade returned no value")
+    assert position.provenance["delta"].provider == "tastytrade"
+    assert snapshot.strategies[0].legs[0].provenance["theta"].provider == "massive-options"

@@ -24,7 +24,11 @@ def default_horizon(position: Position) -> PositionHorizon:
     return PositionHorizon.TACTICAL
 
 
-def position_snapshot(position: Position, captured_at: datetime) -> PositionSnapshot:
+def position_snapshot(
+    position: Position,
+    captured_at: datetime,
+    provenance_overrides: dict[str, FieldProvenance] | None = None,
+) -> PositionSnapshot:
     provider_fields = {
         "quantity": position.quantity,
         "mark_price": position.mark_price,
@@ -43,6 +47,7 @@ def position_snapshot(position: Position, captured_at: datetime) -> PositionSnap
         for field, value in provider_fields.items()
         if value is not None
     }
+    provenance.update(provenance_overrides or {})
     greeks = position.greeks
     return PositionSnapshot(
         symbol=position.symbol,
@@ -81,6 +86,7 @@ class AccountService:
         balances: dict,
         positions: list[Position],
         captured_at: datetime,
+        position_provenance: dict[str, dict[str, FieldProvenance]] | None = None,
     ) -> AccountSnapshot:
         identity = self.database.account_identity(account.account_number, account.account_type)
         return AccountSnapshot(
@@ -93,7 +99,14 @@ class AccountService:
             maintenance_excess=balances.get("maintenance_excess"),
             day_trading_buying_power=balances.get("day_trading_buying_power"),
             pnl_today=balances.get("pnl_today") or 0,
-            positions=[position_snapshot(position, captured_at) for position in positions],
+            positions=[
+                position_snapshot(
+                    position,
+                    captured_at,
+                    (position_provenance or {}).get(position.symbol),
+                )
+                for position in positions
+            ],
             provenance={
                 field: FieldProvenance(provider="tastytrade", observed_at=captured_at, field=field)
                 for field in (

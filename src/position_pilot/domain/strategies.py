@@ -23,9 +23,11 @@ class StrategyService:
         account_id: str,
         positions: list[Position],
         captured_at: datetime,
+        position_provenance: dict[str, dict[str, FieldProvenance]] | None = None,
     ) -> list[StrategySnapshot]:
         return [
-            self._snapshot(account_id, group, captured_at) for group in detect_strategies(positions)
+            self._snapshot(account_id, group, captured_at, position_provenance or {})
+            for group in detect_strategies(positions)
         ]
 
     def _snapshot(
@@ -33,12 +35,20 @@ class StrategyService:
         account_id: str,
         group: StrategyGroup,
         captured_at: datetime,
+        position_provenance: dict[str, dict[str, FieldProvenance]],
     ) -> StrategySnapshot:
         identity_material = "|".join(sorted(position.symbol for position in group.positions))
         strategy_id = hashlib.sha256(
             f"{account_id}|{group.strategy_type.value}|{identity_material}".encode()
         ).hexdigest()[:20]
-        legs = [position_snapshot(position, captured_at) for position in group.positions]
+        legs = [
+            position_snapshot(
+                position,
+                captured_at,
+                position_provenance.get(position.symbol),
+            )
+            for position in group.positions
+        ]
         horizon = (
             PositionHorizon.STRATEGIC
             if (len(group.positions) == 1 and legs[0].horizon is PositionHorizon.STRATEGIC)

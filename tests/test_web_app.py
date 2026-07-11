@@ -251,3 +251,58 @@ def test_portfolio_endpoint_can_request_a_live_refresh() -> None:
 
     assert response.status_code == 200
     assert service.refresh_count == 1
+
+
+def test_streaming_status_is_explicit_when_runtime_is_disabled() -> None:
+    app = create_app(
+        WebSettings(
+            launch_token="launch-secret",
+            session_token="session-secret",
+            enforce_loopback=False,
+            enable_streaming=False,
+        )
+    )
+    with TestClient(app) as client:
+        client.post("/api/v1/session/exchange", json={"launch_token": "launch-secret"})
+
+        response = client.get("/api/v1/streaming/status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "market": {"state": "disabled", "error": None},
+        "account": {"state": "disabled", "error": None},
+    }
+
+
+def test_broker_outage_does_not_prevent_cached_dashboard_startup(monkeypatch) -> None:
+    class FailingPortfolioService(StubPortfolioService):
+        def latest(self, account_id: str = "all") -> PortfolioSnapshot | None:
+            raise ConnectionError("offline")
+
+    class FailingClient:
+        def get_accounts(self):
+            raise ConnectionError("offline")
+
+    monkeypatch.setenv("TASTYTRADE_CLIENT_SECRET", "configured")
+    monkeypatch.setenv("TASTYTRADE_REFRESH_TOKEN", "configured")
+    monkeypatch.setattr("position_pilot.web.app.get_database", lambda: object())
+    monkeypatch.setattr("position_pilot.web.app.get_client", lambda: FailingClient())
+    app = create_app(
+        WebSettings(
+            launch_token="launch-secret",
+            session_token="session-secret",
+            enforce_loopback=False,
+        ),
+        portfolio_service=FailingPortfolioService(),
+    )
+
+    with TestClient(app) as client:
+        client.post("/api/v1/session/exchange", json={"launch_token": "launch-secret"})
+        health = client.get("/api/v1/health")
+        streaming = client.get("/api/v1/streaming/status")
+
+    assert health.status_code == 200
+    assert streaming.json() == {
+        "market": {"state": "degraded", "error": "BrokerStateUnavailable"},
+        "account": {"state": "degraded", "error": "BrokerStateUnavailable"},
+    }

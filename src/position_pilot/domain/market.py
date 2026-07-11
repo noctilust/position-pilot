@@ -9,6 +9,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field
 
+from ..providers.router import FieldRouter
 from .snapshots import DataFreshness, FieldProvenance
 
 
@@ -42,6 +43,32 @@ class MarketSource(Protocol):
     def get_market_metrics(self, symbol: str, force_refresh: bool = False) -> dict | None: ...
 
 
+class ProviderRoutedMarketSource:
+    """Adapt field-level routing to the existing coherent market service seam."""
+
+    def __init__(self, *, primary: MarketSource, router: FieldRouter) -> None:
+        self.primary = primary
+        self.router = router
+
+    def get_quote(self, symbol: str, force_refresh: bool = False) -> dict | None:
+        value = self.router.resolve("stock.quote", symbol)
+        if value is None:
+            return None
+        quote = dict(value.value) if isinstance(value.value, dict) else {"mark": value.value}
+        quote["__provenance__"] = {
+            "provider": value.provider,
+            "observed_at": value.observed_at,
+            "fallback_reason": value.fallback_reason,
+        }
+        return quote
+
+    def get_market_metrics(self, symbol: str, force_refresh: bool = False) -> dict | None:
+        try:
+            return self.primary.get_market_metrics(symbol, force_refresh=force_refresh)
+        except Exception:
+            return None
+
+
 class MarketService:
     """Build coherent market measurements without inventing missing values."""
 
@@ -60,10 +87,14 @@ class MarketService:
         if not quote:
             return None
         metrics = self.source.get_market_metrics(normalized, force_refresh=force_refresh) or {}
+        quote_provenance = quote.pop("__provenance__", {})
         price = quote.get("mark") or quote.get("last")
         if price is None:
             return None
         observed_at = self.clock()
+        quote_observed_at = quote_provenance.get("observed_at", observed_at)
+        quote_provider = quote_provenance.get("provider", "tastytrade")
+        fallback_reason = quote_provenance.get("fallback_reason")
         iv_rank = metrics.get("iv_rank")
         environment = self._iv_environment(iv_rank)
         bid = quote.get("bid")
@@ -89,12 +120,15 @@ class MarketService:
             liquidity_rating=fields["liquidity_rating"],
             iv_environment=environment,
             spread_percent=spread,
-            freshness=DataFreshness(as_of=observed_at, provider="tastytrade"),
+            freshness=DataFreshness(as_of=quote_observed_at, provider=quote_provider),
             provenance={
                 field: FieldProvenance(
-                    provider="tastytrade",
-                    observed_at=observed_at,
+                    provider=(quote_provider if field in {"price", "bid", "ask"} else "tastytrade"),
+                    observed_at=(
+                        quote_observed_at if field in {"price", "bid", "ask"} else observed_at
+                    ),
                     field=field,
+                    fallback_reason=(fallback_reason if field in {"price", "bid", "ask"} else None),
                 )
                 for field, value in fields.items()
                 if value is not None

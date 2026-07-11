@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from ..domain.snapshots import PortfolioSnapshot
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +112,11 @@ class PositionPilotDatabase:
                     payload_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(account_id, chain_key)
+                );
+                CREATE TABLE IF NOT EXISTS provider_health (
+                    provider TEXT PRIMARY KEY,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
                 """
             )
@@ -297,6 +302,25 @@ class PositionPilotDatabase:
         with self._connect() as connection:
             rows = connection.execute(query, parameters).fetchall()
         return [json.loads(row[0]) for row in rows]
+
+    def save_provider_health(self, provider: str, payload: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO provider_health(provider, payload_json, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(provider) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (provider, json.dumps(payload), datetime.now(UTC).isoformat()),
+            )
+
+    def provider_health(self) -> dict[str, dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT provider, payload_json FROM provider_health"
+            ).fetchall()
+        return {row[0]: json.loads(row[1]) for row in rows}
 
     def backup(self, *, reason: str = "daily") -> Path | None:
         """Create a credentials-free SQLite backup and apply retention."""

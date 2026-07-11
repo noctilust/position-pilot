@@ -78,6 +78,11 @@ type PortfolioState =
   | { kind: "ready"; snapshot: PortfolioSnapshot }
   | { kind: "error"; message: string };
 
+type LiveMarketTick = {
+  symbol: string;
+  price: number | null;
+};
+
 const navigationIcons: Record<string, LucideIcon> = {
   Overview: Gauge,
   Positions: Layers3,
@@ -148,6 +153,26 @@ async function savePrimaryAccount(accountId: string) {
   if (!response.ok) throw new Error("The primary account preference could not be saved.");
 }
 
+async function fetchStreamingState(): Promise<"connecting" | "live" | "degraded" | "disabled"> {
+  const response = await fetch("/api/v1/streaming/status", {
+    credentials: "same-origin",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) return "degraded";
+  const status = (await response.json()) as Record<string, { state: string }>;
+  const states = Object.values(status).map((item) => item.state);
+  if (states.length > 0 && states.every((state) => state === "live")) return "live";
+  if (states.length > 0 && states.every((state) => state === "disabled")) return "disabled";
+  if (
+    states.some(
+      (state) => state === "degraded" || state === "unavailable" || state === "stale",
+    )
+  ) {
+    return "degraded";
+  }
+  return "connecting";
+}
+
 function currency(value: number) {
   return new Intl.NumberFormat(undefined, {
     style: "currency",
@@ -165,6 +190,14 @@ function App() {
   const [activeSection, setActiveSection] = useState("Overview");
   const [portfolio, setPortfolio] = useState<PortfolioState>({ kind: "loading" });
   const [accountOptions, setAccountOptions] = useState<PortfolioAccount[]>([]);
+  const [liveState, setLiveState] = useState<
+    "connecting" | "live" | "degraded" | "disabled"
+  >(
+    "connecting",
+  );
+  const [liveMarketTick, setLiveMarketTick] = useState<LiveMarketTick | null>(null);
+  const selectedAccountId =
+    portfolio.kind === "ready" ? portfolio.snapshot.selected_account_id : "all";
 
   const loadPortfolio = useCallback(
     async (accountId = "all", refresh = false, background = false) => {
@@ -207,6 +240,38 @@ function App() {
     );
   }, [loadPortfolio, state.kind]);
 
+  useEffect(() => {
+    if (state.kind !== "ready") return;
+    const events = new EventSource("/api/v1/events");
+    const refreshStatus = () => {
+      void fetchStreamingState().then(setLiveState);
+    };
+    events.onopen = refreshStatus;
+    events.onerror = () => setLiveState("degraded");
+    events.onmessage = (message) => {
+      const event = JSON.parse(message.data) as {
+        event_type: string;
+        payload?: { symbol?: string; values?: Record<string, unknown> };
+      };
+      if (event.event_type === "portfolio.reconciled") {
+        void loadPortfolio(selectedAccountId, false, true);
+      }
+      if (event.event_type.startsWith("market.") && event.payload?.symbol) {
+        const values = event.payload.values ?? {};
+        const rawPrice = values.price ?? values.bidPrice ?? values.askPrice;
+        setLiveMarketTick({
+          symbol: event.payload.symbol,
+          price: typeof rawPrice === "number" ? rawPrice : null,
+        });
+      }
+    };
+    const statusTimer = window.setInterval(refreshStatus, 30_000);
+    return () => {
+      events.close();
+      window.clearInterval(statusTimer);
+    };
+  }, [loadPortfolio, selectedAccountId, state.kind]);
+
   const selectAccount = (accountId: string) => {
     void savePrimaryAccount(accountId);
     void loadPortfolio(accountId);
@@ -228,12 +293,14 @@ function App() {
           payload={state.payload}
           portfolio={portfolio}
           accountOptions={accountOptions}
+          liveState={liveState}
+          liveMarketTick={liveMarketTick}
           onAccountChange={selectAccount}
           theme={theme}
           onThemeChange={() => setTheme(theme === "dark" ? "light" : "dark")}
         />
         <main id="main-content" className="overview" tabIndex={-1}>
-          <FoundationNotice />
+          <FoundationNotice liveState={liveState} />
           <PortfolioMasthead portfolio={portfolio} />
           {portfolio.kind === "ready" && portfolio.snapshot.notice ? (
             <p className="offline-notice" role="status">{portfolio.snapshot.notice}</p>
@@ -309,6 +376,8 @@ function WorkspaceHeader({
   payload,
   portfolio,
   accountOptions,
+  liveState,
+  liveMarketTick,
   onAccountChange,
   theme,
   onThemeChange,
@@ -316,6 +385,8 @@ function WorkspaceHeader({
   payload: BootstrapPayload;
   portfolio: PortfolioState;
   accountOptions: PortfolioAccount[];
+  liveState: "connecting" | "live" | "degraded" | "disabled";
+  liveMarketTick: LiveMarketTick | null;
   onAccountChange: (accountId: string) => void;
   theme: "dark" | "light";
   onThemeChange: () => void;
@@ -348,8 +419,12 @@ function WorkspaceHeader({
         </select>
       </div>
       <div className="header-actions">
-        <span className="local-clock">
-          <CircleDot aria-hidden="true" /> Local service · {time}
+        <span className={`local-clock ${liveState}`}>
+          <CircleDot aria-hidden="true" /> {liveState === "live" ? "Live streams" : liveState === "disabled" ? "Streaming disabled" : liveState}
+          {liveMarketTick
+            ? ` · ${liveMarketTick.symbol}${liveMarketTick.price === null ? "" : ` ${liveMarketTick.price.toFixed(2)}`}`
+            : ""}
+          {` · ${time}`}
         </span>
         <button className="icon-action" onClick={onThemeChange} aria-label={`Use ${theme === "dark" ? "light" : "dark"} theme`}>
           {theme === "dark" ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
@@ -364,14 +439,26 @@ function WorkspaceHeader({
   );
 }
 
-function FoundationNotice() {
+function FoundationNotice({
+  liveState,
+}: {
+  liveState: "connecting" | "live" | "degraded" | "disabled";
+}) {
+  const message =
+    liveState === "live"
+      ? "Market and account events are live; REST snapshots remain the five-minute authority."
+      : liveState === "disabled"
+        ? "Streaming is disabled; the dashboard is using REST and cached snapshots."
+        : liveState === "degraded"
+          ? "One or more streams are degraded; REST snapshots remain authoritative."
+          : "Streams are connecting; REST snapshots remain authoritative.";
   return (
     <section className="foundation-notice" aria-label="Implementation status">
       <span className="status-pip" aria-hidden="true" />
       <p>
-        <strong>Snapshot service online.</strong> Portfolio state is versioned, account-scoped, and available from durable local cache.
+        <strong>Streaming and reconciliation.</strong> {message}
       </p>
-      <span>Phase 2 / 7</span>
+      <span>Phase 3 / 7</span>
     </section>
   );
 }

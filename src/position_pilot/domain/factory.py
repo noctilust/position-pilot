@@ -9,7 +9,10 @@ from pathlib import Path
 from ..client import get_client
 from ..models import Account, Position
 from ..persistence.sqlite import PositionPilotDatabase
-from .market import MarketService
+from ..providers.massive import MassiveProvider
+from ..providers.router import FieldRouter
+from ..providers.tastytrade import TastytradeProvider
+from .market import MarketService, ProviderRoutedMarketSource
 from .portfolio import PortfolioService
 from .rolls import RollService
 
@@ -66,12 +69,21 @@ def get_database() -> PositionPilotDatabase:
 
 @lru_cache(maxsize=1)
 def get_portfolio_service() -> PortfolioService:
-    return PortfolioService(database=get_database(), source=TastytradePortfolioSource())
+    return PortfolioService(
+        database=get_database(),
+        source=TastytradePortfolioSource(),
+        field_router=get_field_router(),
+    )
 
 
 @lru_cache(maxsize=1)
 def get_market_service() -> MarketService:
-    return MarketService(source=get_client())
+    return MarketService(
+        source=ProviderRoutedMarketSource(
+            primary=get_client(),
+            router=get_field_router(),
+        )
+    )
 
 
 @lru_cache(maxsize=1)
@@ -79,3 +91,32 @@ def get_roll_service() -> RollService:
     service = RollService(get_database())
     service.migrate_legacy_cache()
     return service
+
+
+@lru_cache(maxsize=1)
+def get_field_router() -> FieldRouter:
+    tastytrade = TastytradeProvider(get_client())
+    massive_stocks = MassiveProvider(
+        api_key=os.getenv("MASSIVE_API_KEY", ""),
+        capability="stocks",
+    )
+    massive_options = MassiveProvider(
+        api_key=os.getenv("MASSIVE_API_KEY", ""),
+        capability="options",
+    )
+    providers = {
+        provider.name: provider for provider in (tastytrade, massive_stocks, massive_options)
+    }
+    return FieldRouter(
+        providers=providers,
+        routes={
+            "stock.quote": ["tastytrade", "massive-stocks"],
+            "stock.bars": ["massive-stocks"],
+            "stock.news": ["massive-stocks"],
+            "option.mark": ["tastytrade", "massive-options"],
+            "option.greeks": ["tastytrade", "massive-options"],
+            "option.snapshot": ["massive-options"],
+            "option.bars": ["massive-options"],
+            "option.quotes": ["massive-options"],
+        },
+    )

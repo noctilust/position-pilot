@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from ipaddress import ip_address
@@ -13,17 +14,28 @@ from typing import Annotated, Protocol
 
 from dotenv import load_dotenv
 from fastapi import Cookie, FastAPI, HTTPException, Response, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from .. import __version__
-from ..domain.factory import get_market_service, get_portfolio_service, get_roll_service
+from ..client import get_client
+from ..domain.factory import (
+    get_database,
+    get_field_router,
+    get_market_service,
+    get_portfolio_service,
+    get_roll_service,
+)
 from ..domain.market import MarketSnapshot
 from ..domain.portfolio import PortfolioService
 from ..domain.rolls import RollChainSnapshot
 from ..domain.snapshots import PortfolioSnapshot, PositionHorizon, StrategySnapshot
+from ..streaming.account import AccountStreamEvent
+from ..streaming.hub import LiveEvent, LiveStateHub
+from ..streaming.reconciliation import ReconciliationCoordinator, ReconciliationWorkQueue
+from ..streaming.service import TastytradeStreamingService
 
 STATIC_DIR = Path(__file__).with_name("static")
 
@@ -35,6 +47,7 @@ class WebSettings:
     launch_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
     session_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
     enforce_loopback: bool = True
+    enable_streaming: bool = True
 
 
 class SessionExchangeRequest(BaseModel):
@@ -81,6 +94,118 @@ def _default_portfolio_service() -> PortfolioService:
     return get_portfolio_service()
 
 
+def _stream_symbols(snapshot: PortfolioSnapshot | None) -> list[str]:
+    return sorted(
+        {
+            symbol
+            for account in (snapshot.accounts if snapshot is not None else [])
+            for position in account.positions
+            for symbol in (position.symbol, position.underlying_symbol)
+        }
+    )
+
+
+async def _start_streaming_runtime(app: FastAPI, settings: WebSettings) -> None:
+    app.state.live_hub = LiveStateHub(get_database())
+    tastytrade_configured = (
+        _configured("TASTYTRADE_CLIENT_SECRET", "TASTYTRADE_REFRESH_TOKEN") == "configured"
+    )
+    if not settings.enable_streaming or not tastytrade_configured:
+        return
+    client = get_client()
+    service = app.state.portfolio_service or _default_portfolio_service()
+    app.state.portfolio_service = service
+    try:
+        snapshot = await run_in_threadpool(service.latest)
+        if snapshot is None:
+            snapshot = await run_in_threadpool(service.refresh)
+    except Exception:
+        snapshot = None
+    try:
+        accounts = await run_in_threadpool(client.get_accounts)
+    except Exception:
+        accounts = []
+    if snapshot is None and not accounts:
+        app.state.streaming_startup_error = "BrokerStateUnavailable"
+        return
+    account_numbers = [account.account_number for account in accounts]
+    symbols = _stream_symbols(snapshot)
+
+    async def refresh_and_publish(reason: str) -> None:
+        try:
+            refreshed = await run_in_threadpool(service.refresh)
+            streaming.update_symbols(_stream_symbols(refreshed))
+            await app.state.live_hub.publish(
+                LiveEvent(
+                    event_type="portfolio.reconciled",
+                    payload={
+                        "snapshot_id": refreshed.snapshot_id,
+                        "reason": reason,
+                        "captured_at": refreshed.captured_at.isoformat(),
+                    },
+                    received_at=datetime.now(UTC),
+                )
+            )
+        except Exception as error:
+            await app.state.live_hub.publish(
+                LiveEvent(
+                    event_type="portfolio.reconciliation_failed",
+                    payload={"reason": reason, "error": type(error).__name__},
+                    received_at=datetime.now(UTC),
+                )
+            )
+
+    reconciliation_queue = ReconciliationWorkQueue(refresh_and_publish)
+    app.state.reconciliation_queue = reconciliation_queue
+
+    coordinator = ReconciliationCoordinator(reconcile=reconciliation_queue.submit)
+    streaming = TastytradeStreamingService(client=client, reconciliation=coordinator)
+    app.state.streaming_service = streaming
+
+    async def run_streams() -> None:
+        async def handle_account_event(event: AccountStreamEvent) -> None:
+            await app.state.live_hub.publish_account(event)
+            coordinator.on_account_event(event.event_type)
+
+        try:
+            await streaming.run(
+                account_numbers=account_numbers,
+                symbols=symbols,
+                on_market_event=app.state.live_hub.publish_market,
+                on_account_event=handle_account_event,
+            )
+        except Exception as error:
+            await app.state.live_hub.publish(
+                LiveEvent(
+                    event_type="provider.tastytrade_streaming",
+                    payload={"state": "unavailable", "error": type(error).__name__},
+                    received_at=datetime.now(UTC),
+                )
+            )
+
+    async def reconciliation_clock() -> None:
+        while not streaming.stop.is_set():
+            await asyncio.sleep(30)
+            coordinator.run_if_due()
+
+    app.state.streaming_tasks = [
+        asyncio.create_task(run_streams()),
+        asyncio.create_task(reconciliation_clock()),
+    ]
+
+
+async def _stop_streaming_runtime(app: FastAPI) -> None:
+    streaming = app.state.streaming_service
+    if streaming is not None:
+        streaming.close()
+    for task in app.state.streaming_tasks:
+        task.cancel()
+    if app.state.streaming_tasks:
+        await asyncio.gather(*app.state.streaming_tasks, return_exceptions=True)
+    if app.state.reconciliation_queue is not None:
+        await app.state.reconciliation_queue.close()
+
+
 def create_app(
     settings: WebSettings | None = None,
     *,
@@ -90,15 +215,30 @@ def create_app(
 
     load_dotenv(Path.cwd() / ".env", override=False)
     active_settings = settings or WebSettings()
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        await _start_streaming_runtime(application, active_settings)
+        try:
+            yield
+        finally:
+            await _stop_streaming_runtime(application)
+
     app = FastAPI(
         title="Position Pilot",
         version=__version__,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=lifespan,
     )
     app.state.web_settings = active_settings
     app.state.portfolio_service = portfolio_service
+    app.state.live_hub = None
+    app.state.streaming_tasks = []
+    app.state.streaming_service = None
+    app.state.streaming_startup_error = None
+    app.state.reconciliation_queue = None
     app.state.launch_token_available = True
     app.state.launch_token_lock = asyncio.Lock()
     assets_directory = STATIC_DIR / "assets"
@@ -336,6 +476,77 @@ def create_app(
             get_roll_service().chains,
             account_id,
             symbol=symbol,
+        )
+
+    @app.get("/api/v1/providers/health")
+    async def provider_health(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict:
+        if session is None or not secrets.compare_digest(session, active_settings.session_token):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        health = get_field_router().health()
+        for provider, state in health.items():
+            get_database().save_provider_health(provider, state.model_dump(mode="json"))
+        return {provider: state.model_dump(mode="json") for provider, state in health.items()}
+
+    @app.get("/api/v1/streaming/status")
+    async def streaming_status(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict:
+        if session is None or not secrets.compare_digest(session, active_settings.session_token):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        streaming = app.state.streaming_service
+        if streaming is None:
+            if app.state.streaming_startup_error is not None:
+                return {
+                    "market": {
+                        "state": "degraded",
+                        "error": app.state.streaming_startup_error,
+                    },
+                    "account": {
+                        "state": "degraded",
+                        "error": app.state.streaming_startup_error,
+                    },
+                }
+            return {
+                "market": {"state": "disabled", "error": None},
+                "account": {"state": "disabled", "error": None},
+            }
+        return streaming.status
+
+    @app.get("/api/v1/events")
+    async def live_events(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> StreamingResponse:
+        if session is None or not secrets.compare_digest(session, active_settings.session_token):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        queue = app.state.live_hub.subscribe()
+
+        async def stream():
+            try:
+                while True:
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=20)
+                    except TimeoutError:
+                        yield ": keepalive\n\n"
+                        continue
+                    yield f"data: {event.model_dump_json()}\n\n"
+            finally:
+                app.state.live_hub.unsubscribe(queue)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"X-Accel-Buffering": "no"},
         )
 
     @app.get("/{path:path}", include_in_schema=False)

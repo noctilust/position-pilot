@@ -275,6 +275,18 @@ a:focus-visible {
   fill: currentColor;
 }
 
+.local-clock.connecting svg {
+  color: var(--warn);
+}
+
+.local-clock.degraded svg {
+  color: var(--danger);
+}
+
+.local-clock.disabled svg {
+  color: var(--text-muted);
+}
+
 .icon-action {
   display: grid;
   width: 2.75rem;

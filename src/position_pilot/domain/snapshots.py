@@ -46,6 +46,7 @@ class FieldProvenance(BaseModel):
     provider: str
     observed_at: datetime
     field: str
+    fallback_reason: str | None = None
 
 
 class DataFreshness(BaseModel):

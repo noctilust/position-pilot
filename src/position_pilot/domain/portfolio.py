@@ -7,12 +7,14 @@ from datetime import UTC, datetime
 from typing import Protocol
 from uuid import uuid4
 
-from ..models import Account, Position
+from ..models import Account, Greeks, Position
 from ..persistence.sqlite import PositionPilotDatabase
+from ..providers.router import FieldRouter
 from .accounts import AccountService
 from .snapshots import (
     AccountSnapshot,
     DataFreshness,
+    FieldProvenance,
     PortfolioSnapshot,
     PortfolioTotals,
     PositionHorizon,
@@ -42,10 +44,12 @@ class PortfolioService:
         *,
         database: PositionPilotDatabase,
         source: PortfolioSource,
+        field_router: FieldRouter | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.database = database
         self.source = source
+        self.field_router = field_router
         self.clock = clock or (lambda: datetime.now(UTC))
         self.accounts = AccountService(database)
         self.strategy_detector = StrategyService(database)
@@ -152,15 +156,22 @@ class PortfolioService:
             enrich_positions = getattr(self.source, "enrich_positions_greeks_batch", None)
             if enrich and positions and callable(enrich_positions):
                 positions = enrich_positions(positions)
+            positions, position_provenance = self._apply_option_fallbacks(positions)
             account = self.accounts.snapshot(
                 broker_account,
                 balances,
                 positions,
                 captured_at,
+                position_provenance,
             )
             accounts.append(account)
             strategies.extend(
-                self.strategy_detector.snapshots(account.account_id, positions, captured_at)
+                self.strategy_detector.snapshots(
+                    account.account_id,
+                    positions,
+                    captured_at,
+                    position_provenance,
+                )
             )
 
         totals = PortfolioTotals(
@@ -183,3 +194,95 @@ class PortfolioService:
             strategies=strategies,
             totals=totals,
         )
+
+    def _apply_option_fallbacks(
+        self,
+        positions: list[Position],
+    ) -> tuple[list[Position], dict[str, dict[str, FieldProvenance]]]:
+        if self.field_router is None:
+            return positions, {}
+        enriched: list[Position] = []
+        provenance: dict[str, dict[str, FieldProvenance]] = {}
+        for position in positions:
+            updates: dict = {}
+            field_provenance: dict[str, FieldProvenance] = {}
+            if position.is_option and position.mark_price is None:
+                mark = self.field_router.resolve("option.mark", position.symbol)
+                if mark is not None and isinstance(mark.value, (int, float)):
+                    mark_price = float(mark.value)
+                    market_value = mark_price * abs(position.quantity) * position.multiplier
+                    unrealized_pnl = (
+                        position.cost_basis - market_value
+                        if position.is_short
+                        else market_value - position.cost_basis
+                    )
+                    unrealized_pnl_percent = (
+                        (unrealized_pnl / abs(position.cost_basis)) * 100
+                        if position.cost_basis
+                        else None
+                    )
+                    updates.update(
+                        {
+                            "mark_price": mark_price,
+                            "market_value": market_value,
+                            "unrealized_pnl": unrealized_pnl,
+                            "unrealized_pnl_percent": unrealized_pnl_percent,
+                        }
+                    )
+                    field_provenance.update(
+                        {
+                            field: FieldProvenance(
+                                provider=mark.provider,
+                                observed_at=mark.observed_at,
+                                field=field,
+                                fallback_reason=mark.fallback_reason,
+                            )
+                            for field in (
+                                "mark_price",
+                                "market_value",
+                                "unrealized_pnl",
+                                "unrealized_pnl_percent",
+                            )
+                        }
+                    )
+            missing_greeks = position.greeks is None or any(
+                getattr(position.greeks, field) is None
+                for field in ("delta", "gamma", "theta", "vega", "implied_volatility")
+            )
+            if position.is_option and missing_greeks:
+                current = position.greeks.model_dump() if position.greeks else {}
+                required_greeks = {
+                    field
+                    for field in ("delta", "gamma", "theta", "vega", "implied_volatility")
+                    if current.get(field) is None
+                }
+                greek_value = self.field_router.resolve(
+                    "option.greeks",
+                    position.symbol,
+                    required_keys=required_greeks,
+                )
+                if greek_value is not None and isinstance(greek_value.value, dict):
+                    supplied = {
+                        field: value
+                        for field, value in greek_value.value.items()
+                        if field in Greeks.model_fields
+                        and value is not None
+                        and current.get(field) is None
+                    }
+                    updates["greeks"] = Greeks(**{**current, **supplied})
+                    field_provenance.update(
+                        {
+                            field: FieldProvenance(
+                                provider=greek_value.provider,
+                                observed_at=greek_value.observed_at,
+                                field=field,
+                                fallback_reason=greek_value.fallback_reason,
+                            )
+                            for field in supplied
+                        }
+                    )
+            updated = position.model_copy(update=updates) if updates else position
+            enriched.append(updated)
+            if field_provenance:
+                provenance[position.symbol] = field_provenance
+        return enriched, provenance

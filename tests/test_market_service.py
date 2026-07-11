@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 
-from position_pilot.domain.market import MarketService
+from position_pilot.domain.market import MarketService, ProviderRoutedMarketSource
+from position_pilot.providers.contracts import ProviderHealth, ProviderState, ProviderValue
+from position_pilot.providers.router import FieldRouter
 
 
 class FakeMarketSource:
@@ -39,3 +41,40 @@ def test_unavailable_quote_abstains_instead_of_building_zero_price_snapshot() ->
             return None
 
     assert MarketService(source=MissingMarketSource()).snapshot("SPY") is None
+
+
+def test_market_service_uses_configured_fallback_with_field_provenance() -> None:
+    class EmptyProvider:
+        name = "tastytrade"
+
+        def fetch(self, field: str, symbol: str):
+            return None
+
+        def health(self) -> ProviderHealth:
+            return ProviderHealth(provider=self.name, state=ProviderState.UNAVAILABLE)
+
+    class FallbackProvider(EmptyProvider):
+        name = "massive-stocks"
+
+        def fetch(self, field: str, symbol: str) -> ProviderValue:
+            return ProviderValue(
+                field=field,
+                value=551.25,
+                provider=self.name,
+                observed_at=datetime(2026, 7, 11, 16, 44, tzinfo=UTC),
+            )
+
+    providers = [EmptyProvider(), FallbackProvider()]
+    router = FieldRouter(
+        providers={provider.name: provider for provider in providers},
+        routes={"stock.quote": ["tastytrade", "massive-stocks"]},
+    )
+    source = ProviderRoutedMarketSource(primary=FakeMarketSource(), router=router)
+
+    snapshot = MarketService(source=source).snapshot("SPY")
+
+    assert snapshot is not None
+    assert snapshot.price == 551.25
+    assert snapshot.freshness.provider == "massive-stocks"
+    assert snapshot.provenance["price"].provider == "massive-stocks"
+    assert snapshot.provenance["price"].fallback_reason == "tastytrade returned no value"
