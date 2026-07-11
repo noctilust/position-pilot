@@ -436,10 +436,24 @@ def quote(symbol: str = typer.Argument(..., help="Symbol to quote")):
 
 
 @app.command()
-def dashboard():
-    """Launch interactive TUI dashboard."""
-    from .dashboard import run_dashboard
-    run_dashboard()
+def dashboard(
+    tui: bool = typer.Option(False, "--tui", help="Launch the legacy terminal dashboard"),
+    open_browser: bool = typer.Option(
+        True,
+        "--browser/--no-browser",
+        help="Open the local web dashboard in the default browser",
+    ),
+):
+    """Launch the local Position Pilot dashboard."""
+    if tui:
+        from .dashboard import run_dashboard
+
+        run_dashboard()
+        return
+
+    from .web.launcher import run_web_dashboard
+
+    run_web_dashboard(open_browser=open_browser)
 
 
 @app.command()

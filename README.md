@@ -1,22 +1,22 @@
 # Position Pilot
 
-Position Pilot is a sophisticated Python CLI/TUI tool for options traders using Tastytrade, featuring AI-powered analysis through Claude Sonnet 4.5.
+Position Pilot is a local, read-only portfolio workstation for options traders using Tastytrade. The web revamp is being delivered incrementally; the existing CLI and terminal dashboard remain available while feature parity is built.
 
 ## Installation
 
 ```bash
 # Install dependencies
-uv install
+uv sync --group dev
 ```
 
 ## Quick Start
 
 ```bash
-# Quickest way to start - launch the interactive dashboard
+# Launch the secure local web dashboard
 uv run pilot dashboard
 ```
 
-This will launch the interactive TUI dashboard with your LLM-powered recommendations.
+This starts a loopback-only FastAPI service on an ephemeral port and opens a one-time authenticated browser session.
 
 ### Alternative: Activate the virtual environment
 
@@ -53,6 +53,9 @@ Config file: `~/.config/position-pilot/config.json`
 # Interactive dashboard (recommended)
 pilot dashboard
 
+# Legacy terminal dashboard during the migration
+pilot dashboard --tui
+
 # View positions (grouped by strategy)
 pilot positions
 
@@ -78,7 +81,7 @@ pilot account list
 pilot account set 12345678
 ```
 
-## Dashboard Controls
+## Legacy TUI Controls
 
 | Key | Action |
 |-----|--------|
@@ -104,7 +107,12 @@ pilot account set 12345678
 - **analysis/llm_signals.py** - Claude-powered trading recommendations
 - **analysis/market.py** - IV rank and market environment analysis
 - **dashboard/app.py** - Interactive Textual TUI
+- **web/app.py** - Secure local FastAPI application and versioned API
+- **web/launcher.py** - Loopback server and one-time browser-session launcher
+- **frontend/** - React/TypeScript workstation interface
 - **recommendation_cache.py** - Disk-based caching at `~/.cache/position-pilot/`
+
+The confirmed product requirements and delivery sequence live in [docs/PRD.md](docs/PRD.md) and [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md).
 
 ### Key Design Decisions
 
@@ -134,9 +142,21 @@ Dashboard/CLI Display
 
 ## Technology Stack
 
-- Python 3.12+, Typer, Textual, Pydantic, Rich, httpx
+- Python 3.12+, FastAPI, Typer, Textual, Pydantic, Rich, httpx
+- React, TypeScript, Vite, and pnpm for frontend development
 - Anthropic Claude SDK for AI analysis
 - Tastytrade OAuth for market data & positions
+
+### Frontend development
+
+Normal installations use the prebuilt frontend bundled with the Python package. Contributors can rebuild it with:
+
+```bash
+cd frontend
+pnpm install
+pnpm run typecheck
+pnpm run build
+```
 
 ## Requirements
 
