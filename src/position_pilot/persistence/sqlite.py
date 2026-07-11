@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from ..domain.snapshots import PortfolioSnapshot
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +118,23 @@ class PositionPilotDatabase:
                     payload_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS strategy_documents (
+                    doc_type TEXT NOT NULL,
+                    strategy_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(doc_type, strategy_id)
+                );
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    event_id TEXT PRIMARY KEY,
+                    strategy_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_audit_events_strategy
+                    ON audit_events(strategy_id, recorded_at DESC);
                 """
             )
             connection.execute(
@@ -204,6 +221,70 @@ class PositionPilotDatabase:
                 (account_number,),
             ).fetchone()
         return str(row[0]) if row else None
+
+    def broker_number_for_account_id(self, account_id: str) -> str | None:
+        """Resolve a public account identity to the internal broker number (server-only)."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT account_number FROM account_identities WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def save_strategy_document(self, doc_type: str, strategy_id: str, payload: dict) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO strategy_documents(doc_type, strategy_id, payload_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(doc_type, strategy_id) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                (doc_type, strategy_id, json.dumps(payload), datetime.now(UTC).isoformat()),
+            )
+
+    def get_strategy_document(self, doc_type: str, strategy_id: str) -> dict | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json FROM strategy_documents
+                WHERE doc_type = ? AND strategy_id = ?
+                """,
+                (doc_type, strategy_id),
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def append_audit_event(self, payload: dict) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO audit_events(
+                    event_id, strategy_id, action, summary, payload_json, recorded_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["event_id"],
+                    payload["strategy_id"],
+                    payload["action"],
+                    payload["summary"],
+                    json.dumps(payload),
+                    payload.get("recorded_at") or datetime.now(UTC).isoformat(),
+                ),
+            )
+
+    def list_audit_events(self, strategy_id: str) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json FROM audit_events
+                WHERE strategy_id = ?
+                ORDER BY recorded_at DESC, rowid DESC
+                """,
+                (strategy_id,),
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
 
     def set_setting(self, key: str, value: Any) -> None:
         with self._connect() as connection:

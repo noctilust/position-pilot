@@ -14,6 +14,7 @@
 - [Web application foundation](tickets/010-web-foundation.md) — Phase 1 ships the secure local service, packaged workstation shell, web-default launcher, and regression gates.
 - [Versioned domain snapshots](tickets/020-domain-snapshots.md) — Phase 2 establishes shared account, portfolio, strategy, market, and roll services over durable SQLite state.
 - [Streaming and provider reconciliation](tickets/030-streaming-providers.md) — Phase 3 adds independently supervised Tastytrade streams, REST authority, field-level fallback routing, provider health, and redacted browser events.
+- [Portfolio feature parity](tickets/040-feature-parity.md) — Phase 4 delivers web parity for positions, strategies, Greeks, P/L, balances, watchlist, markets, rolls, orders, position detail, thesis/trade plan, audit, and deterministic stress risk.
 
 ## Fog
 

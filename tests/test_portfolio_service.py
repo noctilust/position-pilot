@@ -63,6 +63,12 @@ def test_refresh_builds_one_atomic_snapshot_without_cross_account_grouping(tmp_p
     assert "5WT67890" not in serialized
     assert "Forrest trading" not in serialized
     assert database.latest_portfolio_snapshot() == snapshot
+    assert all(account.positions[0].delta == 1.0 for account in snapshot.accounts)
+    assert all(
+        account.positions[0].provenance["delta"].provider == "position-pilot"
+        for account in snapshot.accounts
+    )
+    assert sorted(strategy.total_delta for strategy in snapshot.strategies) == [-100, 100]
 
 
 def test_refresh_failure_returns_the_last_snapshot_as_cached(tmp_path) -> None:

@@ -6,6 +6,31 @@ test("secure dashboard shell renders without console or accessibility errors", a
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
   });
+  await page.route("**/api/v1/bootstrap", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        application: { name: "Position Pilot", version: "test", phase: "portfolio-parity" },
+        providers: {
+          tastytrade: "configured",
+          codex: "not_checked",
+          massive: "configured",
+          benzinga: "not_configured",
+        },
+        monitoring: {
+          market_timezone: "America/New_York",
+          window_start: "07:30",
+          window_end: "18:00",
+          evaluation_minutes: 30,
+          risk_refresh_seconds: 60,
+        },
+        navigation: ["Overview", "Positions", "Roll analytics", "Markets", "Alerts", "Settings"],
+        primary_account_id: "public-account-id",
+        data_state: "ready",
+        server_time: "2026-07-11T16:30:00Z",
+      }),
+    }),
+  );
   await page.route("**/api/v1/portfolio**", (route) =>
     route.fulfill({
       contentType: "application/json",
@@ -31,15 +56,207 @@ test("secure dashboard shell renders without console or accessibility errors", a
             positions: [],
           },
         ],
-        strategies: [],
+        strategies: [
+          {
+            strategy_id: "strat-browser",
+            account_id: "public-account-id",
+            underlying: "SPY",
+            strategy_type: "Short Put",
+            expiration_date: "2026-08-21",
+            days_to_expiration: 21,
+            quantity: 1,
+            strikes: "$500",
+            unrealized_pnl: 40,
+            unrealized_pnl_percent: 10,
+            total_delta: -20,
+            total_theta: 4,
+            horizon: "tactical",
+            legs: [],
+          },
+        ],
         totals: {
           net_liquidating_value: 25000,
           cash_balance: 5000,
           buying_power: 10000,
-          unrealized_pnl: 0,
+          unrealized_pnl: 40,
         },
-        selected_account_id: "all",
+        selected_account_id: new URL(route.request().url()).searchParams.get("account_id") ?? "all",
         notice: null,
+      }),
+    }),
+  );
+  await page.route("**/api/v1/portfolio/risk**", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        total_delta: -20,
+        total_gamma: 0.1,
+        total_theta: 4,
+        total_vega: -8,
+        unrealized_pnl: 40,
+        net_liquidating_value: 25000,
+        account_count: 1,
+        strategy_count: 1,
+        position_count: 1,
+        concentration: [
+          {
+            underlying: "SPY",
+            market_value: 250,
+            share_of_portfolio: 0.01,
+            strategy_count: 1,
+            net_delta: -20,
+          },
+        ],
+        stress: [
+          {
+            name: "theta_1d",
+            label: "1-day theta",
+            estimated_pnl_change: 4,
+            description: "theta",
+          },
+        ],
+      }),
+    }),
+  );
+  await page.route("**/api/v1/markets", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        captured_at: "2026-07-11T16:30:00Z",
+        quotes: [
+          {
+            symbol: "SPY",
+            price: 500,
+            bid: 499.9,
+            ask: 500.1,
+            iv: 0.16,
+            iv_rank: 35,
+            iv_percentile: 40,
+            liquidity_rating: 4,
+            iv_environment: "normal",
+            spread_percent: 0.04,
+          },
+        ],
+        iv_summary: { normal: 1 },
+      }),
+    }),
+  );
+  await page.route("**/api/v1/watchlist", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        symbols: ["SPY"],
+        quotes: [
+          {
+            symbol: "SPY",
+            price: 500,
+            bid: 499.9,
+            ask: 500.1,
+            iv: 0.16,
+            iv_rank: 35,
+            iv_percentile: 40,
+            liquidity_rating: 4,
+            iv_environment: "normal",
+            spread_percent: 0.04,
+          },
+        ],
+      }),
+    }),
+  );
+  await page.route("**/api/v1/streaming/status", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        market: { state: "disabled", error: null },
+        account: { state: "disabled", error: null },
+      }),
+    }),
+  );
+  await page.route("**/api/v1/accounts/*/orders", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify([
+        {
+          order_id: "public-order",
+          account_id: "public-account-id",
+          symbol: "SPY 260821P00500000",
+          underlying_symbol: "SPY",
+          action: "Sell to Open",
+          quantity: 1,
+          order_type: "Limit",
+          status: "filled",
+          created_at: "2026-07-10T16:30:00Z",
+          filled_quantity: 1,
+          average_fill_price: 2.5,
+          fills: [{ fill_id: "public-fill", filled_at: "2026-07-10T16:31:00Z", symbol: "SPY", quantity: 1, price: 2.5, amount: 250 }],
+        },
+      ]),
+    }),
+  );
+  await page.route("**/api/v1/accounts/*/rolls/patterns**", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        account_id: "public-account-id",
+        symbol: null,
+        avg_dte_at_roll: 14,
+        typical_roll_days: [14],
+        win_rate: 0.75,
+        total_rolls: 4,
+        avg_roll_pnl: 50,
+        total_pnl: 200,
+        best_dte_window: [10, 18],
+        avg_days_between_rolls: 21,
+      }),
+    }),
+  );
+  await page.route("**/api/v1/accounts/*/rolls/heatmap**", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        account_id: "public-account-id",
+        underlying: "SPY",
+        cells: [{ strike: 500, dte_bucket: "8-14", count: 1 }],
+        strikes: [500],
+        buckets: ["8-14"],
+        total_rolls: 1,
+      }),
+    }),
+  );
+  const rollChain = {
+    chain_id: "chain-public",
+    account_id: "public-account-id",
+    underlying: "SPY",
+    strategy_type: "Short Put",
+    original_open_credit: 2.5,
+    chain_total_credit: 2.8,
+    rolls: [{ roll_id: "roll-public", timestamp: "2026-07-09T16:30:00Z", old_strike: 500, new_strike: 495, old_dte: 14, new_dte: 35, roll_pnl: 50, premium_effect: 0.3 }],
+  };
+  await page.route("**/api/v1/accounts/*/rolls", (route) =>
+    route.fulfill({ contentType: "application/json", body: JSON.stringify([rollChain]) }),
+  );
+  await page.route("**/api/v1/strategies/strat-browser", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        strategy: {
+          strategy_id: "strat-browser", account_id: "public-account-id", underlying: "SPY", strategy_type: "Short Put",
+          expiration_date: "2026-08-21", days_to_expiration: 21, quantity: 1, strikes: "$500", unrealized_pnl: 40,
+          unrealized_pnl_percent: 10, total_delta: -20, total_theta: 4, horizon: "tactical", legs: [],
+        },
+        risk: {
+          max_profit: 250, max_loss: 49750, breakevens: [497.5], distance_to_nearest_strike: 0,
+          underlying_price: 500, current_pnl: 40, defined_risk: false, valuation_basis: "current_mark",
+          combined: { delta: -20, gamma: 0.1, theta: 4, vega: -8, average_iv: 0.2, nearest_dte: 21 },
+          stress: [{ name: "theta_1d", label: "1-day theta", estimated_pnl_change: 4, description: "theta" }],
+        },
+        market: { symbol: "SPY", price: 500, bid: 499.9, ask: 500.1, iv: 0.2, iv_rank: 35, iv_percentile: 40, liquidity_rating: 4, iv_environment: "normal", spread_percent: 0.04 },
+        chart: { symbol: "SPY", bars: [{ timestamp: "2026-07-11T16:30:00Z", open: 499, high: 501, low: 498, close: 500 }], source: "massive-stocks", notice: null },
+        thesis: null,
+        trade_plan: null,
+        audit: [],
+        rolls: [rollChain],
+        events: [{ kind: "roll", timestamp: "2026-07-09T16:30:00Z", summary: "Rolled 500 → 495", action: "roll" }],
       }),
     }),
   );
@@ -52,7 +269,36 @@ test("secure dashboard shell renders without console or accessibility errors", a
   await expect(page.getByRole("complementary", { name: "Primary navigation" })).toBeVisible();
   await expect(page.getByText("Provider ledger")).toBeVisible();
   await expect(page.getByRole("combobox", { name: "Account scope" })).toBeVisible();
-  await expect(page.getByText("$25,000.00")).toBeVisible();
+  await expect(page.getByText("$25,000.00").first()).toBeVisible();
+  await expect(page.getByText("Portfolio feature parity.")).toBeVisible();
+
+  await page.getByRole("button", { name: "Positions" }).click();
+  await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
+  await expect(page.getByText("Short Put")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Order activity" })).toBeVisible();
+
+  await page.getByRole("button", { name: "SPY" }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByText("Remaining max profit")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Close", exact: true })).toBeFocused();
+  await expect(page.getByLabel("Decision horizon")).toHaveValue("tactical");
+  await expect(page.getByLabel("Profit target")).toBeVisible();
+  await expect(page.getByLabel("Roll criteria")).toBeVisible();
+  const drawerAccessibility = await new AxeBuilder({ page }).analyze();
+  expect(drawerAccessibility.violations).toEqual([]);
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).not.toBeVisible();
+
+  await page.getByRole("button", { name: "Roll analytics" }).click();
+  await expect(page.getByRole("heading", { name: "Roll chains" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Pattern analytics" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Markets" }).click();
+  await expect(page.getByRole("heading", { name: "Market overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Quotes" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect(page.getByRole("heading", { name: "Saved identities" })).toBeVisible();
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(accessibility.violations).toEqual([]);

@@ -38,7 +38,7 @@ def test_latest_portfolio_snapshot_is_replaced_atomically(tmp_path) -> None:
     database.save_portfolio_snapshot(second)
 
     assert database.latest_portfolio_snapshot() == second
-    assert database.schema_version == 3
+    assert database.schema_version == 4
 
 
 def test_account_alias_is_stable_without_exposing_broker_number(tmp_path) -> None:
@@ -113,7 +113,7 @@ def test_existing_schema_is_backed_up_before_versioned_migration(tmp_path) -> No
 
     database = PositionPilotDatabase(path)
 
-    assert database.schema_version == 3
+    assert database.schema_version == 4
     assert len(list(database.backup_directory.glob("position-pilot-pre-migration-*.sqlite3"))) == 1
 
 

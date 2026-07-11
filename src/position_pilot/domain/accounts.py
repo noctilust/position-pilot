@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from ..models import Account, Position
+from ..models import Account, Position, PositionType
 from ..persistence.sqlite import PositionPilotDatabase
 from .snapshots import (
     AccountSnapshot,
@@ -29,6 +29,13 @@ def position_snapshot(
     captured_at: datetime,
     provenance_overrides: dict[str, FieldProvenance] | None = None,
 ) -> PositionSnapshot:
+    delta = (
+        1.0
+        if position.position_type is PositionType.EQUITY
+        else position.greeks.delta
+        if position.greeks
+        else None
+    )
     provider_fields = {
         "quantity": position.quantity,
         "mark_price": position.mark_price,
@@ -36,7 +43,7 @@ def position_snapshot(
         "unrealized_pnl": position.unrealized_pnl,
         "expiration_date": position.expiration_date,
         "days_to_expiration": position.days_to_expiration,
-        "delta": position.greeks.delta if position.greeks else None,
+        "delta": delta,
         "gamma": position.greeks.gamma if position.greeks else None,
         "theta": position.greeks.theta if position.greeks else None,
         "vega": position.greeks.vega if position.greeks else None,
@@ -47,6 +54,12 @@ def position_snapshot(
         for field, value in provider_fields.items()
         if value is not None
     }
+    if position.position_type is PositionType.EQUITY:
+        provenance["delta"] = FieldProvenance(
+            provider="position-pilot",
+            observed_at=captured_at,
+            field="delta",
+        )
     provenance.update(provenance_overrides or {})
     greeks = position.greeks
     return PositionSnapshot(
@@ -63,7 +76,7 @@ def position_snapshot(
         market_value=position.market_value,
         unrealized_pnl=position.unrealized_pnl,
         unrealized_pnl_percent=position.unrealized_pnl_percent,
-        delta=greeks.delta if greeks else None,
+        delta=delta,
         gamma=greeks.gamma if greeks else None,
         theta=greeks.theta if greeks else None,
         vega=greeks.vega if greeks else None,

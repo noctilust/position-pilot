@@ -10,13 +10,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Annotated, Protocol
+from typing import Annotated, Any, Protocol
 
 from dotenv import load_dotenv
 from fastapi import Cookie, FastAPI, HTTPException, Response, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from .. import __version__
@@ -25,13 +25,21 @@ from ..domain.factory import (
     get_database,
     get_field_router,
     get_market_service,
+    get_order_service,
+    get_plans_service,
     get_portfolio_service,
+    get_risk_service,
     get_roll_service,
+    get_watchlist_service,
 )
-from ..domain.market import MarketSnapshot
+from ..domain.market import ChartSnapshot, MarketOverview, MarketSnapshot
+from ..domain.orders import OrderSnapshot
+from ..domain.plans import AuditEvent, Thesis, TradePlan
 from ..domain.portfolio import PortfolioService
-from ..domain.rolls import RollChainSnapshot
+from ..domain.risk import PortfolioRisk, StrategyRisk
+from ..domain.rolls import RollChainSnapshot, RollHeatmapSnapshot, RollPatternsSnapshot
 from ..domain.snapshots import PortfolioSnapshot, PositionHorizon, StrategySnapshot
+from ..domain.watchlist import WatchlistSnapshot
 from ..streaming.account import AccountStreamEvent
 from ..streaming.hub import LiveEvent, LiveStateHub
 from ..streaming.reconciliation import ReconciliationCoordinator, ReconciliationWorkQueue
@@ -64,6 +72,29 @@ class StrategyHorizonRequest(BaseModel):
     horizon: PositionHorizon
 
 
+class ThesisRequest(BaseModel):
+    purpose: str = Field(default="", max_length=4_000)
+    expected_duration: str = Field(default="", max_length=1_000)
+    target_range: str = Field(default="", max_length=1_000)
+    invalidation: str = Field(default="", max_length=4_000)
+    income_or_hedge_intent: str = Field(default="", max_length=4_000)
+    events_to_watch: list[str] = Field(default_factory=list, max_length=100)
+
+
+class TradePlanRequest(BaseModel):
+    entry_thesis: str = Field(default="", max_length=4_000)
+    intended_duration: str = Field(default="", max_length=1_000)
+    profit_target: str = Field(default="", max_length=1_000)
+    max_loss: str = Field(default="", max_length=1_000)
+    roll_criteria: str = Field(default="", max_length=4_000)
+    event_exposure: str = Field(default="", max_length=4_000)
+    exit_deadline: str = Field(default="", max_length=1_000)
+
+
+class WatchlistRequest(BaseModel):
+    symbols: list[str] = Field(max_length=100)
+
+
 class PortfolioReader(Protocol):
     """Web-facing portfolio service contract."""
 
@@ -94,6 +125,11 @@ def _default_portfolio_service() -> PortfolioService:
     return get_portfolio_service()
 
 
+def _require_session(session: str | None, expected: str) -> None:
+    if session is None or not secrets.compare_digest(session, expected):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+
+
 def _stream_symbols(snapshot: PortfolioSnapshot | None) -> list[str]:
     return sorted(
         {
@@ -103,6 +139,40 @@ def _stream_symbols(snapshot: PortfolioSnapshot | None) -> list[str]:
             for symbol in (position.symbol, position.underlying_symbol)
         }
     )
+
+
+def _find_strategy(snapshot: PortfolioSnapshot, strategy_id: str) -> StrategySnapshot:
+    strategy = next(
+        (item for item in snapshot.strategies if item.strategy_id == strategy_id),
+        None,
+    )
+    if strategy is None:
+        raise KeyError(strategy_id)
+    return strategy
+
+
+async def _portfolio_or_503(
+    service: PortfolioReader,
+    *,
+    refresh: bool = False,
+    account_id: str = "all",
+) -> PortfolioSnapshot:
+    try:
+        if refresh:
+            snapshot = await run_in_threadpool(service.refresh)
+            return snapshot.for_account(account_id)
+        snapshot = await run_in_threadpool(service.latest, account_id)
+        if snapshot is None:
+            snapshot = await run_in_threadpool(service.refresh)
+            return snapshot.for_account(account_id)
+        return snapshot
+    except KeyError:
+        raise
+    except Exception as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Portfolio data is currently unavailable.",
+        ) from error
 
 
 async def _start_streaming_runtime(app: FastAPI, settings: WebSettings) -> None:
@@ -245,6 +315,15 @@ def create_app(
     if assets_directory.is_dir():
         app.mount("/assets", StaticFiles(directory=assets_directory), name="assets")
 
+    async def resolve_strategy(strategy_id: str) -> StrategySnapshot:
+        service = app.state.portfolio_service or _default_portfolio_service()
+        app.state.portfolio_service = service
+        try:
+            snapshot = await _portfolio_or_503(service)
+            return _find_strategy(snapshot, strategy_id)
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
+
     @app.middleware("http")
     async def require_loopback_client(request, call_next):
         client_host = request.client.host if request.client else ""
@@ -324,17 +403,13 @@ def create_app(
             Cookie(alias="position_pilot_session"),
         ] = None,
     ) -> JSONResponse:
-        if session is None or not secrets.compare_digest(
-            session,
-            active_settings.session_token,
-        ):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        _require_session(session, active_settings.session_token)
         return JSONResponse(
             {
                 "application": {
                     "name": "Position Pilot",
                     "version": __version__,
-                    "phase": "web-foundation",
+                    "phase": "portfolio-parity",
                 },
                 "providers": {
                     "tastytrade": _configured(
@@ -380,31 +455,32 @@ def create_app(
             Cookie(alias="position_pilot_session"),
         ] = None,
     ) -> PortfolioSnapshot:
-        if session is None or not secrets.compare_digest(
-            session,
-            active_settings.session_token,
-        ):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        _require_session(session, active_settings.session_token)
         service = app.state.portfolio_service
         if service is None:
             service = _default_portfolio_service()
             app.state.portfolio_service = service
         try:
-            if refresh:
-                snapshot = await run_in_threadpool(service.refresh)
-                return snapshot.for_account(account_id)
-            snapshot = await run_in_threadpool(service.latest, account_id)
-            if snapshot is None:
-                snapshot = await run_in_threadpool(service.refresh)
-                return snapshot.for_account(account_id)
-            return snapshot
+            return await _portfolio_or_503(service, refresh=refresh, account_id=account_id)
         except KeyError as error:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
-        except Exception as error:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Portfolio data is currently unavailable.",
-            ) from error
+
+    @app.get("/api/v1/portfolio/risk", response_model=PortfolioRisk)
+    async def portfolio_risk(
+        account_id: str = "all",
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> PortfolioRisk:
+        _require_session(session, active_settings.session_token)
+        service = app.state.portfolio_service or _default_portfolio_service()
+        app.state.portfolio_service = service
+        try:
+            snapshot = await _portfolio_or_503(service, account_id=account_id)
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
+        return await run_in_threadpool(get_risk_service().portfolio_risk, snapshot)
 
     @app.put("/api/v1/settings/primary-account", status_code=status.HTTP_204_NO_CONTENT)
     async def save_primary_account(
@@ -414,8 +490,7 @@ def create_app(
             Cookie(alias="position_pilot_session"),
         ] = None,
     ) -> Response:
-        if session is None or not secrets.compare_digest(session, active_settings.session_token):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        _require_session(session, active_settings.session_token)
         service = app.state.portfolio_service or _default_portfolio_service()
         app.state.portfolio_service = service
         try:
@@ -433,8 +508,7 @@ def create_app(
             Cookie(alias="position_pilot_session"),
         ] = None,
     ) -> StrategySnapshot:
-        if session is None or not secrets.compare_digest(session, active_settings.session_token):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        _require_session(session, active_settings.session_token)
         service = app.state.portfolio_service or _default_portfolio_service()
         app.state.portfolio_service = service
         try:
@@ -446,6 +520,165 @@ def create_app(
         except KeyError as error:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
 
+    @app.get("/api/v1/strategies/{strategy_id}")
+    async def strategy_detail(
+        strategy_id: str,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        strategy = await resolve_strategy(strategy_id)
+
+        market = await run_in_threadpool(get_market_service().snapshot, strategy.underlying)
+        underlying_price = market.price if market else None
+        risk = await run_in_threadpool(
+            lambda: get_risk_service().strategy_risk(
+                strategy,
+                underlying_price=underlying_price,
+            )
+        )
+        chart = await run_in_threadpool(get_market_service().chart, strategy.underlying)
+        thesis = await run_in_threadpool(get_plans_service().get_thesis, strategy_id)
+        trade_plan = await run_in_threadpool(get_plans_service().get_trade_plan, strategy_id)
+        audit = await run_in_threadpool(get_plans_service().audit_history, strategy_id)
+        all_rolls = await run_in_threadpool(
+            lambda: get_roll_service().chains(
+                strategy.account_id,
+                symbol=strategy.underlying,
+            )
+        )
+        rolls = [chain for chain in all_rolls if chain.strategy_type == strategy.strategy_type]
+        return {
+            "strategy": strategy.model_dump(mode="json"),
+            "risk": risk.model_dump(mode="json"),
+            "market": market.model_dump(mode="json") if market else None,
+            "chart": chart.model_dump(mode="json"),
+            "thesis": thesis.model_dump(mode="json") if thesis else None,
+            "trade_plan": trade_plan.model_dump(mode="json") if trade_plan else None,
+            "audit": [event.model_dump(mode="json") for event in audit],
+            "rolls": [chain.model_dump(mode="json") for chain in rolls],
+            "events": [
+                {
+                    "kind": "audit",
+                    "timestamp": event.recorded_at.isoformat(),
+                    "summary": event.summary,
+                    "action": event.action,
+                }
+                for event in audit
+            ]
+            + [
+                {
+                    "kind": "roll",
+                    "timestamp": roll.timestamp.isoformat(),
+                    "summary": (
+                        f"Rolled {roll.old_strike} → {roll.new_strike} "
+                        f"({roll.old_dte}→{roll.new_dte} DTE)"
+                    ),
+                    "action": "roll",
+                }
+                for chain in rolls
+                for roll in chain.rolls
+            ],
+        }
+
+    @app.get("/api/v1/strategies/{strategy_id}/risk", response_model=StrategyRisk)
+    async def strategy_risk_endpoint(
+        strategy_id: str,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> StrategyRisk:
+        _require_session(session, active_settings.session_token)
+        strategy = await resolve_strategy(strategy_id)
+        market = await run_in_threadpool(get_market_service().snapshot, strategy.underlying)
+        price = market.price if market else None
+        return await run_in_threadpool(
+            lambda: get_risk_service().strategy_risk(strategy, underlying_price=price)
+        )
+
+    @app.get("/api/v1/strategies/{strategy_id}/thesis", response_model=Thesis | None)
+    async def get_thesis(
+        strategy_id: str,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> Thesis | None:
+        _require_session(session, active_settings.session_token)
+        await resolve_strategy(strategy_id)
+        return await run_in_threadpool(get_plans_service().get_thesis, strategy_id)
+
+    @app.put("/api/v1/strategies/{strategy_id}/thesis", response_model=Thesis)
+    async def put_thesis(
+        strategy_id: str,
+        payload: ThesisRequest,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> Thesis:
+        _require_session(session, active_settings.session_token)
+        await resolve_strategy(strategy_id)
+        return await run_in_threadpool(
+            get_plans_service().save_thesis,
+            strategy_id,
+            payload.model_dump(),
+        )
+
+    @app.get("/api/v1/strategies/{strategy_id}/trade-plan", response_model=TradePlan | None)
+    async def get_trade_plan(
+        strategy_id: str,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> TradePlan | None:
+        _require_session(session, active_settings.session_token)
+        await resolve_strategy(strategy_id)
+        return await run_in_threadpool(get_plans_service().get_trade_plan, strategy_id)
+
+    @app.put("/api/v1/strategies/{strategy_id}/trade-plan", response_model=TradePlan)
+    async def put_trade_plan(
+        strategy_id: str,
+        payload: TradePlanRequest,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> TradePlan:
+        _require_session(session, active_settings.session_token)
+        await resolve_strategy(strategy_id)
+        return await run_in_threadpool(
+            get_plans_service().save_trade_plan,
+            strategy_id,
+            payload.model_dump(),
+        )
+
+    @app.get("/api/v1/strategies/{strategy_id}/audit", response_model=list[AuditEvent])
+    async def strategy_audit(
+        strategy_id: str,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> list[AuditEvent]:
+        _require_session(session, active_settings.session_token)
+        await resolve_strategy(strategy_id)
+        return await run_in_threadpool(get_plans_service().audit_history, strategy_id)
+
+    @app.get("/api/v1/markets", response_model=MarketOverview)
+    async def markets_overview(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> MarketOverview:
+        _require_session(session, active_settings.session_token)
+        return await run_in_threadpool(get_market_service().overview)
+
     @app.get("/api/v1/markets/{symbol}", response_model=MarketSnapshot)
     async def market_snapshot(
         symbol: str,
@@ -454,12 +687,73 @@ def create_app(
             Cookie(alias="position_pilot_session"),
         ] = None,
     ) -> MarketSnapshot:
-        if session is None or not secrets.compare_digest(session, active_settings.session_token):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        _require_session(session, active_settings.session_token)
         snapshot = await run_in_threadpool(get_market_service().snapshot, symbol)
         if snapshot is None:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
         return snapshot
+
+    @app.get("/api/v1/markets/{symbol}/chart", response_model=ChartSnapshot)
+    async def market_chart(
+        symbol: str,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> ChartSnapshot:
+        _require_session(session, active_settings.session_token)
+        return await run_in_threadpool(get_market_service().chart, symbol)
+
+    @app.get("/api/v1/watchlist", response_model=WatchlistSnapshot)
+    async def watchlist(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> WatchlistSnapshot:
+        _require_session(session, active_settings.session_token)
+        return await run_in_threadpool(get_watchlist_service().snapshot)
+
+    @app.put("/api/v1/watchlist", response_model=WatchlistSnapshot)
+    async def replace_watchlist(
+        payload: WatchlistRequest,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> WatchlistSnapshot:
+        _require_session(session, active_settings.session_token)
+        try:
+            await run_in_threadpool(get_watchlist_service().set_symbols, payload.symbols)
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+        return await run_in_threadpool(get_watchlist_service().snapshot)
+
+    @app.get("/api/v1/accounts/{account_id}/orders", response_model=list[OrderSnapshot])
+    async def account_orders(
+        account_id: str,
+        limit: int = 100,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> list[OrderSnapshot]:
+        _require_session(session, active_settings.session_token)
+        capped = min(max(limit, 1), 250)
+        try:
+            return await run_in_threadpool(
+                lambda: get_order_service().list_orders(account_id, limit=capped)
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
+        except Exception as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Order history is currently unavailable.",
+            ) from error
 
     @app.get("/api/v1/accounts/{account_id}/rolls", response_model=list[RollChainSnapshot])
     async def roll_chains(
@@ -470,12 +764,43 @@ def create_app(
             Cookie(alias="position_pilot_session"),
         ] = None,
     ) -> list[RollChainSnapshot]:
-        if session is None or not secrets.compare_digest(session, active_settings.session_token):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        _require_session(session, active_settings.session_token)
         return await run_in_threadpool(
-            get_roll_service().chains,
-            account_id,
-            symbol=symbol,
+            lambda: get_roll_service().chains(account_id, symbol=symbol)
+        )
+
+    @app.get(
+        "/api/v1/accounts/{account_id}/rolls/patterns",
+        response_model=RollPatternsSnapshot,
+    )
+    async def roll_patterns(
+        account_id: str,
+        symbol: str | None = None,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> RollPatternsSnapshot:
+        _require_session(session, active_settings.session_token)
+        return await run_in_threadpool(
+            lambda: get_roll_service().patterns(account_id, symbol=symbol)
+        )
+
+    @app.get(
+        "/api/v1/accounts/{account_id}/rolls/heatmap",
+        response_model=RollHeatmapSnapshot,
+    )
+    async def roll_heatmap(
+        account_id: str,
+        symbol: str,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> RollHeatmapSnapshot:
+        _require_session(session, active_settings.session_token)
+        return await run_in_threadpool(
+            lambda: get_roll_service().heatmap(account_id, symbol=symbol)
         )
 
     @app.get("/api/v1/providers/health")
@@ -485,12 +810,11 @@ def create_app(
             Cookie(alias="position_pilot_session"),
         ] = None,
     ) -> dict:
-        if session is None or not secrets.compare_digest(session, active_settings.session_token):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
-        health = get_field_router().health()
-        for provider, state in health.items():
+        _require_session(session, active_settings.session_token)
+        health_map = get_field_router().health()
+        for provider, state in health_map.items():
             get_database().save_provider_health(provider, state.model_dump(mode="json"))
-        return {provider: state.model_dump(mode="json") for provider, state in health.items()}
+        return {provider: state.model_dump(mode="json") for provider, state in health_map.items()}
 
     @app.get("/api/v1/streaming/status")
     async def streaming_status(
@@ -499,8 +823,7 @@ def create_app(
             Cookie(alias="position_pilot_session"),
         ] = None,
     ) -> dict:
-        if session is None or not secrets.compare_digest(session, active_settings.session_token):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        _require_session(session, active_settings.session_token)
         streaming = app.state.streaming_service
         if streaming is None:
             if app.state.streaming_startup_error is not None:
@@ -527,8 +850,7 @@ def create_app(
             Cookie(alias="position_pilot_session"),
         ] = None,
     ) -> StreamingResponse:
-        if session is None or not secrets.compare_digest(session, active_settings.session_token):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+        _require_session(session, active_settings.session_token)
         queue = app.state.live_hub.subscribe()
 
         async def stream():

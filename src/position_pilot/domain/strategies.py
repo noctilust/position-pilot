@@ -9,6 +9,7 @@ from ..analysis.strategies import StrategyGroup, StrategyType, detect_strategies
 from ..models import Position
 from ..persistence.sqlite import PositionPilotDatabase
 from .accounts import position_snapshot
+from .risk import RiskService
 from .snapshots import FieldProvenance, PositionHorizon, StrategySnapshot
 
 
@@ -58,6 +59,7 @@ class StrategyService:
         saved_horizon = self.database.get_setting(f"horizon.strategy.{strategy_id}")
         if saved_horizon:
             horizon = PositionHorizon(saved_horizon)
+        combined = RiskService().combined_greeks(legs)
         return StrategySnapshot(
             strategy_id=strategy_id,
             account_id=account_id,
@@ -69,8 +71,8 @@ class StrategyService:
             strikes=group.strikes_display,
             unrealized_pnl=group.unrealized_pnl,
             unrealized_pnl_percent=group.unrealized_pnl_percent,
-            total_delta=group.total_delta,
-            total_theta=group.total_theta,
+            total_delta=combined.delta or 0,
+            total_theta=combined.theta or 0,
             horizon=horizon,
             legs=legs,
             provenance={

@@ -78,3 +78,28 @@ def test_market_service_uses_configured_fallback_with_field_provenance() -> None
     assert snapshot.freshness.provider == "massive-stocks"
     assert snapshot.provenance["price"].provider == "massive-stocks"
     assert snapshot.provenance["price"].fallback_reason == "tastytrade returned no value"
+
+
+def test_chart_normalizes_massive_compact_aggregate_bars() -> None:
+    service = MarketService(
+        source=FakeMarketSource(),
+        bar_source=lambda symbol: [
+            {
+                "t": 1_783_785_600_000,
+                "o": 548.0,
+                "h": 552.0,
+                "l": 547.5,
+                "c": 550.0,
+                "v": 1_250_000,
+            }
+        ],
+    )
+
+    chart = service.chart("spy")
+
+    assert chart.source == "provider"
+    assert chart.symbol == "SPY"
+    assert len(chart.bars) == 1
+    assert chart.bars[0].timestamp == datetime.fromtimestamp(1_783_785_600, tz=UTC)
+    assert chart.bars[0].open == 548.0
+    assert chart.bars[0].volume == 1_250_000
