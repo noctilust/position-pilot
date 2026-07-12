@@ -753,6 +753,7 @@ test("visual contract: overview structure is stable", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Decision field" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Held-symbol catalysts" })).toBeVisible();
   await expect(page.getByText("Provider ledger")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Codex signals" })).toBeVisible();
 
   // Deterministic visual contract: landmark structure and primary regions.
   const landmarks = await page.evaluate(() => {
@@ -772,12 +773,176 @@ test("visual contract: overview structure is stable", async ({ page }) => {
     expect.arrayContaining([
       "Decision field",
       "Held-symbol catalysts",
+      "Codex signals",
       "Position Pilot — Overview",
     ]),
   );
+
+  // Hierarchy: actionable recommendations appear before risk field in DOM order.
+  const hierarchy = await page.evaluate(() => {
+    const main = document.querySelector(".workspace-main");
+    if (!main) return { ok: false };
+    const order = Array.from(main.querySelectorAll("h2"))
+      .map((node) => (node.textContent || "").trim())
+      .filter(Boolean);
+    const rec = order.indexOf("Codex signals");
+    const risk = order.indexOf("Risk field");
+    const providers = order.indexOf("Provider ledger");
+    return {
+      ok: rec >= 0 && risk >= 0 && providers >= 0 && rec < risk && risk < providers,
+      order,
+    };
+  });
+  expect(hierarchy.ok).toBeTruthy();
 
   // Real deterministic screenshot baseline (animations reduced; maxDiffPixelRatio in config).
   await expect(page.locator(".workspace-main")).toHaveScreenshot("overview-workspace.png", {
     animations: "disabled",
   });
+});
+
+test("content density and no page overflow at desktop, tablet, and phone", async ({ page }) => {
+  await mockDashboardApis(page);
+  const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";
+  await page.goto(`/?launch_token=${encodeURIComponent(launchToken)}`);
+  await expect(page.getByRole("heading", { name: "Decision field" })).toBeVisible();
+
+  async function assertDensityAndOverflow(width: number, height: number) {
+    await page.setViewportSize({ width, height });
+    await expect(page.getByRole("heading", { name: "Decision field" })).toBeVisible();
+
+    const metrics = await page.evaluate(() => {
+      const doc = document.documentElement;
+      const main = document.querySelector(".workspace-main") as HTMLElement | null;
+      const header = document.querySelector(".workspace-header") as HTMLElement | null;
+      const masthead = document.querySelector(".portfolio-masthead") as HTMLElement | null;
+      const priority = document.querySelector(".priority-band") as HTMLElement | null;
+      const sections = Array.from(document.querySelectorAll(".workspace-main .panel-section"));
+      const visibleSections = sections.filter((el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.bottom > 0 && rect.top < window.innerHeight && rect.height > 0;
+      });
+      return {
+        scrollWidth: doc.scrollWidth,
+        clientWidth: doc.clientWidth,
+        headerHeight: header?.getBoundingClientRect().height ?? 0,
+        mastheadHeight: masthead?.getBoundingClientRect().height ?? 0,
+        priorityInView: priority
+          ? priority.getBoundingClientRect().top < window.innerHeight
+          : false,
+        visibleSectionCount: visibleSections.length,
+        bodyFontSize: Number.parseFloat(getComputedStyle(document.body).fontSize),
+      };
+    });
+
+    // No horizontal page overflow (table internal scroll is fine).
+    expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth + 1);
+    // Compact chrome: header and masthead should not dominate the viewport.
+    expect(metrics.headerHeight).toBeLessThan(80);
+    expect(metrics.mastheadHeight).toBeLessThan(160);
+    // Actionable priority band should be on-screen at desktop/tablet overview.
+    if (width >= 768) {
+      expect(metrics.priorityInView).toBeTruthy();
+      // More than a single card worth of content above the fold.
+      expect(metrics.visibleSectionCount).toBeGreaterThanOrEqual(2);
+    }
+    // Body text: ≥16px on phone; desktop/tablet may stay denser (≥13px).
+    if (width <= 390) {
+      expect(metrics.bodyFontSize).toBeGreaterThanOrEqual(16);
+    } else {
+      expect(metrics.bodyFontSize).toBeGreaterThanOrEqual(13);
+    }
+  }
+
+  await assertDensityAndOverflow(1440, 900);
+  await assertDensityAndOverflow(1024, 768);
+  await assertDensityAndOverflow(390, 844);
+
+  // Coarse-pointer touch targets: assert CSS contract via CSSOM (stable; no
+  // device-descriptor coupling). When the browser reports coarse pointer,
+  // also sample live control heights.
+  const touchContract = await page.evaluate(() => {
+    const touchToken = getComputedStyle(document.documentElement)
+      .getPropertyValue("--control-h-touch")
+      .trim();
+    let hasCoarseRule = false;
+    let expandsButtons = false;
+    let expandsFormControls = false;
+    for (const sheet of Array.from(document.styleSheets)) {
+      let rules: CSSRuleList;
+      try {
+        rules = sheet.cssRules;
+      } catch {
+        continue;
+      }
+      for (const rule of Array.from(rules)) {
+        if (!(rule instanceof CSSMediaRule)) continue;
+        const media = rule.media.mediaText.replace(/\s+/g, " ");
+        if (!media.includes("pointer: coarse") && !media.includes("pointer:coarse")) {
+          continue;
+        }
+        hasCoarseRule = true;
+        for (const inner of Array.from(rule.cssRules)) {
+          if (!(inner instanceof CSSStyleRule)) continue;
+          const minH = inner.style.getPropertyValue("min-height");
+          const usesTouch =
+            minH.includes("var(--control-h-touch)") ||
+            minH === touchToken ||
+            minH === "2.75rem" ||
+            minH === "44px";
+          if (!usesTouch) continue;
+          if (/\bbutton\b/.test(inner.selectorText)) expandsButtons = true;
+          if (/\b(input|select|textarea)\b/.test(inner.selectorText)) {
+            expandsFormControls = true;
+          }
+        }
+      }
+    }
+
+    const coarseMatches = window.matchMedia("(pointer: coarse)").matches;
+    let sampledMinHeightPx: number | null = null;
+    if (coarseMatches) {
+      const sample =
+        (document.querySelector("button.icon-action") as HTMLElement | null) ??
+        (document.querySelector("button") as HTMLElement | null);
+      if (sample) {
+        sampledMinHeightPx = sample.getBoundingClientRect().height;
+      }
+    }
+
+    return {
+      touchToken,
+      hasCoarseRule,
+      expandsButtons,
+      expandsFormControls,
+      coarseMatches,
+      sampledMinHeightPx,
+    };
+  });
+  expect(touchContract.touchToken).toMatch(/2\.75rem|44px/);
+  expect(touchContract.hasCoarseRule).toBeTruthy();
+  expect(touchContract.expandsButtons).toBeTruthy();
+  expect(touchContract.expandsFormControls).toBeTruthy();
+  if (touchContract.coarseMatches && touchContract.sampledMinHeightPx != null) {
+    // 2.75rem at typical 16px root ≈ 44px; allow subpixel rounding.
+    expect(touchContract.sampledMinHeightPx).toBeGreaterThanOrEqual(43);
+  }
+
+  // Positions density: compact table rows without losing strategy identity.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.getByRole("button", { name: "Positions" }).click();
+  await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
+  await expect(page.getByText("Short Put")).toBeVisible();
+  const tableMetrics = await page.evaluate(() => {
+    const row = document.querySelector(".data-table.dense tbody tr") as HTMLElement | null;
+    const wrap = document.querySelector(".table-wrap") as HTMLElement | null;
+    return {
+      rowHeight: row?.getBoundingClientRect().height ?? 0,
+      pageOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+      tableScrollable: wrap ? wrap.scrollWidth >= wrap.clientWidth : false,
+    };
+  });
+  expect(tableMetrics.rowHeight).toBeGreaterThan(20);
+  expect(tableMetrics.rowHeight).toBeLessThan(72);
+  expect(tableMetrics.pageOverflow).toBeFalsy();
 });

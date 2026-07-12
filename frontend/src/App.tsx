@@ -722,7 +722,7 @@ function OverviewSection({
     .slice(0, 5);
   return (
     <>
-      <section className="portfolio-masthead">
+      <section className="portfolio-masthead" aria-label="Portfolio decision field">
         <div>
           <p className="eyebrow">Portfolio overview</p>
           <h2>Decision field</h2>
@@ -749,10 +749,119 @@ function OverviewSection({
       </section>
 
       <div className="overview-grid">
-        <section className="panel-section" aria-labelledby="risk-heading">
+        {/* Priority: urgent signals + catalyst scan status first for quick decisions */}
+        <div className="priority-band">
+          <section className="panel-section" aria-labelledby="rec-heading">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">01 / Action</p>
+                <h2 id="rec-heading">Codex signals</h2>
+              </div>
+              <span className="section-state">
+                {urgentRecs.length ? `${urgentRecs.length} urgent` : "quiet"}
+              </span>
+            </div>
+            <ul className="plain-list">
+              {urgentRecs.map((row) => (
+                <li key={row.recommendation_id} className="recommendation-card">
+                  <strong>
+                    {row.symbol ?? "Portfolio"} · {row.action ?? "—"}
+                  </strong>
+                  <span className="muted">
+                    {" "}
+                    · urgency {row.urgency ?? "—"} · {row.risk ?? "—"} · {row.provider_status}
+                  </span>
+                  {row.reasoning ? <p className="microcopy">{row.reasoning}</p> : null}
+                  {row.error ? (
+                    <p className="microcopy" role="status">
+                      {row.error}
+                    </p>
+                  ) : null}
+                </li>
+              ))}
+              {!urgentRecs.length ? (
+                <li className="muted">
+                  No stored recommendations yet. Open a strategy and run Evaluate, or enable
+                  monitoring consent in Settings.
+                </li>
+              ) : null}
+            </ul>
+          </section>
+
+          <section className="panel-section" aria-labelledby="catalyst-heading">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">02 / Catalysts</p>
+                <h2 id="catalyst-heading">Held-symbol catalysts</h2>
+              </div>
+              <CatalystFreshness scan={catalysts} error={catalystError} />
+            </div>
+            {catalystError ? (
+              <p className="muted" role="status">
+                {catalystError}
+              </p>
+            ) : null}
+            {catalysts?.coverage === "incomplete" || catalysts?.coverage === "offline" ? (
+              <p className="coverage-notice" role="status">
+                Coverage {catalysts.coverage}
+                {catalysts.coverage_notes.length
+                  ? ` — ${catalysts.coverage_notes.slice(0, 2).join("; ")}`
+                  : ""}
+                . Stale or partial news is never used as sole proof of a new move.
+              </p>
+            ) : null}
+            <div className="metric-rail" aria-label="Catalyst summary">
+              <div>
+                <span>Promoted</span>
+                <strong className="tabular">{promoted.length}</strong>
+              </div>
+              <div>
+                <span>Quiet</span>
+                <strong className="tabular">{quietCount}</strong>
+              </div>
+              <div>
+                <span>Scanned</span>
+                <strong className="tabular">{catalysts?.results.length ?? "—"}</strong>
+              </div>
+            </div>
+            <ul className="catalyst-list compact">
+              {(catalysts?.results ?? []).map((row) => (
+                <li
+                  key={row.symbol}
+                  className={row.quiet ? "catalyst-quiet" : "catalyst-promoted"}
+                >
+                  <div className="catalyst-row-head">
+                    <strong>{row.symbol}</strong>
+                    <span className={`pill confidence-${row.confidence}`}>
+                      {formatConfidence(row.confidence)}
+                    </span>
+                    {row.move_percent != null ? (
+                      <span className="tabular muted">{signed(row.move_percent, 2)}%</span>
+                    ) : null}
+                    {row.freshness?.state === "stale" || row.cached ? (
+                      <span className="pill">Stale cache</span>
+                    ) : null}
+                  </div>
+                  <p>{row.summary || "No confirmed catalyst found"}</p>
+                  <p className="microcopy">
+                    {formatAttribution(row.attribution)}
+                    {row.option_mechanisms.length
+                      ? ` · ${row.option_mechanisms.length} option mechanism(s)`
+                      : ""}
+                  </p>
+                </li>
+              ))}
+              {!catalysts?.results.length && !catalystError ? (
+                <li className="muted">Catalysts load after the portfolio snapshot.</li>
+              ) : null}
+            </ul>
+          </section>
+        </div>
+
+        <section className="panel-section risk-field" aria-labelledby="risk-heading">
           <div className="section-heading">
             <div>
-              <p className="eyebrow">01 / Exposure</p>
+              <p className="eyebrow">03 / Exposure</p>
               <h2 id="risk-heading">Risk field</h2>
             </div>
           </div>
@@ -787,8 +896,13 @@ function OverviewSection({
             </div>
           </div>
           {risk?.concentration?.length ? (
-            <div className="table-wrap" tabIndex={0} role="region" aria-label="Portfolio concentration table">
-              <table className="data-table">
+            <div
+              className="table-wrap"
+              tabIndex={0}
+              role="region"
+              aria-label="Portfolio concentration table"
+            >
+              <table className="data-table dense">
                 <caption className="sr-only">Concentration by underlying</caption>
                 <thead>
                   <tr>
@@ -816,30 +930,37 @@ function OverviewSection({
         <section className="panel-section" aria-labelledby="stress-heading">
           <div className="section-heading">
             <div>
-              <p className="eyebrow">02 / Stress</p>
+              <p className="eyebrow">04 / Stress</p>
               <h2 id="stress-heading">Deterministic stress</h2>
             </div>
           </div>
-          <ul className="stress-list">
+          <ul className="stress-list compact">
             {(risk?.stress ?? []).map((item) => (
               <li key={item.name}>
                 <span>{item.label}</span>
                 <strong className="tabular">{currency(item.estimated_pnl_change)}</strong>
               </li>
             ))}
-            {!risk?.stress?.length ? <li className="muted">Stress awaits a portfolio snapshot.</li> : null}
+            {!risk?.stress?.length ? (
+              <li className="muted">Stress awaits a portfolio snapshot.</li>
+            ) : null}
           </ul>
         </section>
 
         <section className="panel-section" aria-labelledby="balances-heading">
           <div className="section-heading">
             <div>
-              <p className="eyebrow">03 / Balances</p>
+              <p className="eyebrow">05 / Balances</p>
               <h2 id="balances-heading">Account summary</h2>
             </div>
           </div>
-          <div className="table-wrap" tabIndex={0} role="region" aria-label="Account balances table">
-            <table className="data-table">
+          <div
+            className="table-wrap"
+            tabIndex={0}
+            role="region"
+            aria-label="Account balances table"
+          >
+            <table className="data-table dense">
               <caption className="sr-only">Account balances</caption>
               <thead>
                 <tr>
@@ -883,7 +1004,7 @@ function OverviewSection({
         <section className="panel-section" aria-labelledby="iv-heading">
           <div className="section-heading">
             <div>
-              <p className="eyebrow">04 / Markets</p>
+              <p className="eyebrow">06 / Markets</p>
               <h2 id="iv-heading">IV environment</h2>
             </div>
           </div>
@@ -902,106 +1023,6 @@ function OverviewSection({
               </div>
             ) : null}
           </div>
-        </section>
-
-        <section className="panel-section" aria-labelledby="catalyst-heading">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">05 / Catalysts</p>
-              <h2 id="catalyst-heading">Held-symbol catalysts</h2>
-            </div>
-            <CatalystFreshness scan={catalysts} error={catalystError} />
-          </div>
-          {catalystError ? (
-            <p className="muted" role="status">
-              {catalystError}
-            </p>
-          ) : null}
-          {catalysts?.coverage === "incomplete" || catalysts?.coverage === "offline" ? (
-            <p className="coverage-notice" role="status">
-              Coverage {catalysts.coverage}
-              {catalysts.coverage_notes.length
-                ? ` — ${catalysts.coverage_notes.slice(0, 2).join("; ")}`
-                : ""}
-              . Stale or partial news is never used as sole proof of a new move.
-            </p>
-          ) : null}
-          <div className="metric-rail" aria-label="Catalyst summary">
-            <div>
-              <span>Promoted</span>
-              <strong className="tabular">{promoted.length}</strong>
-            </div>
-            <div>
-              <span>Quiet</span>
-              <strong className="tabular">{quietCount}</strong>
-            </div>
-            <div>
-              <span>Scanned</span>
-              <strong className="tabular">{catalysts?.results.length ?? "—"}</strong>
-            </div>
-          </div>
-          <ul className="catalyst-list">
-            {(catalysts?.results ?? []).map((row) => (
-              <li key={row.symbol} className={row.quiet ? "catalyst-quiet" : "catalyst-promoted"}>
-                <div className="catalyst-row-head">
-                  <strong>{row.symbol}</strong>
-                  <span className={`pill confidence-${row.confidence}`}>
-                    {formatConfidence(row.confidence)}
-                  </span>
-                  {row.move_percent != null ? (
-                    <span className="tabular muted">{signed(row.move_percent, 2)}%</span>
-                  ) : null}
-                  {row.freshness?.state === "stale" || row.cached ? (
-                    <span className="pill">Stale cache</span>
-                  ) : null}
-                </div>
-                <p>{row.summary || "No confirmed catalyst found"}</p>
-                <p className="microcopy">
-                  {formatAttribution(row.attribution)}
-                  {row.option_mechanisms.length
-                    ? ` · ${row.option_mechanisms.length} option mechanism(s)`
-                    : ""}
-                </p>
-              </li>
-            ))}
-            {!catalysts?.results.length && !catalystError ? (
-              <li className="muted">Catalysts load after the portfolio snapshot.</li>
-            ) : null}
-          </ul>
-        </section>
-
-        <section className="panel-section" aria-labelledby="rec-heading">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">06 / Recommendations</p>
-              <h2 id="rec-heading">Codex signals</h2>
-            </div>
-          </div>
-          <ul className="plain-list">
-            {urgentRecs.map((row) => (
-              <li key={row.recommendation_id}>
-                <strong>
-                  {row.symbol ?? "Portfolio"} · {row.action ?? "—"}
-                </strong>
-                <span className="muted">
-                  {" "}
-                  · urgency {row.urgency ?? "—"} · {row.risk ?? "—"} · {row.provider_status}
-                </span>
-                {row.reasoning ? <p className="microcopy">{row.reasoning}</p> : null}
-                {row.error ? (
-                  <p className="microcopy" role="status">
-                    {row.error}
-                  </p>
-                ) : null}
-              </li>
-            ))}
-            {!urgentRecs.length ? (
-              <li className="muted">
-                No stored recommendations yet. Open a strategy and run Evaluate, or enable monitoring
-                consent in Settings.
-              </li>
-            ) : null}
-          </ul>
         </section>
 
         <ProviderLedger providers={providers} />
@@ -2776,7 +2797,7 @@ function ProviderLedger({ providers }: { providers: BootstrapPayload["providers"
     <section className="provider-ledger panel-section" aria-labelledby="provider-heading">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Sources</p>
+          <p className="eyebrow">07 / Sources</p>
           <h2 id="provider-heading">Provider ledger</h2>
         </div>
         <ShieldCheck aria-hidden="true" />
@@ -2812,7 +2833,7 @@ function MonitoringStrip({ monitoring }: { monitoring: MonitoringStatus }) {
     <section className="monitoring-strip panel-section" aria-labelledby="monitoring-heading">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Cadence</p>
+          <p className="eyebrow">08 / Cadence</p>
           <h2 id="monitoring-heading">Decision clock</h2>
         </div>
         <Clock3 aria-hidden="true" />
