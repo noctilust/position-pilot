@@ -16,11 +16,14 @@
 - [Streaming and provider reconciliation](tickets/030-streaming-providers.md) — Phase 3 adds independently supervised Tastytrade streams, REST authority, field-level fallback routing, provider health, and redacted browser events.
 - [Portfolio feature parity](tickets/040-feature-parity.md) — Phase 4 delivers web parity for positions, strategies, Greeks, P/L, balances, watchlist, markets, rolls, orders, position detail, thesis/trade plan, audit, and deterministic stress risk.
 - [Catalyst intelligence](tickets/050-catalysts.md) — Phase 5 delivers evidence-backed held-symbol catalysts with abstention, attribution, option-market mechanisms, feedback, retention, charts, and configuration-gated Benzinga coverage.
+- [Codex recommendations and monitoring](tickets/060-codex-monitoring.md) — Phase 6 replaces production Anthropic recommendations with a local Codex CLI provider, horizon-aware fingerprints, consent-gated monitoring, alerts, and immutable history/decisions.
 
 ## Fog
 
 - Provider licensing entitlements must be read from the user's purchased plans rather than inferred from public marketing pages.
-- Codex CLI structured-output behavior and rate-limit signaling require a prototype before scheduler integration.
-- Final TUI deletion depends on an explicit parity matrix and regression evidence.
-- Catalyst background cadence waits on Phase 6 monitoring/scheduler; Phase 5 stores cadence settings only.
-- Exchange-holiday calendar for prior-close windows is still approximate (weekend-aware only).
+- Live Codex structured-output and rate-limit signaling are mocked in tests; real CLI versions may differ slightly.
+- Final TUI deletion depends on an explicit parity matrix and regression evidence (Phase 7).
+- Monitoring calendar is algorithmic for standard NYSE holidays/early closes; ad-hoc emergency closures are not modeled.
+- Wake/recovery uses scheduler time-gap and portfolio loader transitions (no OS sleep/network APIs).
+- API-key recommendation fallback is intentionally non-functional and not user-selectable.
+- Exchange-holiday calendar for prior-close catalyst windows is still approximate (weekend-aware only).

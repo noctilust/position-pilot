@@ -6,15 +6,18 @@ import os
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from ..client import get_client
 from ..models import Account, Position
 from ..models.transaction import Order, Transaction
 from ..persistence.sqlite import PositionPilotDatabase
 from ..providers.benzinga import BenzingaProvider
+from ..providers.codex import CodexCLIProvider, ExplicitApiKeyFallbackProvider
 from ..providers.massive import MassiveProvider
 from ..providers.router import FieldRouter
 from ..providers.tastytrade import TastytradeProvider
+from .alerts import AlertService
 from .catalysts import (
     CatalystService,
     CatalystSettings,
@@ -24,9 +27,12 @@ from .catalysts import (
     previous_regular_close,
 )
 from .market import MarketService, ProviderRoutedMarketSource
+from .monitoring import MonitoringService
+from .notifications import NotificationService
 from .orders import OrderService
 from .plans import PlansService
 from .portfolio import PortfolioService
+from .recommendations import RecommendationService
 from .risk import RiskService
 from .rolls import RollService
 from .watchlist import WatchlistService
@@ -400,4 +406,168 @@ def get_catalyst_service() -> CatalystService:
         option_metrics_source=option_metrics_source,
         settings=settings,
         benzinga_api_key_present=bool(os.getenv("BENZINGA_API_KEY")),
+    )
+
+
+@lru_cache(maxsize=1)
+def get_codex_provider() -> CodexCLIProvider:
+    return CodexCLIProvider()
+
+
+@lru_cache(maxsize=1)
+def get_recommendation_service() -> RecommendationService:
+    return RecommendationService(
+        database=get_database(),
+        provider=get_codex_provider(),
+        fallback_provider=ExplicitApiKeyFallbackProvider(),
+    )
+
+
+@lru_cache(maxsize=1)
+def get_alert_service() -> AlertService:
+    return AlertService(get_database())
+
+
+@lru_cache(maxsize=1)
+def get_notification_service() -> NotificationService:
+    return NotificationService()
+
+
+# Optional DXLink hub set by the web lifespan — never holds account identifiers.
+_live_market_hub: Any | None = None
+
+
+def set_live_market_hub(hub: Any | None) -> None:
+    """Wire the streaming hub for redacted live market values (web lifespan)."""
+
+    global _live_market_hub
+    _live_market_hub = hub
+
+
+def _market_fields_from_dxlink(symbol: str) -> dict | None:
+    hub = _live_market_hub
+    if hub is None:
+        return None
+    latest = getattr(hub, "latest_market", None)
+    if not isinstance(latest, dict):
+        return None
+    by_type = latest.get(symbol.upper()) or latest.get(symbol)
+    if not isinstance(by_type, dict) or not by_type:
+        return None
+    # Flatten latest event values (already redacted at publish time).
+    merged: dict = {}
+    for values in by_type.values():
+        if isinstance(values, dict):
+            merged.update(values)
+    price = (
+        merged.get("price")
+        or merged.get("mark")
+        or merged.get("last")
+        or merged.get("bidPrice")
+    )
+    bid = merged.get("bid") or merged.get("bidPrice")
+    ask = merged.get("ask") or merged.get("askPrice")
+    if price is None and bid is None and ask is None:
+        return None
+    spread = None
+    if (
+        isinstance(bid, (int, float))
+        and isinstance(ask, (int, float))
+        and isinstance(price, (int, float))
+        and price
+    ):
+        spread = ((ask - bid) / price) * 100
+    return {
+        "price": float(price) if isinstance(price, (int, float)) else None,
+        "bid": float(bid) if isinstance(bid, (int, float)) else None,
+        "ask": float(ask) if isinstance(ask, (int, float)) else None,
+        "iv": merged.get("iv") or merged.get("implied_volatility"),
+        "iv_rank": merged.get("iv_rank"),
+        "iv_percentile": merged.get("iv_percentile"),
+        "spread_percent": spread,
+        "provider": "tastytrade-dxlink",
+        "as_of": datetime.now(UTC).isoformat(),
+    }
+
+
+def build_market_context_loader() -> Any:
+    """Prefer live DXLink hub values; fall back to MarketService with provenance."""
+
+    def market_context_loader(symbol: str) -> dict | None:
+        live = _market_fields_from_dxlink(symbol)
+        if live is not None:
+            return live
+        try:
+            snap = get_market_service().snapshot(symbol, force_refresh=True)
+        except Exception:
+            return None
+        if snap is None:
+            return None
+        provider = snap.freshness.provider if snap.freshness else "market-service"
+        return {
+            "price": snap.price,
+            "bid": snap.bid,
+            "ask": snap.ask,
+            "iv": snap.iv,
+            "iv_rank": snap.iv_rank,
+            "iv_percentile": snap.iv_percentile,
+            "spread_percent": snap.spread_percent,
+            "provider": provider,
+            "as_of": snap.freshness.as_of.isoformat() if snap.freshness else None,
+        }
+
+    return market_context_loader
+
+
+@lru_cache(maxsize=1)
+def get_monitoring_service() -> MonitoringService:
+    def portfolio_loader():
+        try:
+            return get_portfolio_service().latest()
+        except Exception:
+            return get_database().latest_portfolio_snapshot()
+
+    def catalyst_loader(symbol: str) -> list[dict]:
+        try:
+            result = get_catalyst_service().analyze_symbol(symbol)
+            return [event.model_dump(mode="json") for event in result.catalysts]
+        except Exception:
+            return []
+
+    def thesis_loader(strategy_id: str) -> dict | None:
+        thesis = get_plans_service().get_thesis(strategy_id)
+        return thesis.model_dump(mode="json") if thesis else None
+
+    def plan_loader(strategy_id: str) -> dict | None:
+        plan = get_plans_service().get_trade_plan(strategy_id)
+        return plan.model_dump(mode="json") if plan else None
+
+    def risk_snapshot_loader(snapshot) -> dict | None:
+        try:
+            risk = get_risk_service().portfolio_risk(snapshot)
+            top_share = 0.0
+            if risk.concentration:
+                top_share = float(risk.concentration[0].share_of_portfolio or 0.0)
+            return {
+                "total_delta": risk.total_delta,
+                "total_gamma": risk.total_gamma,
+                "total_theta": risk.total_theta,
+                "total_vega": risk.total_vega,
+                "unrealized_pnl": risk.unrealized_pnl,
+                "concentration_top_share": top_share,
+            }
+        except Exception:
+            return None
+
+    return MonitoringService(
+        database=get_database(),
+        recommendations=get_recommendation_service(),
+        alerts=get_alert_service(),
+        notifications=get_notification_service(),
+        portfolio_loader=portfolio_loader,
+        catalyst_loader=catalyst_loader,
+        thesis_loader=thesis_loader,
+        plan_loader=plan_loader,
+        risk_snapshot_loader=risk_snapshot_loader,
+        market_context_loader=build_market_context_loader(),
     )

@@ -238,6 +238,6 @@ def test_bootstrap_reports_catalyst_phase(monkeypatch) -> None:
     response = client.get("/api/v1/bootstrap")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["application"]["phase"] == "catalyst-intelligence"
+    assert payload["application"]["phase"] == "codex-monitoring"
     assert "catalysts" in payload
     assert payload["catalysts"]["stock_move_threshold_pct"] == 2.0

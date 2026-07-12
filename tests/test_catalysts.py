@@ -119,7 +119,7 @@ def _service(
 
 def test_schema_migrates_to_v5_with_catalyst_tables(tmp_path) -> None:
     database = PositionPilotDatabase(tmp_path / "db.sqlite3")
-    assert database.schema_version == 5
+    assert database.schema_version == 6
     with database._connect() as connection:
         tables = {
             row[0]

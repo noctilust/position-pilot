@@ -1,4 +1,9 @@
-export type ProviderState = "configured" | "not_configured" | "not_checked";
+export type ProviderState =
+  | "configured"
+  | "not_configured"
+  | "not_checked"
+  | "signed_out"
+  | "unavailable";
 
 export type CatalystSettings = {
   stock_move_threshold_pct: number;
@@ -11,6 +16,31 @@ export type CatalystSettings = {
   scheduled_window_hours: number;
 };
 
+export type RecommendationSettings = {
+  selected_provider: "codex-cli" | string;
+  api_key_fallback_available?: boolean;
+  api_key_fallback_enabled?: boolean;
+  rich_notification_preview: boolean;
+};
+
+export type MonitoringStatus = {
+  market_timezone: string;
+  window_start: string;
+  window_end: string;
+  evaluation_minutes: number;
+  risk_refresh_seconds: number;
+  enabled?: boolean;
+  consented?: boolean;
+  inside_window?: boolean;
+  is_trading_day?: boolean;
+  is_holiday?: boolean;
+  is_early_close?: boolean;
+  provider_status?: string;
+  running?: boolean;
+  notice?: string | null;
+  last_evaluation_at?: string | null;
+};
+
 export type BootstrapPayload = {
   application: {
     name: string;
@@ -18,18 +48,83 @@ export type BootstrapPayload = {
     phase: string;
   };
   providers: Record<"tastytrade" | "codex" | "massive" | "benzinga", ProviderState>;
-  monitoring: {
-    market_timezone: string;
-    window_start: string;
-    window_end: string;
-    evaluation_minutes: number;
-    risk_refresh_seconds: number;
-  };
+  monitoring: MonitoringStatus;
+  recommendations?: RecommendationSettings;
   catalysts?: CatalystSettings;
   navigation: string[];
   primary_account_id: string;
   data_state: string;
   server_time: string;
+};
+
+export type RecommendationRecord = {
+  recommendation_id: string;
+  subject_type: string;
+  subject_id: string;
+  account_id: string | null;
+  symbol: string | null;
+  strategy_type: string | null;
+  horizon: string;
+  action: string | null;
+  urgency: number | null;
+  risk: string | null;
+  reasoning: string | null;
+  evidence: string[];
+  catalyst_refs: string[];
+  suggested_action: string | null;
+  input_fingerprint: string;
+  prompt_version: string;
+  schema_version: string;
+  last_evaluated_at: string;
+  recommendation_updated_at: string | null;
+  provider: string;
+  provider_status: string;
+  error: string | null;
+  codex_called: boolean;
+};
+
+export type RecommendationHistoryEntry = {
+  history_id: string;
+  recommendation_id: string;
+  subject_type: string;
+  subject_id: string;
+  kind: string;
+  recorded_at: string;
+  action: string | null;
+  urgency: number | null;
+  risk: string | null;
+  summary: string;
+  evaluation_count: number;
+  diff?: Record<string, { from?: unknown; to?: unknown } | unknown>;
+};
+
+export type TraderDecision = {
+  decision_id: string;
+  recommendation_id: string;
+  subject_type: string;
+  subject_id: string;
+  decision: string;
+  note: string;
+  recorded_at: string;
+};
+
+export type AlertRecord = {
+  alert_id: string;
+  category: string;
+  severity: string;
+  alert_type: string;
+  title: string;
+  summary: string;
+  account_id: string | null;
+  symbol: string | null;
+  strategy_type: string | null;
+  subject_type: string | null;
+  subject_id: string | null;
+  source: string;
+  created_at: string;
+  updated_at: string;
+  resolution: string;
+  snoozed_until: string | null;
 };
 
 export type CatalystSource = {
@@ -376,6 +471,9 @@ export type StrategyDetail = {
     event_exposure: string;
     exit_deadline: string;
   } | null;
+  recommendation?: RecommendationRecord | null;
+  recommendation_history?: RecommendationHistoryEntry[];
+  decisions?: TraderDecision[];
   audit: Array<{
     event_id: string;
     action: string;

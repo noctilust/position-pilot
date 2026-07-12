@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from ..domain.snapshots import PortfolioSnapshot
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +201,73 @@ class PositionPilotDatabase:
                     symbol TEXT PRIMARY KEY,
                     payload_json TEXT NOT NULL,
                     captured_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS recommendations (
+                    subject_type TEXT NOT NULL,
+                    subject_id TEXT NOT NULL,
+                    recommendation_id TEXT NOT NULL UNIQUE,
+                    account_id TEXT,
+                    payload_json TEXT NOT NULL,
+                    input_fingerprint TEXT NOT NULL,
+                    last_evaluated_at TEXT NOT NULL,
+                    recommendation_updated_at TEXT,
+                    provider_status TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(subject_type, subject_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_recommendations_account
+                    ON recommendations(account_id, last_evaluated_at DESC);
+                CREATE TABLE IF NOT EXISTS recommendation_history (
+                    history_id TEXT PRIMARY KEY,
+                    recommendation_id TEXT NOT NULL,
+                    subject_type TEXT NOT NULL,
+                    subject_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    day_key TEXT,
+                    payload_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_recommendation_history_subject
+                    ON recommendation_history(subject_type, subject_id, recorded_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_recommendation_history_day
+                    ON recommendation_history(subject_type, subject_id, kind, day_key);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_recommendation_daily_summary
+                    ON recommendation_history(subject_type, subject_id, kind, day_key)
+                    WHERE kind = 'daily_summary' AND day_key IS NOT NULL;
+                CREATE TABLE IF NOT EXISTS trader_decisions (
+                    decision_id TEXT PRIMARY KEY,
+                    recommendation_id TEXT NOT NULL,
+                    subject_type TEXT NOT NULL,
+                    subject_id TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    note TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_trader_decisions_subject
+                    ON trader_decisions(subject_type, subject_id, recorded_at DESC);
+                CREATE TABLE IF NOT EXISTS alerts (
+                    alert_id TEXT PRIMARY KEY,
+                    category TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    alert_type TEXT NOT NULL,
+                    account_id TEXT,
+                    symbol TEXT,
+                    resolution TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    snoozed_until TEXT,
+                    dedupe_key TEXT,
+                    payload_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_alerts_open
+                    ON alerts(resolution, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_alerts_dedupe
+                    ON alerts(dedupe_key, resolution);
+                CREATE TABLE IF NOT EXISTS alert_mute_rules (
+                    rule_id TEXT PRIMARY KEY,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
                 );
                 """
             )
@@ -863,6 +930,425 @@ class PositionPilotDatabase:
             "articles": int(article_cursor.rowcount),
             "snapshots": int(snapshot_cursor.rowcount),
         }
+
+    # --- Recommendations / alerts (schema v6) ---------------------------------
+
+    def upsert_recommendation(self, payload: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            self._upsert_recommendation_on(connection, payload)
+
+    def _upsert_recommendation_on(
+        self,
+        connection: sqlite3.Connection,
+        payload: dict[str, Any],
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        connection.execute(
+            """
+            INSERT INTO recommendations(
+                subject_type, subject_id, recommendation_id, account_id,
+                payload_json, input_fingerprint, last_evaluated_at,
+                recommendation_updated_at, provider_status, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(subject_type, subject_id) DO UPDATE SET
+                recommendation_id=excluded.recommendation_id,
+                account_id=excluded.account_id,
+                payload_json=excluded.payload_json,
+                input_fingerprint=excluded.input_fingerprint,
+                last_evaluated_at=excluded.last_evaluated_at,
+                recommendation_updated_at=excluded.recommendation_updated_at,
+                provider_status=excluded.provider_status,
+                updated_at=excluded.updated_at
+            """,
+            (
+                payload["subject_type"],
+                payload["subject_id"],
+                payload["recommendation_id"],
+                payload.get("account_id"),
+                json.dumps(payload),
+                payload["input_fingerprint"],
+                payload["last_evaluated_at"],
+                payload.get("recommendation_updated_at"),
+                payload["provider_status"],
+                now,
+            ),
+        )
+
+    def upsert_recommendation_atomic(
+        self,
+        recommendation: dict[str, Any],
+        *,
+        history_entry: dict[str, Any] | None = None,
+        daily_summary: dict[str, Any] | None = None,
+    ) -> None:
+        """Atomically persist current recommendation plus optional history/summary."""
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._upsert_recommendation_on(connection, recommendation)
+                if history_entry is not None:
+                    self._append_history_on(connection, history_entry)
+                if daily_summary is not None:
+                    self._upsert_daily_summary_on(connection, daily_summary)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def get_recommendation(self, subject_type: str, subject_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json FROM recommendations
+                WHERE subject_type = ? AND subject_id = ?
+                """,
+                (subject_type, subject_id),
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def get_recommendation_by_id(self, recommendation_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM recommendations WHERE recommendation_id = ?",
+                (recommendation_id,),
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def list_recommendations(self, *, account_id: str = "all") -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            if account_id == "all":
+                rows = connection.execute(
+                    """
+                    SELECT payload_json FROM recommendations
+                    ORDER BY last_evaluated_at DESC
+                    """
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT payload_json FROM recommendations
+                    WHERE account_id = ? OR account_id IS NULL
+                    ORDER BY last_evaluated_at DESC
+                    """,
+                    (account_id,),
+                ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def append_recommendation_history(self, payload: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            self._append_history_on(connection, payload)
+
+    def _day_key_for_history(self, payload: dict[str, Any]) -> str | None:
+        if payload.get("kind") != "daily_summary":
+            return None
+        recorded = payload.get("recorded_at") or ""
+        day_key = str(recorded)[:10]
+        if payload.get("diff") and isinstance(payload["diff"], dict):
+            day_key = str(payload["diff"].get("day") or day_key)
+        return day_key
+
+    def _append_history_on(self, connection: sqlite3.Connection, payload: dict[str, Any]) -> None:
+        day_key = self._day_key_for_history(payload)
+        connection.execute(
+            """
+            INSERT INTO recommendation_history(
+                history_id, recommendation_id, subject_type, subject_id,
+                kind, recorded_at, day_key, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload["history_id"],
+                payload["recommendation_id"],
+                payload["subject_type"],
+                payload["subject_id"],
+                payload["kind"],
+                payload["recorded_at"],
+                day_key,
+                json.dumps(payload),
+            ),
+        )
+
+    def _upsert_daily_summary_on(
+        self,
+        connection: sqlite3.Connection,
+        payload: dict[str, Any],
+    ) -> None:
+        day_key = self._day_key_for_history(payload)
+        existing = connection.execute(
+            """
+            SELECT history_id, payload_json FROM recommendation_history
+            WHERE subject_type = ? AND subject_id = ?
+              AND kind = 'daily_summary' AND day_key = ?
+            LIMIT 1
+            """,
+            (payload["subject_type"], payload["subject_id"], day_key),
+        ).fetchone()
+        if existing:
+            prior = json.loads(existing[1])
+            count = int(prior.get("evaluation_count") or 1) + 1
+            payload = {
+                **payload,
+                "history_id": existing[0],
+                "evaluation_count": count,
+                "summary": (
+                    f"Unchanged evaluation ×{count} on {day_key} "
+                    f"({payload.get('action') or 'n/a'})"
+                ),
+            }
+            connection.execute(
+                """
+                UPDATE recommendation_history
+                SET recorded_at = ?, payload_json = ?
+                WHERE history_id = ?
+                """,
+                (payload["recorded_at"], json.dumps(payload), existing[0]),
+            )
+            return
+        connection.execute(
+            """
+            INSERT INTO recommendation_history(
+                history_id, recommendation_id, subject_type, subject_id,
+                kind, recorded_at, day_key, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload["history_id"],
+                payload["recommendation_id"],
+                payload["subject_type"],
+                payload["subject_id"],
+                payload["kind"],
+                payload["recorded_at"],
+                day_key,
+                json.dumps(payload),
+            ),
+        )
+
+    def update_recommendation_history(self, payload: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE recommendation_history
+                SET recorded_at = ?, payload_json = ?
+                WHERE history_id = ?
+                """,
+                (payload["recorded_at"], json.dumps(payload), payload["history_id"]),
+            )
+
+    def get_daily_history_summary(
+        self,
+        subject_type: str,
+        subject_id: str,
+        *,
+        day: str,
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json FROM recommendation_history
+                WHERE subject_type = ? AND subject_id = ?
+                  AND kind = 'daily_summary' AND day_key = ?
+                ORDER BY recorded_at DESC LIMIT 1
+                """,
+                (subject_type, subject_id, day),
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def list_recommendation_history(
+        self,
+        subject_type: str,
+        subject_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json FROM recommendation_history
+                WHERE subject_type = ? AND subject_id = ?
+                ORDER BY recorded_at DESC LIMIT ?
+                """,
+                (subject_type, subject_id, limit),
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def append_trader_decision(self, payload: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO trader_decisions(
+                    decision_id, recommendation_id, subject_type, subject_id,
+                    decision, note, recorded_at, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["decision_id"],
+                    payload["recommendation_id"],
+                    payload["subject_type"],
+                    payload["subject_id"],
+                    payload["decision"],
+                    payload.get("note") or "",
+                    payload["recorded_at"],
+                    json.dumps(payload),
+                ),
+            )
+
+    def list_trader_decisions(
+        self,
+        *,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            if subject_type and subject_id:
+                rows = connection.execute(
+                    """
+                    SELECT payload_json FROM trader_decisions
+                    WHERE subject_type = ? AND subject_id = ?
+                    ORDER BY recorded_at DESC LIMIT ?
+                    """,
+                    (subject_type, subject_id, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT payload_json FROM trader_decisions
+                    ORDER BY recorded_at DESC LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def insert_alert(self, payload: dict[str, Any]) -> None:
+        dedupe_key = None
+        if isinstance(payload.get("payload"), dict):
+            dedupe_key = payload["payload"].get("dedupe_key")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO alerts(
+                    alert_id, category, severity, alert_type, account_id, symbol,
+                    resolution, created_at, updated_at, snoozed_until, dedupe_key, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["alert_id"],
+                    payload["category"],
+                    payload["severity"],
+                    payload["alert_type"],
+                    payload.get("account_id"),
+                    payload.get("symbol"),
+                    payload["resolution"],
+                    payload["created_at"],
+                    payload["updated_at"],
+                    payload.get("snoozed_until"),
+                    dedupe_key,
+                    json.dumps(payload),
+                ),
+            )
+
+    def update_alert(self, payload: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE alerts
+                SET resolution = ?, updated_at = ?, snoozed_until = ?, payload_json = ?
+                WHERE alert_id = ?
+                """,
+                (
+                    payload["resolution"],
+                    payload["updated_at"],
+                    payload.get("snoozed_until"),
+                    json.dumps(payload),
+                    payload["alert_id"],
+                ),
+            )
+
+    def get_alert(self, alert_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM alerts WHERE alert_id = ?",
+                (alert_id,),
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def find_open_alert(self, dedupe_key: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json FROM alerts
+                WHERE dedupe_key = ? AND resolution IN ('open', 'acknowledged', 'snoozed')
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (dedupe_key,),
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def list_alerts(
+        self,
+        *,
+        account_id: str = "all",
+        include_resolved: bool = False,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            if include_resolved:
+                if account_id == "all":
+                    rows = connection.execute(
+                        """
+                        SELECT payload_json FROM alerts
+                        ORDER BY created_at DESC LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        """
+                        SELECT payload_json FROM alerts
+                        WHERE account_id = ? OR account_id IS NULL
+                        ORDER BY created_at DESC LIMIT ?
+                        """,
+                        (account_id, limit),
+                    ).fetchall()
+            else:
+                if account_id == "all":
+                    rows = connection.execute(
+                        """
+                        SELECT payload_json FROM alerts
+                        WHERE resolution NOT IN ('resolved', 'muted')
+                        ORDER BY created_at DESC LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        """
+                        SELECT payload_json FROM alerts
+                        WHERE (account_id = ? OR account_id IS NULL)
+                          AND resolution NOT IN ('resolved', 'muted')
+                        ORDER BY created_at DESC LIMIT ?
+                        """,
+                        (account_id, limit),
+                    ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def insert_mute_rule(self, payload: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO alert_mute_rules(rule_id, payload_json, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (payload["rule_id"], json.dumps(payload), payload["created_at"]),
+            )
+
+    def list_mute_rules(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload_json FROM alert_mute_rules ORDER BY created_at DESC"
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
 
     def backup(self, *, reason: str = "daily") -> Path | None:
         """Create a credentials-free SQLite backup and apply retention."""

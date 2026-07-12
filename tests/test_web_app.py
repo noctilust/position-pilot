@@ -87,15 +87,62 @@ def test_authenticated_bootstrap_reports_capabilities_without_secrets(monkeypatc
                 "scheduled_window_hours": 72,
             }
 
+    class MonitoringStub:
+        def public_bootstrap(self):
+            return {
+                "market_timezone": "America/New_York",
+                "window_start": "07:30",
+                "window_end": "18:00",
+                "evaluation_minutes": 30,
+                "risk_refresh_seconds": 60,
+                "enabled": False,
+                "consented": False,
+                "inside_window": False,
+                "is_trading_day": True,
+                "is_holiday": False,
+                "is_early_close": False,
+                "provider_status": "not_checked",
+                "running": False,
+                "notice": "Monitoring is disabled until you grant onboarding consent.",
+                "last_evaluation_at": None,
+            }
+
+        async def start(self):
+            return None
+
+        async def stop(self):
+            return None
+
+    class RecommendationStub:
+        def provider_public_status(self):
+            return "not_checked"
+
+        def settings(self):
+            return {
+                "selected_provider": "codex-cli",
+                "api_key_fallback_available": False,
+                "api_key_fallback_enabled": False,
+                "rich_notification_preview": False,
+            }
+
     monkeypatch.setattr(
         "position_pilot.web.app.get_catalyst_service",
         lambda: CatalystSettingsStub(),
+    )
+    monkeypatch.setattr(
+        "position_pilot.web.app.get_monitoring_service",
+        lambda: MonitoringStub(),
+    )
+    monkeypatch.setattr(
+        "position_pilot.web.app.get_recommendation_service",
+        lambda: RecommendationStub(),
     )
     app = create_app(
         WebSettings(
             launch_token="launch-secret",
             session_token="session-secret",
             enforce_loopback=False,
+            enable_streaming=False,
         )
     )
     client = TestClient(app)
@@ -108,7 +155,7 @@ def test_authenticated_bootstrap_reports_capabilities_without_secrets(monkeypatc
     assert payload["application"] == {
         "name": "Position Pilot",
         "version": "0.1.0",
-        "phase": "catalyst-intelligence",
+        "phase": "codex-monitoring",
     }
     assert payload["providers"] == {
         "tastytrade": "configured",
@@ -117,6 +164,9 @@ def test_authenticated_bootstrap_reports_capabilities_without_secrets(monkeypatc
         "benzinga": "not_configured",
     }
     assert payload["monitoring"]["market_timezone"] == "America/New_York"
+    assert payload["monitoring"]["enabled"] is False
+    assert payload["recommendations"]["selected_provider"] == "codex-cli"
+    assert payload["recommendations"].get("api_key_fallback_available") is False
     assert payload["data_state"] == "awaiting_portfolio_snapshot"
     assert "private-client-secret" not in response.text
     assert "private-refresh-token" not in response.text

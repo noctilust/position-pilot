@@ -10,10 +10,10 @@ test("secure dashboard shell renders without console or accessibility errors", a
     route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
-        application: { name: "Position Pilot", version: "test", phase: "catalyst-intelligence" },
+        application: { name: "Position Pilot", version: "test", phase: "codex-monitoring" },
         providers: {
           tastytrade: "configured",
-          codex: "not_checked",
+          codex: "configured",
           massive: "configured",
           benzinga: "not_configured",
         },
@@ -23,6 +23,21 @@ test("secure dashboard shell renders without console or accessibility errors", a
           window_end: "18:00",
           evaluation_minutes: 30,
           risk_refresh_seconds: 60,
+          enabled: false,
+          consented: false,
+          inside_window: true,
+          is_trading_day: true,
+          is_holiday: false,
+          is_early_close: false,
+          provider_status: "configured",
+          running: false,
+          notice: "Monitoring is disabled until you grant onboarding consent.",
+          last_evaluation_at: null,
+        },
+        recommendations: {
+          api_key_fallback_enabled: false,
+          selected_provider: "codex-cli",
+          rich_notification_preview: false,
         },
         catalysts: {
           stock_move_threshold_pct: 2,
@@ -35,6 +50,39 @@ test("secure dashboard shell renders without console or accessibility errors", a
         primary_account_id: "public-account-id",
         data_state: "ready",
         server_time: "2026-07-11T16:30:00Z",
+      }),
+    }),
+  );
+  await page.route("**/api/v1/alerts**", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify([]),
+    }),
+  );
+  await page.route("**/api/v1/recommendations**", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify([]),
+    }),
+  );
+  await page.route("**/api/v1/monitoring**", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        market_timezone: "America/New_York",
+        window_start: "07:30",
+        window_end: "18:00",
+        evaluation_minutes: 30,
+        risk_refresh_seconds: 60,
+        enabled: false,
+        consented: false,
+        inside_window: true,
+        is_trading_day: true,
+        is_holiday: false,
+        is_early_close: false,
+        provider_status: "configured",
+        running: false,
+        notice: "Monitoring is disabled until you grant onboarding consent.",
       }),
     }),
   );

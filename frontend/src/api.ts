@@ -1,17 +1,22 @@
 import type {
+  AlertRecord,
   BootstrapPayload,
   CatalystScanSnapshot,
   CatalystSettings,
   MarketOverview,
   MarketQuote,
+  MonitoringStatus,
   OrderRow,
   PortfolioRisk,
   PortfolioSnapshot,
+  RecommendationRecord,
+  RecommendationSettings,
   RollChain,
   RollHeatmap,
   RollPatterns,
   StrategyDetail,
   SymbolCatalystResult,
+  TraderDecision,
   WatchlistSnapshot,
 } from "./types";
 
@@ -184,6 +189,91 @@ export function saveCatalystSettings(payload: {
   etf_move_threshold_pct?: number;
 }) {
   return api<CatalystSettings>("/api/v1/settings/catalysts", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchRecommendations(accountId = "all") {
+  const search = new URLSearchParams({ account_id: accountId });
+  return api<RecommendationRecord[]>(`/api/v1/recommendations?${search}`);
+}
+
+export function evaluateStrategyRecommendation(strategyId: string, force = false) {
+  return api<RecommendationRecord>(`/api/v1/strategies/${strategyId}/recommend`, {
+    method: "POST",
+    body: JSON.stringify({ force }),
+  });
+}
+
+export function recordTraderDecision(
+  recommendationId: string,
+  decision: string,
+  note = "",
+) {
+  return api<TraderDecision>(`/api/v1/recommendations/${recommendationId}/decisions`, {
+    method: "POST",
+    body: JSON.stringify({ decision, note }),
+  });
+}
+
+export function fetchAlerts(accountId = "all") {
+  const search = new URLSearchParams({ account_id: accountId });
+  return api<AlertRecord[]>(`/api/v1/alerts?${search}`);
+}
+
+export function acknowledgeAlert(alertId: string) {
+  return api<AlertRecord>(`/api/v1/alerts/${alertId}/acknowledge`, { method: "POST" });
+}
+
+export function snoozeAlert(alertId: string, minutes = 60) {
+  return api<AlertRecord>(`/api/v1/alerts/${alertId}/snooze`, {
+    method: "POST",
+    body: JSON.stringify({ minutes }),
+  });
+}
+
+export function resolveAlert(alertId: string) {
+  return api<AlertRecord>(`/api/v1/alerts/${alertId}/resolve`, { method: "POST" });
+}
+
+export function muteAlerts(payload: {
+  category?: string;
+  alert_type?: string;
+  symbol?: string;
+  strategy_type?: string;
+}) {
+  return api("/api/v1/alerts/mute", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchMonitoring() {
+  return api<MonitoringStatus>("/api/v1/monitoring");
+}
+
+export function saveMonitoringConsent(enabled: boolean) {
+  return api<{ consent: { enabled: boolean }; status: MonitoringStatus }>(
+    "/api/v1/monitoring/consent",
+    {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    },
+  );
+}
+
+export function runMonitoringEvaluation(force = false) {
+  return api<Record<string, unknown>>("/api/v1/monitoring/evaluate", {
+    method: "POST",
+    body: JSON.stringify({ force }),
+  });
+}
+
+export function saveRecommendationSettings(payload: {
+  rich_notification_preview?: boolean;
+}) {
+  return api<RecommendationSettings>("/api/v1/settings/recommendations", {
     method: "PUT",
     body: JSON.stringify(payload),
   });

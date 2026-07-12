@@ -19,12 +19,17 @@ import type { LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  acknowledgeAlert,
   currency,
+  evaluateStrategyRecommendation,
+  fetchAlerts,
   fetchCatalysts,
   fetchMarkets,
+  fetchMonitoring,
   fetchOrders,
   fetchPortfolio,
   fetchPortfolioRisk,
+  fetchRecommendations,
   fetchRollHeatmap,
   fetchRollPatterns,
   fetchRolls,
@@ -32,26 +37,37 @@ import {
   fetchStreamingState,
   fetchWatchlist,
   getBootstrap,
+  muteAlerts,
   pct,
+  recordTraderDecision,
+  resolveAlert,
+  runMonitoringEvaluation,
   saveCatalystSettings,
+  saveMonitoringConsent,
   savePrimaryAccount,
+  saveRecommendationSettings,
   saveStrategyHorizon,
   saveThesis,
   saveTradePlan,
   saveWatchlist,
   signed,
+  snoozeAlert,
   submitCatalystFeedback,
 } from "./api";
 import type {
+  AlertRecord,
   BootstrapPayload,
   CatalystScanSnapshot,
   CatalystSettings,
   LiveMarketTick,
   MarketOverview,
+  MonitoringStatus,
   OrderRow,
   PortfolioAccount,
   PortfolioRisk,
   PortfolioSnapshot,
+  RecommendationRecord,
+  RecommendationSettings,
   RollChain,
   RollHeatmap,
   RollPatterns,
@@ -99,6 +115,10 @@ function App() {
   const [strategyDetail, setStrategyDetail] = useState<StrategyDetail | null>(null);
   const [catalysts, setCatalysts] = useState<CatalystScanSnapshot | null>(null);
   const [catalystError, setCatalystError] = useState<string | null>(null);
+  const [alerts, setAlerts] = useState<AlertRecord[]>([]);
+  const [alertsError, setAlertsError] = useState<string | null>(null);
+  const [monitoring, setMonitoring] = useState<MonitoringStatus | null>(null);
+  const [recommendations, setRecommendations] = useState<RecommendationRecord[]>([]);
   const [liveState, setLiveState] = useState<"connecting" | "live" | "degraded" | "disabled">(
     "connecting",
   );
@@ -107,6 +127,7 @@ function App() {
   const rollsRequest = useRef(0);
   const detailRequest = useRef(0);
   const catalystRequest = useRef(0);
+  const alertsRequest = useRef(0);
 
   const selectedAccountId =
     portfolio.kind === "ready" ? portfolio.snapshot.selected_account_id : "all";
@@ -168,6 +189,32 @@ function App() {
       setCatalystError(
         error instanceof Error ? error.message : "Catalyst coverage is unavailable.",
       );
+    }
+  }, []);
+
+  const loadAlerts = useCallback(async (accountId = "all") => {
+    const request = ++alertsRequest.current;
+    setAlertsError(null);
+    try {
+      const [rows, recs] = await Promise.all([
+        fetchAlerts(accountId),
+        fetchRecommendations(accountId),
+      ]);
+      if (request !== alertsRequest.current) return;
+      setAlerts(rows);
+      setRecommendations(recs);
+    } catch (error: unknown) {
+      if (request !== alertsRequest.current) return;
+      setAlerts([]);
+      setAlertsError(error instanceof Error ? error.message : "Alert center is unavailable.");
+    }
+  }, []);
+
+  const loadMonitoring = useCallback(async () => {
+    try {
+      setMonitoring(await fetchMonitoring());
+    } catch {
+      /* bootstrap monitoring strip remains the fallback */
     }
   }, []);
 
@@ -233,13 +280,23 @@ function App() {
     const primary = state.payload.primary_account_id || "all";
     void loadPortfolio().then(() => loadPortfolio(primary, true, true));
     void loadMarkets();
-  }, [loadMarkets, loadPortfolio, state.kind, state.kind === "ready" ? state.payload.primary_account_id : null]);
+    void loadMonitoring();
+    setMonitoring(state.payload.monitoring);
+  }, [
+    loadMarkets,
+    loadMonitoring,
+    loadPortfolio,
+    state.kind,
+    state.kind === "ready" ? state.payload.primary_account_id : null,
+    state.kind === "ready" ? state.payload.monitoring : null,
+  ]);
 
   useEffect(() => {
     if (portfolio.kind !== "ready") return;
     void loadRolls(portfolio.snapshot.selected_account_id);
     void loadCatalysts(portfolio.snapshot.selected_account_id);
-  }, [loadRolls, loadCatalysts, portfolio]);
+    void loadAlerts(portfolio.snapshot.selected_account_id);
+  }, [loadRolls, loadCatalysts, loadAlerts, portfolio]);
 
   useEffect(() => {
     if (state.kind !== "ready") return;
@@ -341,7 +398,8 @@ function App() {
               catalysts={catalysts}
               catalystError={catalystError}
               providers={state.payload.providers}
-              monitoring={state.payload.monitoring}
+              monitoring={monitoring ?? state.payload.monitoring}
+              recommendations={recommendations}
             />
           ) : null}
 
@@ -372,33 +430,33 @@ function App() {
           ) : null}
 
           {activeSection === "Alerts" ? (
-            <section className="panel-section" aria-labelledby="alerts-heading">
-              <div className="section-heading">
-                <div>
-                  <p className="eyebrow">Alert center</p>
-                  <h2 id="alerts-heading">Alerts</h2>
-                </div>
-              </div>
-              <p className="muted">
-                Catalyst coverage and provider health surface on Overview and Positions. Dedicated
-                alert routing arrives with monitoring in Phase 6.
-              </p>
-              {catalysts?.results?.filter((row) => row.promoted).length ? (
-                <ul className="plain-list">
-                  {catalysts.results
-                    .filter((row) => row.promoted)
-                    .slice(0, 8)
-                    .map((row) => (
-                      <li key={row.symbol}>
-                        <strong>{row.symbol}</strong>
-                        <span className="muted"> · {row.summary}</span>
-                      </li>
-                    ))}
-                </ul>
-              ) : (
-                <p className="muted">No promoted catalyst alerts in the current scan.</p>
-              )}
-            </section>
+            <AlertsSection
+              alerts={alerts}
+              error={alertsError}
+              monitoring={monitoring ?? state.payload.monitoring}
+              onRefresh={() => void loadAlerts(selectedAccountId)}
+              onAcknowledge={async (alertId) => {
+                await acknowledgeAlert(alertId);
+                await loadAlerts(selectedAccountId);
+              }}
+              onSnooze={async (alertId) => {
+                await snoozeAlert(alertId, 60);
+                await loadAlerts(selectedAccountId);
+              }}
+              onResolve={async (alertId) => {
+                await resolveAlert(alertId);
+                await loadAlerts(selectedAccountId);
+              }}
+              onMute={async (alert) => {
+                await muteAlerts({
+                  category: alert.category,
+                  alert_type: alert.alert_type,
+                  symbol: alert.symbol ?? undefined,
+                  strategy_type: alert.strategy_type ?? undefined,
+                });
+                await loadAlerts(selectedAccountId);
+              }}
+            />
           ) : null}
 
           {activeSection === "Settings" ? (
@@ -406,9 +464,19 @@ function App() {
               payload={state.payload}
               accountOptions={accountOptions}
               catalystSettings={catalysts?.settings ?? state.payload.catalysts ?? null}
+              monitoring={monitoring ?? state.payload.monitoring}
+              recommendationSettings={state.payload.recommendations ?? null}
               onCatalystSettingsSaved={(next) =>
                 setCatalysts((current) =>
                   current ? { ...current, settings: next } : current,
+                )
+              }
+              onMonitoringChanged={(next) => setMonitoring(next)}
+              onRecommendationSettingsSaved={(next) =>
+                setState((current) =>
+                  current.kind === "ready"
+                    ? { ...current, payload: { ...current.payload, recommendations: next } }
+                    : current,
                 )
               }
             />
@@ -587,7 +655,7 @@ function FoundationNotice({
       <p>
         <strong>Catalyst intelligence.</strong> {message}
       </p>
-      <span>Phase 5 / 7</span>
+      <span>Phase 6 / 7</span>
     </section>
   );
 }
@@ -600,6 +668,7 @@ function OverviewSection({
   catalystError,
   providers,
   monitoring,
+  recommendations,
 }: {
   portfolio: PortfolioState;
   risk: PortfolioRisk | null;
@@ -607,11 +676,15 @@ function OverviewSection({
   catalysts: CatalystScanSnapshot | null;
   catalystError: string | null;
   providers: BootstrapPayload["providers"];
-  monitoring: BootstrapPayload["monitoring"];
+  monitoring: MonitoringStatus;
+  recommendations: RecommendationRecord[];
 }) {
   const snapshot = portfolio.kind === "ready" ? portfolio.snapshot : null;
   const promoted = (catalysts?.results ?? []).filter((row) => row.promoted);
   const quietCount = (catalysts?.results ?? []).filter((row) => row.quiet).length;
+  const urgentRecs = recommendations
+    .filter((row) => row.action && (row.urgency ?? 0) >= 3)
+    .slice(0, 5);
   return (
     <>
       <section className="portfolio-masthead">
@@ -862,10 +935,202 @@ function OverviewSection({
           </ul>
         </section>
 
+        <section className="panel-section" aria-labelledby="rec-heading">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">06 / Recommendations</p>
+              <h2 id="rec-heading">Codex signals</h2>
+            </div>
+          </div>
+          <ul className="plain-list">
+            {urgentRecs.map((row) => (
+              <li key={row.recommendation_id}>
+                <strong>
+                  {row.symbol ?? "Portfolio"} · {row.action ?? "—"}
+                </strong>
+                <span className="muted">
+                  {" "}
+                  · urgency {row.urgency ?? "—"} · {row.risk ?? "—"} · {row.provider_status}
+                </span>
+                {row.reasoning ? <p className="microcopy">{row.reasoning}</p> : null}
+                {row.error ? (
+                  <p className="microcopy" role="status">
+                    {row.error}
+                  </p>
+                ) : null}
+              </li>
+            ))}
+            {!urgentRecs.length ? (
+              <li className="muted">
+                No stored recommendations yet. Open a strategy and run Evaluate, or enable monitoring
+                consent in Settings.
+              </li>
+            ) : null}
+          </ul>
+        </section>
+
         <ProviderLedger providers={providers} />
         <MonitoringStrip monitoring={monitoring} />
       </div>
     </>
+  );
+}
+
+function AlertsSection({
+  alerts,
+  error,
+  monitoring,
+  onRefresh,
+  onAcknowledge,
+  onSnooze,
+  onResolve,
+  onMute,
+}: {
+  alerts: AlertRecord[];
+  error: string | null;
+  monitoring: MonitoringStatus;
+  onRefresh: () => void;
+  onAcknowledge: (alertId: string) => Promise<void>;
+  onSnooze: (alertId: string) => Promise<void>;
+  onResolve: (alertId: string) => Promise<void>;
+  onMute: (alert: AlertRecord) => Promise<void>;
+}) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  return (
+    <section className="panel-section" aria-labelledby="alerts-heading">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">Alert center</p>
+          <h2 id="alerts-heading">Alerts</h2>
+        </div>
+        <button type="button" onClick={onRefresh}>
+          Refresh
+        </button>
+      </div>
+      <p className="muted">
+        Risk, catalyst, recommendation, and provider-health events. macOS notifications default to
+        symbol · strategy · alert type only.
+      </p>
+      <p className="microcopy" role="status">
+        Monitoring: {monitoring.enabled ? "enabled" : "disabled"}
+        {monitoring.notice ? ` · ${monitoring.notice}` : ""}
+      </p>
+      {error ? (
+        <p role="alert">{error}</p>
+      ) : null}
+      {actionError ? (
+        <p role="alert">{actionError}</p>
+      ) : null}
+      <ul className="alert-list">
+        {alerts.map((alert) => (
+          <li key={alert.alert_id} className={`alert-card severity-${alert.severity}`}>
+            <div className="catalyst-row-head">
+              <strong>
+                {alert.symbol ?? "System"} · {alert.alert_type.replaceAll("_", " ")}
+              </strong>
+              <span className="pill">{alert.severity}</span>
+              <span className="pill">{alert.category.replaceAll("_", " ")}</span>
+              <span className="muted">{alert.resolution}</span>
+            </div>
+            <p>{alert.title}</p>
+            <p className="microcopy">{alert.summary}</p>
+            <p className="microcopy">
+              {alert.strategy_type ? `${alert.strategy_type} · ` : ""}
+              {alert.source} ·{" "}
+              {new Intl.DateTimeFormat(undefined, {
+                month: "short",
+                day: "numeric",
+                hour: "numeric",
+                minute: "2-digit",
+              }).format(new Date(alert.created_at))}
+            </p>
+            <div className="inline-actions">
+              <button
+                type="button"
+                disabled={busyId === alert.alert_id}
+                onClick={() => {
+                  void (async () => {
+                    setBusyId(alert.alert_id);
+                    setActionError(null);
+                    try {
+                      await onAcknowledge(alert.alert_id);
+                    } catch (err: unknown) {
+                      setActionError(err instanceof Error ? err.message : "Acknowledge failed.");
+                    } finally {
+                      setBusyId(null);
+                    }
+                  })();
+                }}
+              >
+                Acknowledge
+              </button>
+              <button
+                type="button"
+                disabled={busyId === alert.alert_id}
+                onClick={() => {
+                  void (async () => {
+                    setBusyId(alert.alert_id);
+                    setActionError(null);
+                    try {
+                      await onSnooze(alert.alert_id);
+                    } catch (err: unknown) {
+                      setActionError(err instanceof Error ? err.message : "Snooze failed.");
+                    } finally {
+                      setBusyId(null);
+                    }
+                  })();
+                }}
+              >
+                Snooze 1h
+              </button>
+              <button
+                type="button"
+                disabled={busyId === alert.alert_id}
+                onClick={() => {
+                  void (async () => {
+                    setBusyId(alert.alert_id);
+                    setActionError(null);
+                    try {
+                      await onResolve(alert.alert_id);
+                    } catch (err: unknown) {
+                      setActionError(err instanceof Error ? err.message : "Resolve failed.");
+                    } finally {
+                      setBusyId(null);
+                    }
+                  })();
+                }}
+              >
+                Resolve
+              </button>
+              <button
+                type="button"
+                disabled={busyId === alert.alert_id}
+                onClick={() => {
+                  void (async () => {
+                    setBusyId(alert.alert_id);
+                    setActionError(null);
+                    try {
+                      await onMute(alert);
+                    } catch (err: unknown) {
+                      setActionError(err instanceof Error ? err.message : "Mute failed.");
+                    } finally {
+                      setBusyId(null);
+                    }
+                  })();
+                }}
+              >
+                Mute rule
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
+      {!alerts.length && !error ? (
+        <p className="muted">No open alerts. Material recommendation changes will appear here.</p>
+      ) : null}
+    </section>
   );
 }
 
@@ -1299,12 +1564,20 @@ function SettingsSection({
   payload,
   accountOptions,
   catalystSettings,
+  monitoring,
+  recommendationSettings,
   onCatalystSettingsSaved,
+  onMonitoringChanged,
+  onRecommendationSettingsSaved,
 }: {
   payload: BootstrapPayload;
   accountOptions: PortfolioAccount[];
   catalystSettings: CatalystSettings | null;
+  monitoring: MonitoringStatus;
+  recommendationSettings: RecommendationSettings | null;
   onCatalystSettingsSaved: (settings: CatalystSettings) => void;
+  onMonitoringChanged: (status: MonitoringStatus) => void;
+  onRecommendationSettingsSaved: (settings: RecommendationSettings) => void;
 }) {
   const [cadence, setCadence] = useState(
     String(catalystSettings?.news_cadence_seconds ?? 300),
@@ -1319,6 +1592,10 @@ function SettingsSection({
     catalystSettings?.benzinga.enabled ?? true,
   );
   const [saveState, setSaveState] = useState<string | null>(null);
+  const [consentBusy, setConsentBusy] = useState(false);
+  const [richPreview, setRichPreview] = useState(
+    recommendationSettings?.rich_notification_preview ?? false,
+  );
 
   useEffect(() => {
     if (!catalystSettings) return;
@@ -1328,9 +1605,145 @@ function SettingsSection({
     setBenzingaEnabled(catalystSettings.benzinga.enabled);
   }, [catalystSettings]);
 
+  useEffect(() => {
+    if (!recommendationSettings) return;
+    setRichPreview(recommendationSettings.rich_notification_preview);
+  }, [recommendationSettings]);
+
   return (
     <div className="stack-lg">
       <ProviderLedger providers={payload.providers} />
+
+      <section className="panel-section" aria-labelledby="monitoring-consent-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Monitoring</p>
+            <h2 id="monitoring-consent-heading">Trading-day consent</h2>
+          </div>
+        </div>
+        <p className="muted">
+          Background evaluation runs 7:30 AM–6:00 PM America/New_York on trading days only after
+          you opt in. Position Pilot never places trades. Missed intervals are not replayed.
+        </p>
+        <dl className="cadence-facts">
+          <div>
+            <dt>Status</dt>
+            <dd>{monitoring.enabled ? "Enabled" : "Disabled"}</dd>
+          </div>
+          <div>
+            <dt>Window</dt>
+            <dd>
+              {monitoring.inside_window ? "Inside" : "Outside"} ·{" "}
+              {monitoring.is_holiday
+                ? "Holiday"
+                : monitoring.is_early_close
+                  ? "Early close"
+                  : monitoring.is_trading_day
+                    ? "Trading day"
+                    : "Closed"}
+            </dd>
+          </div>
+          <div>
+            <dt>Codex</dt>
+            <dd>{monitoring.provider_status ?? payload.providers.codex}</dd>
+          </div>
+        </dl>
+        {monitoring.notice ? <p className="muted" role="status">{monitoring.notice}</p> : null}
+        <div className="inline-actions">
+          <button
+            type="button"
+            disabled={consentBusy}
+            onClick={() => {
+              void (async () => {
+                setConsentBusy(true);
+                try {
+                  const result = await saveMonitoringConsent(!monitoring.enabled);
+                  onMonitoringChanged(result.status);
+                  setSaveState(
+                    result.consent.enabled
+                      ? "Monitoring consent granted and persisted."
+                      : "Monitoring disabled.",
+                  );
+                } catch (error: unknown) {
+                  setSaveState(
+                    error instanceof Error ? error.message : "Could not update monitoring consent.",
+                  );
+                } finally {
+                  setConsentBusy(false);
+                }
+              })();
+            }}
+          >
+            {monitoring.enabled ? "Disable monitoring" : "Enable monitoring"}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void (async () => {
+                try {
+                  await runMonitoringEvaluation(false);
+                  onMonitoringChanged(await fetchMonitoring());
+                  setSaveState("On-demand evaluation requested.");
+                } catch (error: unknown) {
+                  setSaveState(
+                    error instanceof Error ? error.message : "Evaluation failed.",
+                  );
+                }
+              })();
+            }}
+          >
+            Evaluate now
+          </button>
+        </div>
+      </section>
+
+      <section className="panel-section" aria-labelledby="recommendation-settings-heading">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Recommendations</p>
+            <h2 id="recommendation-settings-heading">Provider and notifications</h2>
+          </div>
+        </div>
+        <p className="muted">
+          Recommendations use the local Codex CLI with ChatGPT subscription sign-in. API-key
+          providers are not available and never selected silently.
+        </p>
+        <p className="microcopy">
+          Provider: {recommendationSettings?.selected_provider ?? "codex-cli"} · API-key fallback:{" "}
+          {recommendationSettings?.api_key_fallback_available ? "available" : "unavailable"}
+        </p>
+        <form
+          className="stack-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void (async () => {
+              try {
+                const next = await saveRecommendationSettings({
+                  rich_notification_preview: richPreview,
+                });
+                onRecommendationSettingsSaved(next);
+                setSaveState("Recommendation settings saved.");
+              } catch (error: unknown) {
+                setSaveState(
+                  error instanceof Error ? error.message : "Could not save recommendation settings.",
+                );
+              }
+            })();
+          }}
+        >
+          <label className="compact-field checkbox-field">
+            <input
+              type="checkbox"
+              checked={richPreview}
+              onChange={(event) => setRichPreview(event.target.checked)}
+            />
+            Opt in to richer macOS notification previews (still excludes account ids, quantities,
+            balances, and P/L)
+          </label>
+          <button type="submit">Save recommendation settings</button>
+        </form>
+      </section>
+
       <section className="panel-section">
         <div className="section-heading">
           <div>
@@ -1464,6 +1877,10 @@ function StrategyDetailDrawer({
     exit_deadline: detail.trade_plan?.exit_deadline ?? "",
   });
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [recommendation, setRecommendation] = useState(detail.recommendation ?? null);
+  const [recBusy, setRecBusy] = useState(false);
+  const [recMessage, setRecMessage] = useState<string | null>(null);
+  const [decisionNote, setDecisionNote] = useState("");
   const prices = detail.chart.bars.map((bar) => bar.close);
   const min = prices.length ? Math.min(...prices) : 0;
   const max = prices.length ? Math.max(...prices) : 1;
@@ -1745,6 +2162,148 @@ function StrategyDetailDrawer({
             </ul>
           </section>
 
+          <section aria-labelledby="drawer-recommendation-heading">
+            <h3 id="drawer-recommendation-heading">Recommendation</h3>
+            {recommendation ? (
+              <div className="recommendation-card">
+                <p>
+                  <strong>{recommendation.action ?? "—"}</strong>
+                  <span className="muted">
+                    {" "}
+                    · urgency {recommendation.urgency ?? "—"} · {recommendation.risk ?? "—"}
+                  </span>
+                </p>
+                <p className="microcopy">
+                  Provider {recommendation.provider_status}
+                  {recommendation.codex_called ? " · Codex called" : " · fingerprint skip"}
+                </p>
+                {recommendation.reasoning ? <p>{recommendation.reasoning}</p> : null}
+                {recommendation.error ? <p role="status">{recommendation.error}</p> : null}
+                <p className="microcopy">
+                  Evaluated{" "}
+                  {new Intl.DateTimeFormat(undefined, {
+                    month: "short",
+                    day: "numeric",
+                    hour: "numeric",
+                    minute: "2-digit",
+                  }).format(new Date(recommendation.last_evaluated_at))}
+                  {recommendation.recommendation_updated_at
+                    ? ` · updated ${new Intl.DateTimeFormat(undefined, {
+                        month: "short",
+                        day: "numeric",
+                        hour: "numeric",
+                        minute: "2-digit",
+                      }).format(new Date(recommendation.recommendation_updated_at))}`
+                    : ""}
+                </p>
+                {(detail.recommendation_history ?? []).length ? (
+                  <ul className="plain-list">
+                    {(detail.recommendation_history ?? []).slice(0, 5).map((entry) => (
+                      <li key={entry.history_id} className="microcopy">
+                        <strong>{entry.kind.replaceAll("_", " ")}</strong> · {entry.summary}
+                        {entry.diff && Object.keys(entry.diff).length ? (
+                          <ul className="plain-list">
+                            {Object.entries(entry.diff)
+                              .filter(([key]) => key !== "day")
+                              .slice(0, 6)
+                              .map(([key, change]) => {
+                                const row = change as { from?: unknown; to?: unknown };
+                                return (
+                                  <li key={key}>
+                                    {key}: {formatDiffValue(row.from)} → {formatDiffValue(row.to)}
+                                  </li>
+                                );
+                              })}
+                          </ul>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                <label className="compact-field">
+                  Decision note
+                  <input
+                    value={decisionNote}
+                    onChange={(event) => setDecisionNote(event.target.value)}
+                    maxLength={500}
+                  />
+                </label>
+                <div className="inline-actions">
+                  {(
+                    [
+                      ["accepted", "Accept"],
+                      ["dismissed", "Dismiss"],
+                      ["deferred", "Defer"],
+                      ["handled_in_tastytrade", "Handled in Tastytrade"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      disabled={recBusy}
+                      onClick={() => {
+                        void (async () => {
+                          setRecBusy(true);
+                          setRecMessage(null);
+                          try {
+                            await recordTraderDecision(
+                              recommendation.recommendation_id,
+                              value,
+                              decisionNote,
+                            );
+                            setRecMessage(`Recorded: ${label}`);
+                            await onSaved();
+                          } catch (error: unknown) {
+                            setRecMessage(
+                              error instanceof Error ? error.message : "Could not record decision.",
+                            );
+                          } finally {
+                            setRecBusy(false);
+                          }
+                        })();
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <p className="muted">No recommendation stored for this strategy yet.</p>
+            )}
+            <div className="inline-actions">
+              <button
+                type="button"
+                disabled={recBusy}
+                onClick={() => {
+                  void (async () => {
+                    setRecBusy(true);
+                    setRecMessage(null);
+                    try {
+                      const next = await evaluateStrategyRecommendation(strategy.strategy_id, true);
+                      setRecommendation(next);
+                      setRecMessage(
+                        next.provider_status === "ok" || next.provider_status === "skipped_unchanged"
+                          ? "Evaluation complete."
+                          : `Provider status: ${next.provider_status}${next.error ? ` — ${next.error}` : ""}`,
+                      );
+                      await onSaved();
+                    } catch (error: unknown) {
+                      setRecMessage(
+                        error instanceof Error ? error.message : "Evaluation failed.",
+                      );
+                    } finally {
+                      setRecBusy(false);
+                    }
+                  })();
+                }}
+              >
+                {recBusy ? "Evaluating…" : "Evaluate with Codex"}
+              </button>
+            </div>
+            {recMessage ? <p role="status">{recMessage}</p> : null}
+          </section>
+
           <section>
             <h3>{strategy.horizon === "strategic" ? "Thesis" : "Trade plan"}</h3>
             {saveError ? <p role="alert">{saveError}</p> : null}
@@ -1971,7 +2530,11 @@ function ProviderLedger({ providers }: { providers: BootstrapPayload["providers"
                 ? "Configured"
                 : state === "not_checked"
                   ? "Check pending"
-                  : "Not configured"}
+                  : state === "signed_out"
+                    ? "Signed out"
+                    : state === "unavailable"
+                      ? "Unavailable"
+                      : "Not configured"}
             </em>
           </div>
         ))}
@@ -1980,7 +2543,7 @@ function ProviderLedger({ providers }: { providers: BootstrapPayload["providers"
   );
 }
 
-function MonitoringStrip({ monitoring }: { monitoring: BootstrapPayload["monitoring"] }) {
+function MonitoringStrip({ monitoring }: { monitoring: MonitoringStatus }) {
   return (
     <section className="monitoring-strip panel-section" aria-labelledby="monitoring-heading">
       <div className="section-heading">
@@ -1996,11 +2559,11 @@ function MonitoringStrip({ monitoring }: { monitoring: BootstrapPayload["monitor
           <span>Monitor begins</span>
         </div>
         <div className="time-track" aria-hidden="true">
-          <span className="time-fill" />
+          <span className={`time-fill${monitoring.inside_window ? " active" : ""}`} />
         </div>
         <div className="time-label end">
           <strong>{monitoring.window_end}</strong>
-          <span>Final check</span>
+          <span>{monitoring.is_early_close ? "Early close" : "Final check"}</span>
         </div>
       </div>
       <dl className="cadence-facts">
@@ -2013,12 +2576,29 @@ function MonitoringStrip({ monitoring }: { monitoring: BootstrapPayload["monitor
           <dd>{monitoring.evaluation_minutes} minutes</dd>
         </div>
         <div>
+          <dt>Consent</dt>
+          <dd>{monitoring.enabled ? "Enabled" : "Disabled"}</dd>
+        </div>
+        <div>
           <dt>Market clock</dt>
           <dd>New York</dd>
         </div>
       </dl>
+      {monitoring.notice ? <p className="microcopy">{monitoring.notice}</p> : null}
     </section>
   );
+}
+
+function formatDiffValue(value: unknown): string {
+  if (value == null) return "—";
+  if (typeof value === "string") return value.length > 80 ? `${value.slice(0, 77)}…` : value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    const text = JSON.stringify(value);
+    return text.length > 80 ? `${text.slice(0, 77)}…` : text;
+  } catch {
+    return String(value);
+  }
 }
 
 function formatConfidence(value: string) {

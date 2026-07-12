@@ -393,4 +393,4 @@ def test_parity_endpoints_are_authenticated_and_redacted(monkeypatch, tmp_path) 
     assert heatmap.json()["cells"]
 
     bootstrap = client.get("/api/v1/bootstrap")
-    assert bootstrap.json()["application"]["phase"] == "catalyst-intelligence"
+    assert bootstrap.json()["application"]["phase"] == "codex-monitoring"

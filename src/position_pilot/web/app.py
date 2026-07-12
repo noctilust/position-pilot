@@ -21,6 +21,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .. import __version__
 from ..client import get_client
+from ..domain.alerts import AlertCategory
 from ..domain.catalysts import (
     CatalystFeedbackEvent,
     CatalystFeedbackKind,
@@ -28,21 +29,26 @@ from ..domain.catalysts import (
     SymbolCatalystResult,
 )
 from ..domain.factory import (
+    get_alert_service,
     get_catalyst_service,
     get_database,
     get_field_router,
     get_market_service,
+    get_monitoring_service,
     get_order_service,
     get_plans_service,
     get_portfolio_service,
+    get_recommendation_service,
     get_risk_service,
     get_roll_service,
     get_watchlist_service,
+    set_live_market_hub,
 )
 from ..domain.market import ChartSnapshot, MarketOverview, MarketSnapshot
 from ..domain.orders import OrderSnapshot
 from ..domain.plans import AuditEvent, Thesis, TradePlan
 from ..domain.portfolio import PortfolioService
+from ..domain.recommendations import SubjectType, TraderDecisionKind
 from ..domain.risk import PortfolioRisk, StrategyRisk
 from ..domain.rolls import RollChainSnapshot, RollHeatmapSnapshot, RollPatternsSnapshot
 from ..domain.snapshots import PortfolioSnapshot, PositionHorizon, StrategySnapshot
@@ -114,6 +120,34 @@ class CatalystSettingsRequest(BaseModel):
     etf_move_threshold_pct: float | None = Field(default=None, ge=0.1, le=50)
     news_cadence_seconds: int | None = Field(default=None, ge=60, le=3600)
     benzinga_enabled: bool | None = None
+
+
+class MonitoringConsentRequest(BaseModel):
+    enabled: bool
+
+
+class RecommendationSettingsRequest(BaseModel):
+    rich_notification_preview: bool | None = None
+
+
+class TraderDecisionRequest(BaseModel):
+    decision: TraderDecisionKind
+    note: str = Field(default="", max_length=2_000)
+
+
+class AlertSnoozeRequest(BaseModel):
+    minutes: int = Field(default=60, ge=1, le=60 * 24 * 7)
+
+
+class AlertMuteRequest(BaseModel):
+    category: AlertCategory | None = None
+    alert_type: str | None = Field(default=None, max_length=100)
+    symbol: str | None = Field(default=None, max_length=32)
+    strategy_type: str | None = Field(default=None, max_length=100)
+
+
+class EvaluateRequest(BaseModel):
+    force: bool = False
 
 
 class PortfolioReader(Protocol):
@@ -198,6 +232,8 @@ async def _portfolio_or_503(
 
 async def _start_streaming_runtime(app: FastAPI, settings: WebSettings) -> None:
     app.state.live_hub = LiveStateHub(get_database())
+    # Prefer redacted DXLink values for tactical monitoring when available.
+    set_live_market_hub(app.state.live_hub)
     tastytrade_configured = (
         _configured("TASTYTRADE_CLIENT_SECRET", "TASTYTRADE_REFRESH_TOKEN") == "configured"
     )
@@ -295,6 +331,7 @@ async def _stop_streaming_runtime(app: FastAPI) -> None:
         await asyncio.gather(*app.state.streaming_tasks, return_exceptions=True)
     if app.state.reconciliation_queue is not None:
         await app.state.reconciliation_queue.close()
+    set_live_market_hub(None)
 
 
 def create_app(
@@ -315,9 +352,22 @@ def create_app(
         except Exception:
             pass
         await _start_streaming_runtime(application, active_settings)
+        # Codex monitoring is independent — failures must not block core APIs.
+        try:
+            monitoring = get_monitoring_service()
+            application.state.monitoring_service = monitoring
+            await monitoring.start()
+        except Exception:
+            application.state.monitoring_service = None
         try:
             yield
         finally:
+            monitoring = getattr(application.state, "monitoring_service", None)
+            if monitoring is not None:
+                try:
+                    await monitoring.stop()
+                except Exception:
+                    pass
             await _stop_streaming_runtime(application)
 
     app = FastAPI(
@@ -335,6 +385,7 @@ def create_app(
     app.state.streaming_service = None
     app.state.streaming_startup_error = None
     app.state.reconciliation_queue = None
+    app.state.monitoring_service = None
     app.state.launch_token_available = True
     app.state.launch_token_lock = asyncio.Lock()
     assets_directory = STATIC_DIR / "assets"
@@ -430,29 +481,69 @@ def create_app(
         ] = None,
     ) -> JSONResponse:
         _require_session(session, active_settings.session_token)
+
+        def _bootstrap_side_state() -> tuple[dict[str, Any], str, dict[str, Any]]:
+            """Blocking probes off the event loop; auth status is TTL-cached."""
+
+            try:
+                monitoring_payload = get_monitoring_service().public_bootstrap()
+            except Exception:
+                monitoring_payload = {
+                    "market_timezone": "America/New_York",
+                    "window_start": "07:30",
+                    "window_end": "18:00",
+                    "evaluation_minutes": 30,
+                    "risk_refresh_seconds": 60,
+                    "enabled": False,
+                    "consented": False,
+                    "inside_window": False,
+                    "is_trading_day": False,
+                    "is_holiday": False,
+                    "is_early_close": False,
+                    "provider_status": "unavailable",
+                    "running": False,
+                    "notice": "Monitoring status unavailable.",
+                    "last_evaluation_at": None,
+                }
+            # Prefer monitoring's cached provider_status; fall back to one probe.
+            codex_status = str(monitoring_payload.get("provider_status") or "not_checked")
+            if codex_status in {"not_checked", ""}:
+                try:
+                    codex_status = get_recommendation_service().provider_public_status()
+                except Exception:
+                    codex_status = "unavailable"
+            try:
+                recommendation_settings = get_recommendation_service().settings()
+            except Exception:
+                recommendation_settings = {
+                    "selected_provider": "codex-cli",
+                    "api_key_fallback_available": False,
+                    "api_key_fallback_enabled": False,
+                    "rich_notification_preview": False,
+                }
+            return monitoring_payload, codex_status, recommendation_settings
+
+        monitoring_payload, codex_status, recommendation_settings = await run_in_threadpool(
+            _bootstrap_side_state
+        )
         return JSONResponse(
             {
                 "application": {
                     "name": "Position Pilot",
                     "version": __version__,
-                    "phase": "catalyst-intelligence",
+                    "phase": "codex-monitoring",
                 },
                 "providers": {
                     "tastytrade": _configured(
                         "TASTYTRADE_CLIENT_SECRET",
                         "TASTYTRADE_REFRESH_TOKEN",
                     ),
-                    "codex": "not_checked",
+                    "codex": codex_status,
                     "massive": _configured("MASSIVE_API_KEY"),
                     "benzinga": _configured("BENZINGA_API_KEY"),
                 },
-                "monitoring": {
-                    "market_timezone": "America/New_York",
-                    "window_start": "07:30",
-                    "window_end": "18:00",
-                    "evaluation_minutes": 30,
-                    "risk_refresh_seconds": 60,
-                },
+                "monitoring": monitoring_payload,
+                "recommendations": recommendation_settings,
                 "catalysts": get_catalyst_service().public_settings(),
                 "navigation": [
                     "Overview",
@@ -587,6 +678,34 @@ def create_app(
         thesis = await run_in_threadpool(get_plans_service().get_thesis, strategy_id)
         trade_plan = await run_in_threadpool(get_plans_service().get_trade_plan, strategy_id)
         audit = await run_in_threadpool(get_plans_service().audit_history, strategy_id)
+        try:
+            recommendation = await run_in_threadpool(
+                get_recommendation_service().get,
+                SubjectType.STRATEGY,
+                strategy_id,
+            )
+        except Exception:
+            recommendation = None
+        try:
+            recommendation_history = await run_in_threadpool(
+                lambda: get_recommendation_service().history(
+                    SubjectType.STRATEGY,
+                    strategy_id,
+                    limit=20,
+                )
+            )
+        except Exception:
+            recommendation_history = []
+        try:
+            decisions = await run_in_threadpool(
+                lambda: get_recommendation_service().list_decisions(
+                    SubjectType.STRATEGY,
+                    strategy_id,
+                    limit=20,
+                )
+            )
+        except Exception:
+            decisions = []
         all_rolls = await run_in_threadpool(
             lambda: get_roll_service().chains(
                 strategy.account_id,
@@ -602,6 +721,11 @@ def create_app(
             "catalyst": catalyst.model_dump(mode="json"),
             "thesis": thesis.model_dump(mode="json") if thesis else None,
             "trade_plan": trade_plan.model_dump(mode="json") if trade_plan else None,
+            "recommendation": recommendation.model_dump(mode="json") if recommendation else None,
+            "recommendation_history": [
+                entry.model_dump(mode="json") for entry in recommendation_history
+            ],
+            "decisions": [item.model_dump(mode="json") for item in decisions],
             "audit": [event.model_dump(mode="json") for event in audit],
             "rolls": [chain.model_dump(mode="json") for chain in rolls],
             "events": [
@@ -853,6 +977,327 @@ def create_app(
         _require_session(session, active_settings.session_token)
         updates = {key: value for key, value in payload.model_dump().items() if value is not None}
         return await run_in_threadpool(get_catalyst_service().update_settings, updates)
+
+    @app.get("/api/v1/recommendations")
+    async def list_recommendations(
+        account_id: str = "all",
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> list[dict[str, Any]]:
+        _require_session(session, active_settings.session_token)
+        try:
+            records = await run_in_threadpool(
+                get_recommendation_service().list_for_account,
+                account_id,
+            )
+            return [record.model_dump(mode="json") for record in records]
+        except Exception:
+            # Never block the dashboard if Codex/recommendation store fails.
+            return []
+
+    @app.get("/api/v1/recommendations/{subject_type}/{subject_id}")
+    async def get_recommendation(
+        subject_type: str,
+        subject_id: str,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        try:
+            SubjectType(subject_type)
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST) from error
+        record = await run_in_threadpool(
+            get_recommendation_service().get,
+            subject_type,
+            subject_id,
+        )
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        return record.model_dump(mode="json")
+
+    @app.get("/api/v1/recommendations/{subject_type}/{subject_id}/history")
+    async def recommendation_history(
+        subject_type: str,
+        subject_id: str,
+        limit: int = 50,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> list[dict[str, Any]]:
+        _require_session(session, active_settings.session_token)
+        try:
+            SubjectType(subject_type)
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST) from error
+        entries = await run_in_threadpool(
+            lambda: get_recommendation_service().history(
+                subject_type,
+                subject_id,
+                limit=min(max(limit, 1), 200),
+            )
+        )
+        return [entry.model_dump(mode="json") for entry in entries]
+
+    @app.post("/api/v1/strategies/{strategy_id}/recommend")
+    async def evaluate_strategy_recommendation(
+        strategy_id: str,
+        payload: EvaluateRequest | None = None,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        force = bool(payload.force) if payload else False
+        strategy = await resolve_strategy(strategy_id)
+
+        def _run():
+            catalysts = []
+            try:
+                catalyst = get_catalyst_service().analyze_symbol(strategy.underlying)
+                catalysts = [event.model_dump(mode="json") for event in catalyst.catalysts]
+            except Exception:
+                catalysts = []
+            thesis = get_plans_service().get_thesis(strategy_id)
+            plan = get_plans_service().get_trade_plan(strategy_id)
+            return get_recommendation_service().evaluate_strategy(
+                strategy,
+                catalysts=catalysts,
+                thesis=thesis.model_dump(mode="json") if thesis else None,
+                trade_plan=plan.model_dump(mode="json") if plan else None,
+                force=force,
+            )
+
+        try:
+            record = await run_in_threadpool(_run)
+        except Exception as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Recommendation evaluation is currently unavailable.",
+            ) from error
+        return record.model_dump(mode="json")
+
+    @app.post("/api/v1/recommendations/{recommendation_id}/decisions")
+    async def record_trader_decision(
+        recommendation_id: str,
+        payload: TraderDecisionRequest,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        try:
+            decision = await run_in_threadpool(
+                lambda: get_recommendation_service().record_decision(
+                    recommendation_id=recommendation_id,
+                    decision=payload.decision,
+                    note=payload.note,
+                )
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
+        return decision.model_dump(mode="json")
+
+    @app.get("/api/v1/decisions")
+    async def list_decisions(
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        limit: int = 50,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> list[dict[str, Any]]:
+        _require_session(session, active_settings.session_token)
+        decisions = await run_in_threadpool(
+            lambda: get_recommendation_service().list_decisions(
+                subject_type,
+                subject_id,
+                limit=min(max(limit, 1), 200),
+            )
+        )
+        return [item.model_dump(mode="json") for item in decisions]
+
+    @app.get("/api/v1/alerts")
+    async def list_alerts(
+        account_id: str = "all",
+        include_resolved: bool = False,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> list[dict[str, Any]]:
+        _require_session(session, active_settings.session_token)
+        try:
+            alerts = await run_in_threadpool(
+                lambda: get_alert_service().list_alerts(
+                    account_id=account_id,
+                    include_resolved=include_resolved,
+                )
+            )
+            return [alert.model_dump(mode="json") for alert in alerts]
+        except Exception:
+            return []
+
+    @app.post("/api/v1/alerts/{alert_id}/acknowledge")
+    async def acknowledge_alert(
+        alert_id: str,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        try:
+            alert = await run_in_threadpool(get_alert_service().acknowledge, alert_id)
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
+        return alert.model_dump(mode="json")
+
+    @app.post("/api/v1/alerts/{alert_id}/snooze")
+    async def snooze_alert(
+        alert_id: str,
+        payload: AlertSnoozeRequest | None = None,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        minutes = payload.minutes if payload else 60
+        try:
+            alert = await run_in_threadpool(
+                lambda: get_alert_service().snooze(alert_id, minutes=minutes)
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
+        return alert.model_dump(mode="json")
+
+    @app.post("/api/v1/alerts/{alert_id}/resolve")
+    async def resolve_alert(
+        alert_id: str,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        try:
+            alert = await run_in_threadpool(get_alert_service().resolve, alert_id)
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from error
+        return alert.model_dump(mode="json")
+
+    @app.post("/api/v1/alerts/mute")
+    async def mute_alerts(
+        payload: AlertMuteRequest,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        rule = await run_in_threadpool(
+            lambda: get_alert_service().mute_by_rule(
+                category=payload.category,
+                alert_type=payload.alert_type,
+                symbol=payload.symbol,
+                strategy_type=payload.strategy_type,
+            )
+        )
+        return rule.model_dump(mode="json")
+
+    @app.get("/api/v1/monitoring")
+    async def monitoring_status(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        try:
+            return await run_in_threadpool(
+                lambda: get_monitoring_service().status().model_dump(mode="json")
+            )
+        except Exception as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Monitoring status is currently unavailable.",
+            ) from error
+
+    @app.put("/api/v1/monitoring/consent")
+    async def monitoring_consent(
+        payload: MonitoringConsentRequest,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+
+        def _set() -> dict[str, Any]:
+            consent = get_monitoring_service().set_consent(enabled=payload.enabled)
+            return {
+                "consent": consent.model_dump(mode="json"),
+                "status": get_monitoring_service().status().model_dump(mode="json"),
+            }
+
+        return await run_in_threadpool(_set)
+
+    @app.post("/api/v1/monitoring/evaluate")
+    async def monitoring_evaluate(
+        payload: EvaluateRequest | None = None,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        force = bool(payload.force) if payload else False
+        try:
+            return await run_in_threadpool(
+                lambda: get_monitoring_service().run_once(reason="on_demand", force=force)
+            )
+        except Exception as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="On-demand evaluation failed while core portfolio data remains available.",
+            ) from error
+
+    @app.get("/api/v1/settings/recommendations")
+    async def get_recommendation_settings(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        return await run_in_threadpool(get_recommendation_service().settings)
+
+    @app.put("/api/v1/settings/recommendations")
+    async def put_recommendation_settings(
+        payload: RecommendationSettingsRequest,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        updates = {key: value for key, value in payload.model_dump().items() if value is not None}
+        try:
+            return await run_in_threadpool(get_recommendation_service().update_settings, updates)
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
 
     @app.get("/api/v1/watchlist", response_model=WatchlistSnapshot)
     async def watchlist(
