@@ -339,6 +339,20 @@ def test_streaming_status_is_explicit_when_runtime_is_disabled() -> None:
     }
 
 
+def test_live_events_requires_a_local_session() -> None:
+    app = create_app(
+        WebSettings(
+            launch_token="launch-secret",
+            session_token="session-secret",
+            enforce_loopback=False,
+            enable_streaming=False,
+        )
+    )
+
+    denied = TestClient(app).get("/api/v1/events")
+    assert denied.status_code == 401
+
+
 def test_broker_outage_does_not_prevent_cached_dashboard_startup(monkeypatch) -> None:
     class FailingPortfolioService(StubPortfolioService):
         def latest(self, account_id: str = "all") -> PortfolioSnapshot | None:

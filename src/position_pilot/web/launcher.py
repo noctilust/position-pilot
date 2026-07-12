@@ -11,6 +11,27 @@ import uvicorn
 
 from .app import WebSettings, create_app
 
+# Bound graceful exit so Ctrl+C cannot hang forever on long-lived SSE streams.
+GRACEFUL_SHUTDOWN_SECONDS = 5
+
+
+class _DashboardServer(uvicorn.Server):
+    """Uvicorn server that can exit cleanly on Ctrl+C.
+
+    Browser EventSource connections never complete a response. Default uvicorn
+    graceful shutdown only clears keep-alive and then waits in
+    ``asyncio.Server.wait_closed()`` until every connection drops — which never
+    happens for infinite SSE. Closing transports drops those streams so the
+    wait can finish; ``timeout_graceful_shutdown`` is a safety net.
+    """
+
+    async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
+        for connection in list(self.server_state.connections):
+            transport = getattr(connection, "transport", None)
+            if transport is not None:
+                transport.close()
+        await super().shutdown(sockets=sockets)
+
 
 def _loopback_socket(host: str, port: int) -> socket.socket:
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -42,5 +63,6 @@ def run_web_dashboard(*, open_browser: bool = True) -> None:
         port=port,
         log_level="warning",
         access_log=False,
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,
     )
-    uvicorn.Server(config).run(sockets=[server_socket])
+    _DashboardServer(config).run(sockets=[server_socket])

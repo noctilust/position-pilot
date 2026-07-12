@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Annotated, Any, Protocol
 
 from dotenv import load_dotenv
-from fastapi import Cookie, FastAPI, HTTPException, Response, status
+from fastapi import Cookie, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -1752,25 +1752,43 @@ def create_app(
 
     @app.get("/api/v1/events")
     async def live_events(
+        request: Request,
         session: Annotated[
             str | None,
             Cookie(alias="position_pilot_session"),
         ] = None,
     ) -> StreamingResponse:
         _require_session(session, active_settings.session_token)
-        queue = app.state.live_hub.subscribe()
+        hub = app.state.live_hub
+        if hub is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Live events are unavailable.",
+            )
+        queue = hub.subscribe()
 
         async def stream():
+            # Poll often enough that client disconnect / transport close ends
+            # the generator promptly; still emit SSE comments every ~20s.
+            poll_seconds = 1.0
+            keepalive_seconds = 20.0
+            idle = 0.0
             try:
                 while True:
+                    if await request.is_disconnected():
+                        break
                     try:
-                        event = await asyncio.wait_for(queue.get(), timeout=20)
+                        event = await asyncio.wait_for(queue.get(), timeout=poll_seconds)
                     except TimeoutError:
-                        yield ": keepalive\n\n"
+                        idle += poll_seconds
+                        if idle >= keepalive_seconds:
+                            yield ": keepalive\n\n"
+                            idle = 0.0
                         continue
+                    idle = 0.0
                     yield f"data: {event.model_dump_json()}\n\n"
             finally:
-                app.state.live_hub.unsubscribe(queue)
+                hub.unsubscribe(queue)
 
         return StreamingResponse(
             stream(),

@@ -15,6 +15,7 @@ from .snapshots import (
     AccountSnapshot,
     DataFreshness,
     FieldProvenance,
+    FreshnessState,
     PortfolioSnapshot,
     PortfolioTotals,
     PositionHorizon,
@@ -135,9 +136,9 @@ class PortfolioService:
         return snapshot.model_copy(
             update={
                 "state": SnapshotState.CACHED,
-                "freshness": snapshot.freshness.model_copy(update={"state": "stale"}),
+                "freshness": snapshot.freshness.model_copy(update={"state": FreshnessState.STALE}),
                 "freshness_by_panel": {
-                    panel: freshness.model_copy(update={"state": "stale"})
+                    panel: freshness.model_copy(update={"state": FreshnessState.STALE})
                     for panel, freshness in snapshot.freshness_by_panel.items()
                 },
                 "notice": (f"{prefix} a cached snapshot from {timestamp}."),

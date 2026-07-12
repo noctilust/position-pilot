@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
 from position_pilot.domain.portfolio import PortfolioService
-from position_pilot.domain.snapshots import PositionHorizon, SnapshotState
+from position_pilot.domain.snapshots import FreshnessState, PositionHorizon, SnapshotState
 from position_pilot.models import Account, Greeks, Position, PositionType
 from position_pilot.persistence.sqlite import PositionPilotDatabase
 from position_pilot.providers.contracts import ProviderHealth, ProviderState, ProviderValue
@@ -84,7 +84,7 @@ def test_refresh_failure_returns_the_last_snapshot_as_cached(tmp_path) -> None:
 
     assert cached.snapshot_id == live.snapshot_id
     assert cached.state is SnapshotState.CACHED
-    assert cached.freshness.state == "stale"
+    assert cached.freshness.state is FreshnessState.STALE
     assert cached.notice is not None
     assert live.captured_at.isoformat() in cached.notice
 
