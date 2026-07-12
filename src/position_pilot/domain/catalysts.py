@@ -44,6 +44,7 @@ SOURCE_TIER_PRIORITY = {
     "established": 80,
     "specialist": 65,
     "licensed": 70,
+    "public": 45,
     "unknown": 40,
     "social": 5,
 }
@@ -52,6 +53,7 @@ SOURCE_TIER_PRIORITY = {
 class CatalystConfidence(StrEnum):
     CONFIRMED = "confirmed"
     LIKELY = "likely"
+    SUPPORTING = "supporting"
     NO_CONFIRMED_CATALYST = "no_confirmed_catalyst_found"
 
 
@@ -114,6 +116,19 @@ class OptionMechanismKind(StrEnum):
     GAMMA = "gamma"
 
 
+class FullTextProviderConsent(BaseModel):
+    """Explicit opt-in to retain full article text for a provider.
+
+    Full text is stored only when enabled is True AND the trader recorded that
+    their provider agreement permits retention and AI processing.
+    """
+
+    enabled: bool = False
+    agreement_permits_retention_and_ai: bool = False
+    consented_at: datetime | None = None
+    note: str | None = None
+
+
 class CatalystSettings(BaseModel):
     stock_move_threshold_pct: float = 2.0
     etf_move_threshold_pct: float = 1.0
@@ -122,9 +137,25 @@ class CatalystSettings(BaseModel):
     scheduled_window_hours: int = 72
     news_cadence_seconds: int = 300
     benzinga_enabled: bool = True
-    store_full_text_providers: set[str] = Field(default_factory=lambda: {"benzinga"})
+    # Default empty: metadata/excerpt only until the trader opts in per provider.
+    store_full_text_providers: set[str] = Field(default_factory=set)
+    full_text_consent: dict[str, FullTextProviderConsent] = Field(default_factory=dict)
+    public_web_enabled: bool = False
+    public_web_sources: list[dict[str, Any]] = Field(default_factory=list)
     catalyst_retention_days: int = 365
     article_metadata_retention_days: int = 90
+
+    def may_store_full_text(self, provider: str) -> bool:
+        """True only when provider is allowlisted and consent records permit retention/AI."""
+
+        key = provider.strip().lower()
+        if key not in {item.lower() for item in self.store_full_text_providers}:
+            return False
+        consent = self.full_text_consent.get(key) or self.full_text_consent.get(provider)
+        if consent is None:
+            # Legacy explicit set membership without consent record is insufficient.
+            return False
+        return bool(consent.enabled and consent.agreement_permits_retention_and_ai)
 
 
 class RawNewsItem(BaseModel):
@@ -506,9 +537,17 @@ def is_causal_candidate(item: RawNewsItem) -> bool:
     return True
 
 
+def is_supporting_candidate(item: RawNewsItem) -> bool:
+    """Relevant public-web items may be shown, but never asserted as causal proof."""
+
+    return item.source_tier == "public" and item.taxonomy in RELEVANT_TAXONOMIES
+
+
 def confidence_for_item(item: RawNewsItem) -> CatalystConfidence | None:
     """Require reliable source plus relevant taxonomy for Likely/Confirmed."""
 
+    if is_supporting_candidate(item):
+        return CatalystConfidence.SUPPORTING
     if not is_causal_candidate(item):
         return None
     if (
@@ -584,6 +623,9 @@ def parse_raw_news_payload(symbol: str, provider: str, value: Any) -> list[RawNe
         excerpt = row.get("description") or row.get("teaser") or row.get("excerpt")
         full_text = row.get("body") or row.get("full_text") or row.get("text")
         tier = str(row.get("source_tier") or classify_source_tier(source_name, provider))
+        # Public-web evidence is hard-capped at the public trust tier.
+        if str(provider) == "public-web" or str(row.get("provider") or "") == "public-web":
+            tier = "public"
         taxonomy = row.get("taxonomy")
         if isinstance(taxonomy, EventTaxonomy):
             tax = taxonomy
@@ -758,28 +800,37 @@ class CatalystService:
             # Do not overwrite a good cache with empty UNAVAILABLE results.
             return result
 
-        for provider in providers:
+        # Higher-priority licensed/configured providers first. Public-web is gap-gated:
+        # invoked only when Massive/Benzinga/Tastytrade produce no useful results.
+        primary_providers = [
+            provider for provider in providers if getattr(provider, "name", "") != "public-web"
+        ]
+        public_providers = [
+            provider for provider in providers if getattr(provider, "name", "") == "public-web"
+        ]
+
+        def _consume_provider(provider: object) -> None:
+            nonlocal configured_count, providers_ok, providers_failed
             name = getattr(provider, "name", "provider")
             health = None
             try:
-                health = provider.health()
+                health = provider.health()  # type: ignore[attr-defined]
             except Exception:
                 health = None
             state = getattr(health, "state", None) if health is not None else None
             if state is not None and str(state) == "not_configured":
                 coverage_notes.append(f"{name} not configured")
-                continue
+                return
             configured_count += 1
             try:
-                payload = provider.news(normalized, scheduled_start, now)
+                payload = provider.news(normalized, scheduled_start, now)  # type: ignore[attr-defined]
             except Exception as error:
                 providers_failed += 1
                 coverage_notes.append(f"{name} unavailable: {type(error).__name__}")
-                continue
+                return
             if payload is None:
-                # Distinguish empty healthy vs unhealthy None.
                 try:
-                    health = provider.health()
+                    health = provider.health()  # type: ignore[attr-defined]
                     state = getattr(health, "state", None)
                 except Exception:
                     state = None
@@ -789,9 +840,32 @@ class CatalystService:
                 else:
                     providers_ok += 1
                     coverage_notes.append(f"{name} returned no news in window (healthy empty)")
-                continue
+                return
             providers_ok += 1
-            raw_items.extend(parse_raw_news_payload(normalized, payload.provider, payload.value))
+            parsed = parse_raw_news_payload(normalized, payload.provider, payload.value)
+            # Public-web can never elevate source_tier via payload self-assertion.
+            if name == "public-web":
+                for item in parsed:
+                    item.source_tier = "public"
+            raw_items.extend(parsed)
+
+        for provider in primary_providers:
+            _consume_provider(provider)
+
+        # Gap gate: public-web only when higher-priority sources lack *useful*
+        # causal/evidence candidates (taxonomy + reliability), not merely any raw article.
+        primary_useful = any(is_causal_candidate(item) for item in raw_items)
+        if public_providers and not primary_useful:
+            if raw_items:
+                coverage_notes.append(
+                    "public-web consulted (upstream items lacked causal/evidence candidates)"
+                )
+            for provider in public_providers:
+                _consume_provider(provider)
+        elif public_providers and primary_useful:
+            coverage_notes.append(
+                "public-web skipped (higher-priority sources returned useful evidence)"
+            )
 
         if configured_count == 0:
             coverage = CoverageState.UNAVAILABLE
@@ -874,7 +948,7 @@ class CatalystService:
                         published_at=item.published_at,
                     )
                 )
-            elif is_causal_candidate(item):
+            elif is_causal_candidate(item) or is_supporting_candidate(item):
                 evidence_items.append(item)
             # Weak/unknown/OTHER dropped from causal evidence (not social, not causal).
 
@@ -1054,6 +1128,9 @@ class CatalystService:
             benzinga_status = "not_configured"
         else:
             benzinga_status = "enabled"
+
+        full_text = self._public_full_text_settings(stored)
+        public_web = self._public_web_settings(stored)
         return {
             "stock_move_threshold_pct": stored.get(
                 "stock_move_threshold_pct", self.settings.stock_move_threshold_pct
@@ -1069,18 +1146,131 @@ class CatalystService:
                 "status": benzinga_status,
             },
             "scheduled_window_hours": self.settings.scheduled_window_hours,
+            "store_full_text": full_text,
+            "public_web": public_web,
+            "full_text_warning": (
+                "Full article text is NOT stored by default. Position Pilot keeps "
+                "metadata and short excerpts only unless you explicitly enable a "
+                "provider below AND confirm your provider agreement permits "
+                "retention and AI processing. You can clear stored full text at any time."
+            ),
+        }
+
+    def _public_full_text_settings(self, stored: dict[str, Any]) -> dict[str, Any]:
+        raw_providers = stored.get("store_full_text_providers")
+        if raw_providers is None:
+            providers = sorted(self.settings.store_full_text_providers)
+        else:
+            providers = sorted({str(item).lower() for item in raw_providers})
+        raw_consent = stored.get("full_text_consent") or {}
+        consent_out: dict[str, dict[str, Any]] = {}
+        if isinstance(raw_consent, dict):
+            for provider, payload in raw_consent.items():
+                try:
+                    consent = FullTextProviderConsent.model_validate(payload)
+                except Exception:
+                    continue
+                consent_out[str(provider).lower()] = {
+                    "enabled": consent.enabled,
+                    "agreement_permits_retention_and_ai": (
+                        consent.agreement_permits_retention_and_ai
+                    ),
+                    "consented_at": consent.consented_at.isoformat()
+                    if consent.consented_at
+                    else None,
+                    "active": bool(consent.enabled and consent.agreement_permits_retention_and_ai),
+                }
+        return {
+            "providers": providers,
+            "consent": consent_out,
+            "default_providers": [],
+            "mode": "metadata_and_excerpt_only"
+            if not any(item.get("active") for item in consent_out.values())
+            else "opt_in_full_text",
+        }
+
+    def _public_web_settings(self, stored: dict[str, Any]) -> dict[str, Any]:
+        enabled = bool(stored.get("public_web_enabled", self.settings.public_web_enabled))
+        sources = stored.get("public_web_sources", self.settings.public_web_sources) or []
+        safe_sources = []
+        if isinstance(sources, list):
+            for item in sources:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                template = str(item.get("url_template") or item.get("url") or "").strip()
+                if not name or not template:
+                    continue
+                safe_sources.append(
+                    {
+                        "name": name,
+                        "url_template": template,
+                        "format": str(item.get("format") or "auto"),
+                        "source_tier": "public",
+                        "enabled": bool(item.get("enabled", True)),
+                    }
+                )
+        status = "disabled"
+        if enabled and safe_sources:
+            status = "enabled"
+        elif enabled:
+            status = "not_configured"
+        return {
+            "enabled": enabled and bool(safe_sources),
+            "status": status,
+            "sources": safe_sources,
+            "note": (
+                "Public web sources run only after Tastytrade/Massive/Benzinga gaps. "
+                "Off by default until sources are configured. Robots, login walls, "
+                "paywalls, and CAPTCHAs are never bypassed."
+            ),
         }
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         current = self.database.get_setting("catalysts", {}) or {}
+        # Capture pre-update active consent from live settings + stored snapshot.
+        previous_active = {
+            provider.lower()
+            for provider in self.settings.store_full_text_providers
+            if self.settings.may_store_full_text(provider)
+        } | self._active_full_text_providers(current)
         allowed = {
             "stock_move_threshold_pct",
             "etf_move_threshold_pct",
             "news_cadence_seconds",
             "benzinga_enabled",
+            "public_web_enabled",
+            "public_web_sources",
+            "store_full_text_providers",
+            "full_text_consent",
+            "clear_full_text_provider",
         }
         for key, value in payload.items():
-            if key in allowed:
+            if key not in allowed:
+                continue
+            if key == "clear_full_text_provider":
+                continue
+            if key == "store_full_text_providers":
+                if value is None:
+                    current[key] = []
+                elif isinstance(value, (list, set, tuple)):
+                    current[key] = sorted(
+                        {str(item).lower() for item in value if str(item).strip()}
+                    )
+                else:
+                    continue
+            elif key == "full_text_consent":
+                # Merge with existing consent so partial updates don't drop keys.
+                merged = dict(current.get("full_text_consent") or {})
+                normalized = self._normalize_full_text_consent(value)
+                if isinstance(merged, dict):
+                    merged.update(normalized)
+                    current[key] = merged
+                else:
+                    current[key] = normalized
+            elif key == "public_web_sources":
+                current[key] = self._normalize_public_web_sources(value)
+            else:
                 current[key] = value
         self.database.set_setting("catalysts", current)
         if "stock_move_threshold_pct" in current:
@@ -1091,7 +1281,125 @@ class CatalystService:
             self.settings.news_cadence_seconds = int(current["news_cadence_seconds"])
         if "benzinga_enabled" in current:
             self.settings.benzinga_enabled = bool(current["benzinga_enabled"])
+        if "public_web_enabled" in current:
+            self.settings.public_web_enabled = bool(current["public_web_enabled"])
+        if "public_web_sources" in current and isinstance(current["public_web_sources"], list):
+            self.settings.public_web_sources = list(current["public_web_sources"])
+        if "store_full_text_providers" in current:
+            self.settings.store_full_text_providers = {
+                str(item).lower() for item in (current.get("store_full_text_providers") or [])
+            }
+        if "full_text_consent" in current and isinstance(current["full_text_consent"], dict):
+            consent_map: dict[str, FullTextProviderConsent] = {}
+            for provider, raw in current["full_text_consent"].items():
+                try:
+                    consent_map[str(provider).lower()] = FullTextProviderConsent.model_validate(raw)
+                except Exception:
+                    continue
+            self.settings.full_text_consent = consent_map
+
+        # Domain invariant: revoke stored full text when consent becomes inactive.
+        # Does not depend on a UI clear flag.
+        next_active = {
+            provider.lower()
+            for provider in self.settings.store_full_text_providers
+            if self.settings.may_store_full_text(provider)
+        } | self._active_full_text_providers(current)
+        revoked = previous_active - next_active
+        for provider in sorted(revoked):
+            self.clear_stored_full_text(provider=provider)
+
+        clear_provider = payload.get("clear_full_text_provider")
+        if isinstance(clear_provider, str) and clear_provider.strip():
+            self.clear_stored_full_text(provider=clear_provider.strip().lower())
         return self.public_settings()
+
+    def _active_full_text_providers(self, stored: dict[str, Any] | None = None) -> set[str]:
+        """Providers currently permitted to retain full text."""
+
+        data = stored if stored is not None else (self.database.get_setting("catalysts", {}) or {})
+        stored_allow = data.get("store_full_text_providers")
+        allow_source = (
+            stored_allow if stored_allow is not None else self.settings.store_full_text_providers
+        )
+        allow = {str(item).lower() for item in allow_source if str(item).strip()}
+        raw_consent = data.get("full_text_consent") or {}
+        active: set[str] = set()
+        if not isinstance(raw_consent, dict):
+            return active
+        for provider, payload in raw_consent.items():
+            key = str(provider).lower()
+            if key not in allow:
+                continue
+            try:
+                consent = FullTextProviderConsent.model_validate(payload)
+            except Exception:
+                continue
+            if consent.enabled and consent.agreement_permits_retention_and_ai:
+                active.add(key)
+        return active
+
+    def clear_stored_full_text(self, *, provider: str | None = None) -> int:
+        """Null out retained full article text (all providers or one)."""
+
+        return self.database.clear_stored_catalyst_full_text(provider=provider)
+
+    @staticmethod
+    def _normalize_full_text_consent(value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        out: dict[str, Any] = {}
+        now = datetime.now(UTC)
+        for provider, raw in value.items():
+            if not isinstance(raw, dict):
+                continue
+            enabled = bool(raw.get("enabled", False))
+            permits = bool(raw.get("agreement_permits_retention_and_ai", False))
+            consented_at = raw.get("consented_at")
+            if enabled and permits and not consented_at:
+                consented_at = now.isoformat()
+            if not enabled:
+                consented_at = raw.get("consented_at")
+            out[str(provider).lower()] = {
+                "enabled": enabled,
+                "agreement_permits_retention_and_ai": permits,
+                "consented_at": consented_at,
+                "note": raw.get("note"),
+            }
+        return out
+
+    @staticmethod
+    def _normalize_public_web_sources(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            template = str(item.get("url_template") or item.get("url") or "").strip()
+            if not name or not template:
+                continue
+            # Basic URL scheme guard — no javascript: or file: sources.
+            if not (
+                template.startswith("http://")
+                or template.startswith("https://")
+                or "{symbol}" in template.lower()
+            ):
+                continue
+            if template.startswith("javascript:") or template.startswith("file:"):
+                continue
+            out.append(
+                {
+                    "name": name[:120],
+                    "url_template": template[:2_000],
+                    "format": str(item.get("format") or "auto")[:20],
+                    # Always public — client cannot elevate evidence trust.
+                    "source_tier": "public",
+                    "enabled": bool(item.get("enabled", True)),
+                }
+            )
+        return out[:50]
 
     def _move_input(self, symbol: str) -> SymbolMoveInput | None:
         if self.quote_source is None:
@@ -1535,7 +1843,7 @@ class CatalystService:
                     }
                 )
         for item in raw_items:
-            store_full = item.provider in self.settings.store_full_text_providers
+            store_full = self.settings.may_store_full_text(item.provider)
             self.database.upsert_catalyst_article(
                 {
                     "article_id": hashlib.sha256(

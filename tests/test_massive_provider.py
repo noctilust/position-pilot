@@ -67,6 +67,40 @@ def test_massive_stock_snapshot_accepts_top_level_ticker_payload() -> None:
     assert result.value == 550.1
 
 
+def test_massive_stock_quote_batch_is_chunk_bounded() -> None:
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        symbols = request.url.params["tickers"].split(",")
+        return httpx.Response(
+            200,
+            json={
+                "tickers": [
+                    {
+                        "ticker": symbol,
+                        "lastQuote": {"p": 10.0, "P": 10.2},
+                        "lastTrade": {"p": 10.1},
+                    }
+                    for symbol in symbols
+                ]
+            },
+        )
+
+    provider = MassiveProvider(
+        api_key="massive-secret",
+        client=httpx.Client(transport=httpx.MockTransport(respond)),
+        clock=lambda: datetime(2026, 7, 11, 17, 0, tzinfo=UTC),
+    )
+    symbols = [f"Q{index:03d}" for index in range(100)]
+    result = provider.fetch_batch("stock.quote", symbols, chunk_size=50)
+
+    assert len(result) == 100
+    assert len(requests) == 2
+    assert all(request.url.path.endswith("/tickers") for request in requests)
+    assert result["Q000"].value["mark"] == 10.1
+
+
 def test_massive_option_fields_share_snapshot_cache_and_include_iv() -> None:
     requests: list[httpx.Request] = []
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -12,39 +11,6 @@ from pydantic import BaseModel
 from ..persistence.sqlite import PositionPilotDatabase
 from .account import AccountStreamEvent
 from .dxlink import MarketStreamEvent
-
-PRIVATE_NORMALIZED_KEYS = {
-    "accountid",
-    "accountnumber",
-    "complexorderid",
-    "customerid",
-    "externalid",
-    "orderid",
-    "transactionid",
-    "userid",
-    "username",
-}
-
-
-def _is_private_key(key: str) -> bool:
-    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
-    if normalized in PRIVATE_NORMALIZED_KEYS:
-        return True
-    return bool(
-        re.search(r"(?:^|[-_])id$", key, flags=re.IGNORECASE)
-        or re.search(r"(?:Id|ID)$", key)
-        or normalized.endswith("username")
-        or normalized.endswith("accountname")
-        or normalized in {"firstname", "lastname", "fullname", "email"}
-    )
-
-
-def _redact(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: _redact(item) for key, item in value.items() if not _is_private_key(str(key))}
-    if isinstance(value, list):
-        return [_redact(item) for item in value]
-    return value
 
 
 class LiveEvent(BaseModel):
@@ -81,17 +47,34 @@ class LiveStateHub:
         )
 
     async def publish_account(self, event: AccountStreamEvent) -> None:
-        broker_number = event.data.get("account-number") or event.data.get("account_number")
+        """Publish a minimal reconcile signal for an account stream event.
+
+        Browser-facing payload contains only:
+        - event_type (on LiveEvent)
+        - opaque account_id (resolved via local DB)
+        - timestamp
+        - reconcile=true
+
+        Raw broker data, numeric fields, symbols, status strings, and any
+        values under allowed-looking keys are never forwarded. The browser
+        reconciles portfolio state via typed REST snapshots.
+        """
+
+        raw = event.data if isinstance(event.data, dict) else {}
+        broker_number = raw.get("account-number") or raw.get("account_number")
         account_id = (
             self.database.account_id_for_broker_number(str(broker_number))
             if broker_number
             else None
         )
-        data = _redact(event.data)
         await self.publish(
             LiveEvent(
                 event_type=f"account.{event.event_type}",
-                payload={"account_id": account_id, "data": data, "timestamp": event.timestamp},
+                payload={
+                    "account_id": account_id,
+                    "timestamp": event.timestamp,
+                    "reconcile": True,
+                },
                 received_at=datetime.now(UTC),
             )
         )

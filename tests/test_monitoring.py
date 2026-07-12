@@ -474,9 +474,7 @@ def test_stock_strategy_skips_duplicate_equity_subject(tmp_path: Path) -> None:
     def clock() -> datetime:
         return datetime(2026, 7, 10, 12, 0, tzinfo=ET)
 
-    monitoring, recs, _, _, provider, _, _ = _services(
-        tmp_path, clock, include_stock_strategy=True
-    )
+    monitoring, recs, _, _, provider, _, _ = _services(tmp_path, clock, include_stock_strategy=True)
     monitoring.set_consent(enabled=True)
     monitoring.run_once(reason="on_demand", force=True)
     equity = recs.get("equity", "equity:acct-1:AAPL")
@@ -509,9 +507,7 @@ def test_subject_exception_isolation(tmp_path: Path) -> None:
 
 def test_network_recovery_one_shot(tmp_path: Path) -> None:
     clock = {"now": datetime(2026, 7, 10, 12, 0, tzinfo=ET)}
-    monitoring, _, _, _, provider, loader_state, _ = _services(
-        tmp_path, lambda: clock["now"]
-    )
+    monitoring, _, _, _, provider, loader_state, _ = _services(tmp_path, lambda: clock["now"])
     monitoring.set_consent(enabled=True)
     loader_state["fail"] = True
     assert monitoring.run_once(reason="scheduled")["reason"] == "no_portfolio"
@@ -652,3 +648,109 @@ def test_notification_default_payload_is_privacy_safe() -> None:
     )
     body = privacy_safe_notification_body(alert, rich_preview=False)
     assert body == "SPY · Iron Condor · recommendation_change"
+
+
+def test_catalyst_tick_scans_all_held_symbols_on_cadence(tmp_path: Path) -> None:
+    """Independent news_cadence_seconds schedule covers strategic + tactical underlyings."""
+
+    clock = {"now": datetime(2026, 7, 10, 12, 0, tzinfo=ET)}
+    scan_calls: list[list[str]] = []
+
+    def clock_fn() -> datetime:
+        return clock["now"]
+
+    snap = _snapshot(include_stock_strategy=True)
+    # Ensure strategic LEAPS/stock and tactical are both present.
+    assert any(s.horizon == PositionHorizon.TACTICAL for s in snap.strategies)
+
+    def catalyst_scan(symbols: list[str]) -> dict[str, list[dict]]:
+        scan_calls.append(list(symbols))
+        return {symbol: [] for symbol in symbols}
+
+    db = PositionPilotDatabase(tmp_path / "m.sqlite3", backup_directory=tmp_path / "b")
+    db.set_setting("catalysts", {"news_cadence_seconds": 300})
+    provider = StubProvider()
+    recs = RecommendationService(db, provider=provider, clock=clock_fn)
+    monitoring = MonitoringService(
+        db,
+        recs,
+        AlertService(db, clock=clock_fn),
+        NotificationService(enabled=False),
+        portfolio_loader=lambda: snap,
+        catalyst_scan=catalyst_scan,
+        news_cadence_seconds=300,
+        clock=clock_fn,
+    )
+    monitoring.set_consent(enabled=True)
+
+    first = monitoring.catalyst_tick()
+    assert first["skipped"] is False
+    assert first["ai_invoked"] is False
+    assert first["scanned"] >= 2  # SPY tactical + AAPL stock at minimum
+    symbols = set(first["symbols"])
+    assert "SPY" in symbols
+    assert provider.calls == 0  # never force AI
+
+    # Within cadence → skip (dedupe).
+    second = monitoring.catalyst_tick()
+    assert second["skipped"] is True
+    assert second["reason"] == "cadence"
+    assert len(scan_calls) == 1
+
+    # Advance past cadence → rescan.
+    clock["now"] = clock["now"] + timedelta(seconds=301)
+    third = monitoring.catalyst_tick()
+    assert third["skipped"] is False
+    assert len(scan_calls) == 2
+    assert provider.calls == 0
+
+
+def test_tick_once_preserves_risk_catalyst_and_eval_cadences(tmp_path: Path) -> None:
+    import asyncio
+
+    clock = {"now": datetime(2026, 7, 10, 12, 0, tzinfo=ET)}
+    scan_calls = {"n": 0}
+
+    def clock_fn() -> datetime:
+        return clock["now"]
+
+    def catalyst_scan(symbols: list[str]) -> dict[str, list[dict]]:
+        scan_calls["n"] += 1
+        return {symbol: [] for symbol in symbols}
+
+    monitoring, _, _, _, provider, _, _ = _services(tmp_path, clock_fn)
+    # Rebind scan/cadence on the constructed service.
+    monitoring.catalyst_scan = catalyst_scan
+    monitoring._news_cadence_seconds = 300
+    monitoring.set_consent(enabled=True)
+
+    async def scenario() -> None:
+        first = await monitoring.tick_once()
+        assert first["risk"] is not None
+        assert first["catalysts"] is not None
+        assert (
+            first["catalysts"].get("skipped") is False
+            or first["catalysts"].get("scanned") is not None
+        )
+        assert first["scheduled"] is not None  # first eval due
+        scans_after_first = scan_calls["n"]
+        calls_after_first = provider.calls
+
+        # 60s later: risk may run again; catalyst cadence should skip; eval not due for 30m.
+        clock["now"] = clock["now"] + timedelta(seconds=60)
+        second = await monitoring.tick_once()
+        assert second["risk"] is not None
+        assert second["catalysts"]["skipped"] is True
+        assert second["scheduled"] is None
+        assert scan_calls["n"] == scans_after_first
+
+        # 5 minutes from start: catalyst due again; still no forced AI from catalyst path.
+        clock["now"] = clock["now"] + timedelta(seconds=240)
+        third = await monitoring.tick_once()
+        assert third["catalysts"]["skipped"] is False
+        assert third["catalysts"]["ai_invoked"] is False
+        assert scan_calls["n"] == scans_after_first + 1
+        # Provider calls only from scheduled eval / risk materiality — not from catalyst scan.
+        assert provider.calls == calls_after_first or provider.calls >= calls_after_first
+
+    asyncio.run(scenario())

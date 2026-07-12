@@ -432,10 +432,48 @@ def test_feedback_is_immutable_and_only_adjusts_local_ranking(tmp_path) -> None:
     assert len(service.feedback_history(catalyst_id)) == 2
 
 
+def test_default_store_full_text_providers_empty_metadata_only(tmp_path) -> None:
+    """Default is metadata/excerpt only — no full text without explicit consent."""
+
+    database = PositionPilotDatabase(tmp_path / "db.sqlite3")
+    settings = CatalystSettings()  # empty store_full_text_providers by default
+    assert settings.store_full_text_providers == set()
+    service = _service(
+        database,
+        news_providers=[
+            StubNewsProvider(
+                "benzinga",
+                [
+                    _item(
+                        title="Licensed story",
+                        provider="benzinga",
+                        body="SHOULD NOT STORE",
+                        url="https://bz.example/default-empty",
+                    ),
+                ],
+            )
+        ],
+        settings=settings,
+    )
+    service.analyze_symbol("AAPL")
+    articles = database.list_catalyst_articles("AAPL")
+    assert articles
+    assert all(a["full_text"] is None for a in articles)
+    assert any(a.get("excerpt") for a in articles)
+
+
 def test_retention_policy_and_license_dependent_full_text(tmp_path) -> None:
     database = PositionPilotDatabase(tmp_path / "db.sqlite3")
+    from position_pilot.domain.catalysts import FullTextProviderConsent
+
     settings = CatalystSettings(
         store_full_text_providers={"benzinga"},
+        full_text_consent={
+            "benzinga": FullTextProviderConsent(
+                enabled=True,
+                agreement_permits_retention_and_ai=True,
+            )
+        },
         catalyst_retention_days=365,
         article_metadata_retention_days=90,
     )
@@ -487,9 +525,54 @@ def test_retention_policy_and_license_dependent_full_text(tmp_path) -> None:
     assert pruned["events"] >= 0
 
 
+def test_full_text_opt_in_requires_agreement_flag(tmp_path) -> None:
+    database = PositionPilotDatabase(tmp_path / "db.sqlite3")
+    from position_pilot.domain.catalysts import FullTextProviderConsent
+
+    # Enabled without agreement flag → still metadata only.
+    settings = CatalystSettings(
+        store_full_text_providers={"benzinga"},
+        full_text_consent={
+            "benzinga": FullTextProviderConsent(
+                enabled=True,
+                agreement_permits_retention_and_ai=False,
+            )
+        },
+    )
+    service = _service(
+        database,
+        news_providers=[
+            StubNewsProvider(
+                "benzinga",
+                [
+                    _item(
+                        title="No agreement",
+                        provider="benzinga",
+                        body="secret",
+                        url="https://bz.example/no-agree",
+                    )
+                ],
+            )
+        ],
+        settings=settings,
+    )
+    service.analyze_symbol("AAPL")
+    assert all(a["full_text"] is None for a in database.list_catalyst_articles("AAPL"))
+
+
 def test_removal_notice_clears_licensed_full_text(tmp_path) -> None:
     database = PositionPilotDatabase(tmp_path / "db.sqlite3")
-    settings = CatalystSettings(store_full_text_providers={"benzinga"})
+    from position_pilot.domain.catalysts import FullTextProviderConsent
+
+    settings = CatalystSettings(
+        store_full_text_providers={"benzinga"},
+        full_text_consent={
+            "benzinga": FullTextProviderConsent(
+                enabled=True,
+                agreement_permits_retention_and_ai=True,
+            )
+        },
+    )
     service = _service(
         database,
         news_providers=[
@@ -1187,3 +1270,113 @@ def test_retention_prunes_snapshots_and_removal_clears_excerpts(tmp_path) -> Non
     pruned = service.apply_retention(now=FIXED_NOW)
     assert pruned["snapshots"] >= 1
     assert pruned.get("events", 0) >= 0
+
+
+def test_full_text_revoked_when_consent_disabled(tmp_path) -> None:
+    """Domain invariant clears stored full_text without UI clear flag."""
+
+    from position_pilot.domain.catalysts import FullTextProviderConsent
+
+    database = PositionPilotDatabase(tmp_path / "db.sqlite3")
+    settings = CatalystSettings(
+        store_full_text_providers={"benzinga"},
+        full_text_consent={
+            "benzinga": FullTextProviderConsent(
+                enabled=True,
+                agreement_permits_retention_and_ai=True,
+            )
+        },
+    )
+    service = _service(
+        database,
+        news_providers=[
+            StubNewsProvider(
+                "benzinga",
+                [
+                    _item(
+                        title="Licensed",
+                        provider="benzinga",
+                        body="FULL BODY TEXT",
+                        url="https://bz.example/revoke",
+                    )
+                ],
+            )
+        ],
+        settings=settings,
+    )
+    service.analyze_symbol("AAPL")
+    articles = database.list_catalyst_articles("AAPL")
+    assert any(a["full_text"] == "FULL BODY TEXT" for a in articles)
+
+    # Disable consent (no clear_full_text_provider flag).
+    service.update_settings(
+        {
+            "full_text_consent": {
+                "benzinga": {
+                    "enabled": False,
+                    "agreement_permits_retention_and_ai": False,
+                }
+            }
+        }
+    )
+    articles_after = database.list_catalyst_articles("AAPL")
+    assert all(a["full_text"] is None for a in articles_after)
+
+
+def test_full_text_revoked_when_removed_from_allowlist(tmp_path) -> None:
+    from position_pilot.domain.catalysts import FullTextProviderConsent
+
+    database = PositionPilotDatabase(tmp_path / "db.sqlite3")
+    settings = CatalystSettings(
+        store_full_text_providers={"benzinga"},
+        full_text_consent={
+            "benzinga": FullTextProviderConsent(
+                enabled=True,
+                agreement_permits_retention_and_ai=True,
+            )
+        },
+    )
+    service = _service(
+        database,
+        news_providers=[
+            StubNewsProvider(
+                "benzinga",
+                [
+                    _item(
+                        title="Licensed",
+                        provider="benzinga",
+                        body="KEEP UNTIL REVOKE",
+                        url="https://bz.example/allowlist",
+                    )
+                ],
+            )
+        ],
+        settings=settings,
+    )
+    service.analyze_symbol("AAPL")
+    assert any(a["full_text"] for a in database.list_catalyst_articles("AAPL"))
+
+    service.update_settings({"store_full_text_providers": []})
+    assert all(a["full_text"] is None for a in database.list_catalyst_articles("AAPL"))
+
+
+def test_database_clear_stored_catalyst_full_text_is_public(tmp_path) -> None:
+    database = PositionPilotDatabase(tmp_path / "db.sqlite3")
+    database.upsert_catalyst_article(
+        {
+            "article_id": "a1",
+            "symbol": "AAPL",
+            "provider": "benzinga",
+            "url": "https://bz.example/a1",
+            "title": "T",
+            "source_name": "BZ",
+            "published_at": FIXED_NOW.isoformat(),
+            "excerpt": "ex",
+            "full_text": "BODY",
+            "stored_at": FIXED_NOW.isoformat(),
+        }
+    )
+    cleared = database.clear_stored_catalyst_full_text(provider="benzinga")
+    assert cleared >= 1
+    rows = database.list_catalyst_articles("AAPL")
+    assert rows and rows[0]["full_text"] is None

@@ -37,6 +37,16 @@ class TastytradeProvider:
                 checked_at=checked_at,
             )
             return None
+
+        if field in {
+            "stock.metrics",
+            "stock.iv",
+            "stock.iv_rank",
+            "stock.iv_percentile",
+            "stock.liquidity",
+        }:
+            return self._fetch_metrics(field, symbol, checked_at=checked_at)
+
         quote = self.client.get_quote(symbol)
         if not quote:
             self._health = ProviderHealth(
@@ -68,6 +78,63 @@ class TastytradeProvider:
             checked_at=checked_at,
             last_success_at=checked_at,
         )
+        return ProviderValue(
+            field=field,
+            value=value,
+            provider=self.name,
+            observed_at=checked_at,
+        )
+
+    def _fetch_metrics(
+        self, field: str, symbol: str, *, checked_at: datetime
+    ) -> ProviderValue | None:
+        try:
+            metrics = self.client.get_market_metrics(symbol) or {}
+        except Exception as error:
+            self._health = ProviderHealth(
+                provider=self.name,
+                state=ProviderState.UNAVAILABLE,
+                checked_at=checked_at,
+                error=type(error).__name__,
+            )
+            return None
+        if not metrics:
+            self._health = ProviderHealth(
+                provider=self.name,
+                state=ProviderState.UNAVAILABLE,
+                checked_at=checked_at,
+                error="metrics_unavailable",
+            )
+            return None
+        self._health = ProviderHealth(
+            provider=self.name,
+            state=ProviderState.HEALTHY,
+            checked_at=checked_at,
+            last_success_at=checked_at,
+        )
+        if field == "stock.metrics":
+            value: object = {
+                key: metrics.get(key)
+                for key in (
+                    "implied_volatility",
+                    "iv_rank",
+                    "iv_percentile",
+                    "liquidity_rating",
+                )
+                if metrics.get(key) is not None
+            }
+            if not value:
+                return None
+        else:
+            key_map = {
+                "stock.iv": "implied_volatility",
+                "stock.iv_rank": "iv_rank",
+                "stock.iv_percentile": "iv_percentile",
+                "stock.liquidity": "liquidity_rating",
+            }
+            value = metrics.get(key_map[field])
+            if value is None:
+                return None
         return ProviderValue(
             field=field,
             value=value,

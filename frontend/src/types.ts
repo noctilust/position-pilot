@@ -5,6 +5,13 @@ export type ProviderState =
   | "signed_out"
   | "unavailable";
 
+export type FullTextProviderConsent = {
+  enabled: boolean;
+  agreement_permits_retention_and_ai: boolean;
+  consented_at: string | null;
+  active: boolean;
+};
+
 export type CatalystSettings = {
   stock_move_threshold_pct: number;
   etf_move_threshold_pct: number;
@@ -14,6 +21,25 @@ export type CatalystSettings = {
     status: string;
   };
   scheduled_window_hours: number;
+  store_full_text?: {
+    providers: string[];
+    consent: Record<string, FullTextProviderConsent>;
+    default_providers: string[];
+    mode: string;
+  };
+  public_web?: {
+    enabled: boolean;
+    status: string;
+    sources: Array<{
+      name: string;
+      url_template: string;
+      format: string;
+      source_tier: string;
+      enabled: boolean;
+    }>;
+    note: string;
+  };
+  full_text_warning?: string;
 };
 
 export type RecommendationSettings = {

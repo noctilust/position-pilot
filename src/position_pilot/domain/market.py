@@ -63,21 +63,22 @@ class ProviderRoutedMarketSource:
         return quote
 
     def get_quotes_batch(self, symbols: list[str], force_refresh: bool = False) -> dict[str, dict]:
-        """Batch primary quotes first, then resolve every miss via FieldRouter/get_quote.
+        """Batch primary quotes first, then batch every fallback-provider miss.
 
         Healthy full-primary batches stay one bounded call. Missing/failed symbols
-        (absent keys, empty payloads, or unusable marks) fall through to the router
-        so Massive provenance and fallback_reason are preserved.
+        use provider batch contracts so a 100-symbol watchlist remains O(chunks).
         """
 
         normalized = [str(symbol).upper() for symbol in symbols]
         out: dict[str, dict] = {}
+        primary_reason = "tastytrade returned no value"
         batch = getattr(self.primary, "get_quotes_batch", None)
         if callable(batch) and normalized:
             try:
                 raw = batch(list(normalized), force_refresh=force_refresh) or {}
-            except Exception:
+            except Exception as error:
                 raw = {}
+                primary_reason = f"tastytrade failed: {type(error).__name__}"
             observed = datetime.now(UTC)
             for symbol, payload in raw.items():
                 key = str(symbol).upper()
@@ -91,33 +92,404 @@ class ProviderRoutedMarketSource:
                 )
                 out[key] = quote
         missing = [symbol for symbol in normalized if symbol not in out]
-        for symbol in missing:
-            quote = self.get_quote(symbol, force_refresh=force_refresh)
-            if quote is not None:
-                out[symbol] = quote
+        route = [
+            name for name in self.router.routes.get("stock.quote", []) if name != "tastytrade"
+        ]
+        for provider_name in route:
+            if not missing:
+                break
+            provider = self.router.providers.get(provider_name)
+            fetch_batch = getattr(provider, "fetch_batch", None) if provider is not None else None
+            if not callable(fetch_batch):
+                continue
+            try:
+                values = fetch_batch("stock.quote", list(missing), chunk_size=50) or {}
+            except Exception:
+                continue
+            for symbol, provider_value in values.items():
+                key = str(symbol).upper()
+                if key not in missing:
+                    continue
+                value = getattr(provider_value, "value", provider_value)
+                quote = dict(value) if isinstance(value, dict) else {"mark": value}
+                if quote.get("mark") is None and quote.get("last") is None:
+                    continue
+                quote["__provenance__"] = {
+                    "provider": getattr(provider_value, "provider", provider_name),
+                    "observed_at": getattr(provider_value, "observed_at", datetime.now(UTC)),
+                    "fallback_reason": primary_reason,
+                }
+                out[key] = quote
+            missing = [symbol for symbol in missing if symbol not in out]
+        # Preserve compatibility with simple providers for small requests without
+        # allowing a failed 100-symbol primary batch to fan out into 100 calls.
+        if 0 < len(missing) <= 20:
+            for symbol in list(missing):
+                quote = self.get_quote(symbol, force_refresh=force_refresh)
+                if quote is not None:
+                    out[symbol] = quote
         return out
 
+    # IV / liquidity / options-related metric keys that may fall back via FieldRouter.
+    _METRIC_FIELDS = (
+        "implied_volatility",
+        "iv_rank",
+        "iv_percentile",
+        "liquidity_rating",
+    )
+
     def get_market_metrics(self, symbol: str, force_refresh: bool = False) -> dict | None:
+        """Tastytrade primary metrics, with per-field Massive fallback via FieldRouter."""
+
+        normalized = str(symbol).upper()
+        primary: dict | None = None
+        primary_error: str | None = None
         try:
-            return self.primary.get_market_metrics(symbol, force_refresh=force_refresh)
-        except Exception:
+            primary = self.primary.get_market_metrics(normalized, force_refresh=force_refresh)
+        except Exception as error:
+            primary_error = f"tastytrade failed: {type(error).__name__}"
+            primary = None
+
+        result: dict[str, Any] = {}
+        field_provenance: dict[str, dict[str, Any]] = {}
+        observed = datetime.now(UTC)
+
+        if isinstance(primary, dict):
+            for key, value in primary.items():
+                if key.startswith("__"):
+                    continue
+                result[key] = value
+                if key in self._METRIC_FIELDS and value is not None:
+                    field_provenance[key] = {
+                        "provider": "tastytrade",
+                        "observed_at": observed,
+                        "fallback_reason": None,
+                    }
+
+        missing = [field for field in self._METRIC_FIELDS if result.get(field) is None]
+        if missing:
+            # Primary already consulted once — fallback skips Tastytrade re-entry.
+            routed = self._resolve_metrics_via_router(
+                normalized,
+                missing_fields=missing,
+                primary_error=primary_error,
+                had_primary=bool(primary),
+                skip_providers={"tastytrade"},
+            )
+            for field, payload in routed.items():
+                if result.get(field) is None and payload.get("value") is not None:
+                    result[field] = payload["value"]
+                    field_provenance[field] = {
+                        "provider": payload["provider"],
+                        "observed_at": payload["observed_at"],
+                        "fallback_reason": payload.get("fallback_reason"),
+                    }
+
+        if not result:
             return None
+        result["__field_provenance__"] = field_provenance
+        # Aggregate freshness: prefer primary when it supplied any metric.
+        if primary and any(result.get(f) is not None for f in self._METRIC_FIELDS):
+            primary_provider = "tastytrade"
+            primary_reason = None
+        else:
+            primary_provider = next(
+                (
+                    field_provenance[f]["provider"]
+                    for f in self._METRIC_FIELDS
+                    if f in field_provenance
+                ),
+                "tastytrade",
+            )
+            primary_reason = primary_error or (
+                "tastytrade returned no value" if not primary else "tastytrade incomplete metrics"
+            )
+        result["__provenance__"] = {
+            "provider": primary_provider,
+            "observed_at": observed,
+            "fallback_reason": primary_reason if primary_provider != "tastytrade" else None,
+        }
+        return result
 
     def get_market_metrics_batch(
         self, symbols: list[str], force_refresh: bool = False
     ) -> dict[str, dict]:
+        """Batch primary metrics once, then fill missing fields via fallback only.
+
+        Healthy full-primary batches stay one bounded call. Partial or failed
+        symbols never re-enter Tastytrade per-symbol; missing fields route
+        directly to Massive (and peers) with provenance preserved.
+        """
+
+        normalized = [str(symbol).upper() for symbol in symbols]
+        out: dict[str, dict] = {}
         batch = getattr(self.primary, "get_market_metrics_batch", None)
-        if callable(batch):
+        observed = datetime.now(UTC)
+        primary_error: str | None = None
+        batch_attempted = False
+        if callable(batch) and normalized:
+            batch_attempted = True
             try:
-                return batch(symbols, force_refresh=force_refresh) or {}
+                raw = batch(list(normalized), force_refresh=force_refresh) or {}
+            except Exception as error:
+                primary_error = f"tastytrade failed: {type(error).__name__}"
+                raw = {}
+            for symbol, payload in raw.items():
+                key = str(symbol).upper()
+                if not isinstance(payload, dict) or not payload:
+                    continue
+                metrics = {
+                    field: value
+                    for field, value in payload.items()
+                    if not str(field).startswith("__")
+                }
+                if not metrics:
+                    continue
+                field_provenance = {
+                    field: {
+                        "provider": "tastytrade",
+                        "observed_at": observed,
+                        "fallback_reason": None,
+                    }
+                    for field in self._METRIC_FIELDS
+                    if metrics.get(field) is not None
+                }
+                metrics["__field_provenance__"] = field_provenance
+                metrics["__provenance__"] = {
+                    "provider": "tastytrade",
+                    "observed_at": observed,
+                    "fallback_reason": None,
+                }
+                out[key] = metrics
+        elif normalized and not callable(batch):
+            # No batch API: one primary call path still allowed via get_market_metrics,
+            # but we never fan out N primary calls when batch exists.
+            for symbol in normalized:
+                single = self.get_market_metrics(symbol, force_refresh=force_refresh)
+                if single is not None:
+                    out[symbol] = single
+            return out
+
+        # Collect symbols still missing any metric fields after the one primary batch.
+        missing_symbols: list[str] = []
+        missing_fields_by_symbol: dict[str, list[str]] = {}
+        for symbol in normalized:
+            current = out.get(symbol)
+            missing = [
+                field
+                for field in self._METRIC_FIELDS
+                if current is None or current.get(field) is None
+            ]
+            if missing:
+                missing_symbols.append(symbol)
+                missing_fields_by_symbol[symbol] = missing
+
+        if missing_symbols:
+            base_reason = primary_error or (
+                "tastytrade returned no value"
+                if batch_attempted
+                else "tastytrade incomplete metrics"
+            )
+            self._fill_metrics_batch_via_fallback(
+                out,
+                missing_symbols=missing_symbols,
+                missing_fields_by_symbol=missing_fields_by_symbol,
+                base_reason=base_reason,
+                observed=observed,
+            )
+        return out
+
+    def _fill_metrics_batch_via_fallback(
+        self,
+        out: dict[str, dict],
+        *,
+        missing_symbols: list[str],
+        missing_fields_by_symbol: dict[str, list[str]],
+        base_reason: str,
+        observed: datetime,
+    ) -> None:
+        """Fill missing metrics using provider fetch_batch in bounded chunks.
+
+        Skips Tastytrade entirely (primary batch already ran). Prefer providers that
+        implement fetch_batch so HTTP volume is O(chunks), not O(symbols×fields).
+        """
+
+        # Route order without tastytrade.
+        route = [
+            name for name in self.router.routes.get("stock.metrics", []) if name != "tastytrade"
+        ]
+        still_missing = set(missing_symbols)
+        for provider_name in route:
+            if not still_missing:
+                break
+            provider = self.router.providers.get(provider_name)
+            if provider is None:
+                continue
+            fetch_batch = getattr(provider, "fetch_batch", None)
+            batch_values: dict[str, Any] = {}
+            if callable(fetch_batch):
+                try:
+                    batch_values = (
+                        fetch_batch("stock.metrics", sorted(still_missing), chunk_size=50) or {}
+                    )
+                except Exception:
+                    batch_values = {}
+            else:
+                # No batch API: still avoid per-field fan-out; one fetch per symbol max.
+                for symbol in list(still_missing):
+                    try:
+                        value = provider.fetch("stock.metrics", symbol)
+                    except Exception:
+                        value = None
+                    if value is not None:
+                        batch_values[symbol] = value
+
+            for symbol, pval in batch_values.items():
+                key = str(symbol).upper()
+                if key not in still_missing:
+                    continue
+                metrics_payload = pval.value if hasattr(pval, "value") else pval
+                if not isinstance(metrics_payload, dict):
+                    # Single-field ProviderValue — map from field name when possible.
+                    field_name = getattr(pval, "field", "stock.metrics")
+                    metrics_payload = self._coerce_single_metric(field_name, metrics_payload)
+                if not metrics_payload:
+                    continue
+                current = out.get(key)
+                if current is None:
+                    current = {
+                        "__field_provenance__": {},
+                        "__provenance__": {
+                            "provider": provider_name,
+                            "observed_at": getattr(pval, "observed_at", observed),
+                            "fallback_reason": base_reason,
+                        },
+                    }
+                    out[key] = current
+                provenance = dict(current.get("__field_provenance__") or {})
+                needed = missing_fields_by_symbol.get(key, list(self._METRIC_FIELDS))
+                for field in needed:
+                    if current.get(field) is not None:
+                        continue
+                    value = metrics_payload.get(field)
+                    if value is None:
+                        continue
+                    current[field] = value
+                    provenance[field] = {
+                        "provider": getattr(pval, "provider", provider_name),
+                        "observed_at": getattr(pval, "observed_at", observed),
+                        "fallback_reason": base_reason
+                        if field in needed
+                        else getattr(pval, "fallback_reason", base_reason),
+                    }
+                current["__field_provenance__"] = provenance
+                # Drop from still_missing only when all requested fields filled or
+                # provider returned something (best-effort — leave IV gaps empty).
+                remaining = [
+                    field
+                    for field in missing_fields_by_symbol.get(key, list(self._METRIC_FIELDS))
+                    if current.get(field) is None
+                ]
+                missing_fields_by_symbol[key] = remaining
+                if not remaining:
+                    still_missing.discard(key)
+                else:
+                    # Keep symbol for next fallback provider for residual fields.
+                    still_missing.add(key)
+
+    @staticmethod
+    def _coerce_single_metric(field_name: str, value: Any) -> dict[str, Any]:
+        key_map = {
+            "stock.iv": "implied_volatility",
+            "stock.iv_rank": "iv_rank",
+            "stock.iv_percentile": "iv_percentile",
+            "stock.liquidity": "liquidity_rating",
+            "implied_volatility": "implied_volatility",
+            "iv_rank": "iv_rank",
+            "iv_percentile": "iv_percentile",
+            "liquidity_rating": "liquidity_rating",
+        }
+        mapped = key_map.get(field_name)
+        if mapped is None or value is None:
+            return {}
+        return {mapped: value}
+
+    def _resolve_metrics_via_router(
+        self,
+        symbol: str,
+        *,
+        missing_fields: list[str],
+        primary_error: str | None,
+        had_primary: bool,
+        skip_providers: set[str] | frozenset[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Resolve missing metric fields through FieldRouter stock.metrics contracts."""
+
+        base_reason_parts = []
+        if primary_error:
+            base_reason_parts.append(primary_error)
+        elif not had_primary:
+            base_reason_parts.append("tastytrade returned no value")
+        else:
+            base_reason_parts.append(
+                "tastytrade missing metrics: " + ",".join(sorted(missing_fields))
+            )
+        base_reason = "; ".join(base_reason_parts)
+        skip = set(skip_providers or ())
+
+        resolved: dict[str, dict[str, Any]] = {}
+        # Prefer a composite stock.metrics value when providers implement it.
+        try:
+            composite = self.router.resolve(
+                "stock.metrics",
+                symbol,
+                required_keys=set(missing_fields),
+                skip_providers=skip,
+            )
+        except Exception:
+            composite = None
+        if composite is not None and isinstance(composite.value, dict):
+            for field in missing_fields:
+                value = composite.value.get(field)
+                if value is None:
+                    continue
+                reason = composite.fallback_reason or base_reason
+                resolved[field] = {
+                    "value": value,
+                    "provider": composite.provider,
+                    "observed_at": composite.observed_at,
+                    "fallback_reason": reason,
+                }
+            if len(resolved) == len(missing_fields):
+                return resolved
+
+        # Per-field routes for finer Massive Stocks / Options fallback.
+        field_routes = {
+            "implied_volatility": "stock.iv",
+            "iv_rank": "stock.iv_rank",
+            "iv_percentile": "stock.iv_percentile",
+            "liquidity_rating": "stock.liquidity",
+        }
+        for field in missing_fields:
+            if field in resolved:
+                continue
+            route = field_routes.get(field)
+            if not route:
+                continue
+            try:
+                value = self.router.resolve(route, symbol, skip_providers=skip)
             except Exception:
-                return {}
-        result: dict[str, dict] = {}
-        for symbol in symbols:
-            metrics = self.get_market_metrics(symbol, force_refresh=force_refresh)
-            if metrics is not None:
-                result[symbol] = metrics
-        return result
+                value = None
+            if value is None or value.value is None:
+                continue
+            reason = value.fallback_reason or base_reason
+            resolved[field] = {
+                "value": value.value,
+                "provider": value.provider,
+                "observed_at": value.observed_at,
+                "fallback_reason": reason,
+            }
+        return resolved
 
 
 class MarketBar(BaseModel):
@@ -213,8 +585,14 @@ class MarketService:
             quote = dict(quotes_map.get(symbol) or {})
             if not quote:
                 continue
-            metrics = metrics_map.get(symbol) or {}
+            metrics = dict(metrics_map.get(symbol) or {})
             quote_provenance = quote.pop("__provenance__", {}) if isinstance(quote, dict) else {}
+            metrics_field_prov = (
+                metrics.pop("__field_provenance__", {}) if isinstance(metrics, dict) else {}
+            )
+            metrics_provenance = (
+                metrics.pop("__provenance__", {}) if isinstance(metrics, dict) else {}
+            )
             price = quote.get("mark") or quote.get("last")
             if price is None:
                 continue
@@ -235,6 +613,37 @@ class MarketService:
                 "iv_percentile": metrics.get("iv_percentile"),
                 "liquidity_rating": metrics.get("liquidity_rating"),
             }
+            # Map snapshot field names onto metrics source field names for provenance.
+            metrics_field_aliases = {
+                "iv": "implied_volatility",
+                "iv_rank": "iv_rank",
+                "iv_percentile": "iv_percentile",
+                "liquidity_rating": "liquidity_rating",
+            }
+            provenance: dict[str, FieldProvenance] = {}
+            for field, value in fields.items():
+                if value is None:
+                    continue
+                if field in {"price", "bid", "ask"}:
+                    provenance[field] = FieldProvenance(
+                        provider=quote_provider,
+                        observed_at=quote_observed_at,
+                        field=field,
+                        fallback_reason=fallback_reason,
+                    )
+                    continue
+                source_key = metrics_field_aliases.get(field, field)
+                meta = metrics_field_prov.get(source_key) or {}
+                provenance[field] = FieldProvenance(
+                    provider=meta.get("provider")
+                    or metrics_provenance.get("provider")
+                    or "tastytrade",
+                    observed_at=meta.get("observed_at")
+                    or metrics_provenance.get("observed_at")
+                    or observed_at,
+                    field=field,
+                    fallback_reason=meta.get("fallback_reason"),
+                )
             snapshots.append(
                 MarketSnapshot(
                     symbol=symbol,
@@ -248,24 +657,7 @@ class MarketService:
                     iv_environment=environment,
                     spread_percent=spread,
                     freshness=DataFreshness(as_of=quote_observed_at, provider=quote_provider),
-                    provenance={
-                        field: FieldProvenance(
-                            provider=(
-                                quote_provider if field in {"price", "bid", "ask"} else "tastytrade"
-                            ),
-                            observed_at=(
-                                quote_observed_at
-                                if field in {"price", "bid", "ask"}
-                                else observed_at
-                            ),
-                            field=field,
-                            fallback_reason=(
-                                fallback_reason if field in {"price", "bid", "ask"} else None
-                            ),
-                        )
-                        for field, value in fields.items()
-                        if value is not None
-                    },
+                    provenance=provenance,
                 )
             )
         return snapshots

@@ -117,11 +117,11 @@ Provider priority is field-specific and provenance is retained on every derived 
 2. Massive Stocks/News fills historical-bar, event, filing, and baseline-news gaps.
 3. Massive Options fills missing historical option bars, quotes, volume, open interest, IV, and chain data.
 4. Benzinga or another licensed feed provides premium real-time catalyst coverage where configured.
-5. Public web sources may supplement evidence only without bypassing authentication, paywalls, CAPTCHAs, robots restrictions, access controls, or anti-bot mechanisms.
+5. Public web sources may supplement evidence only without bypassing authentication, paywalls, CAPTCHAs, robots restrictions, access controls, or anti-bot mechanisms. Public-web supplementation is configuration-gated, off by default until sources are configured, and runs only after Tastytrade/Massive/Benzinga gaps via the local `public-web` provider.
 
-Values from different providers are never silently averaged. Material discrepancies are visible in diagnostics.
+Values from different providers are never silently averaged. Material discrepancies are visible in diagnostics. Quotes and market metrics (IV, IV rank, liquidity, and related options fields) use Tastytrade first with explicit, chunk-batched fallbacks to Massive Stocks/Options and per-field provenance.
 
-Full article text may be retained only when the active provider agreement permits storage and AI processing. Provider removal notices must be honored. Otherwise the application stores permitted metadata, excerpts, derived catalyst records, and source URLs.
+Full article text is not stored by default. It may be retained only when the trader explicitly enables a provider and records that their active provider agreement permits storage and AI processing. Provider removal notices must be honored. Otherwise the application stores permitted metadata, excerpts, derived catalyst records, and source URLs.
 
 ## 9. AI provider and privacy
 
@@ -136,6 +136,7 @@ When Codex is signed out, rate-limited, or unavailable, AI actions fail transpar
 Trading-day monitoring runs from 7:30 AM through 6:00 PM America/New_York, adjusted for exchange holidays and early closes.
 
 - Market and tactical risk inputs are monitored every 60 seconds.
+- Held-symbol catalysts are scanned every 5 minutes by default (`news_cadence_seconds`), covering every unique held underlying including strategic stock/LEAPS and tactical positions, without forcing AI recommendations absent material change.
 - A deterministic reevaluation runs every 30 minutes.
 - Tactical AI is invoked when material inputs change or an event trigger fires.
 - Strategic AI runs daily or on a material event.

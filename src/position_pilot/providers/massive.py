@@ -33,6 +33,8 @@ class MassiveProvider:
         self._option_snapshot_ttl = timedelta(minutes=10)
         self._option_circuit_open_until: datetime | None = None
         self._option_failure_cooldown = timedelta(seconds=30)
+        # Testable HTTP call counter for batch-bound assertions.
+        self.http_call_count = 0
         self._health = ProviderHealth(
             provider=self.name,
             state=(ProviderState.DEGRADED if api_key else ProviderState.NOT_CONFIGURED),
@@ -49,6 +51,14 @@ class MassiveProvider:
             return self.stock_snapshot(symbol)
         if field == "stock.news":
             return self.news(symbol, now - timedelta(hours=72), now)
+        if field in {
+            "stock.metrics",
+            "stock.iv",
+            "stock.iv_rank",
+            "stock.iv_percentile",
+            "stock.liquidity",
+        }:
+            return self.stock_metrics(field, symbol)
         if field == "option.snapshot":
             return self.option_snapshot(symbol)
         if field in {"option.mark", "option.greeks"}:
@@ -92,6 +102,263 @@ class MassiveProvider:
         ask = quote.get("P")
         value = (bid + ask) / 2 if bid is not None and ask is not None else trade.get("p")
         return snapshot.model_copy(update={"value": value}) if value is not None else None
+
+    def stock_metrics(self, field: str, symbol: str) -> ProviderValue | None:
+        """Derive IV/liquidity metrics for FieldRouter stock.* metric contracts."""
+
+        batch = self.fetch_batch(field if field != "stock.metrics" else "stock.metrics", [symbol])
+        return batch.get(str(symbol).upper())
+
+    def fetch_batch(
+        self,
+        field: str,
+        symbols: list[str],
+        *,
+        chunk_size: int = 50,
+    ) -> dict[str, ProviderValue]:
+        """Bounded multi-symbol fetch for quotes/metrics (chunked HTTP)."""
+
+        if field not in {
+            "stock.quote",
+            "stock.metrics",
+            "stock.iv",
+            "stock.iv_rank",
+            "stock.iv_percentile",
+            "stock.liquidity",
+        }:
+            return {}
+        normalized = [str(symbol).upper() for symbol in symbols if symbol]
+        if not normalized:
+            return {}
+        if field == "stock.quote":
+            if self.capability != "stocks":
+                return {}
+            return self._stocks_quotes_batch(normalized, chunk_size=chunk_size)
+        if self.capability == "options":
+            return self._options_metrics_batch(field, normalized, chunk_size=chunk_size)
+        return self._stocks_metrics_batch(field, normalized, chunk_size=chunk_size)
+
+    def _stocks_quotes_batch(
+        self,
+        symbols: list[str],
+        *,
+        chunk_size: int,
+    ) -> dict[str, ProviderValue]:
+        """Fetch stock quotes with one multi-ticker snapshot request per chunk."""
+
+        checked_at = self.clock()
+        out: dict[str, ProviderValue] = {}
+        size = max(1, min(int(chunk_size), 100))
+        for offset in range(0, len(symbols), size):
+            chunk = symbols[offset : offset + size]
+            snapshot = self._request_value(
+                "stock.quote.batch",
+                "/v2/snapshot/locale/us/markets/stocks/tickers",
+                {"tickers": ",".join(chunk)},
+            )
+            rows = self._extract_ticker_rows(snapshot.value if snapshot else None)
+            for symbol, row in rows:
+                if symbol not in chunk:
+                    continue
+                quote = self._quote_from_stock_snapshot_row(row)
+                if quote is None:
+                    continue
+                out[symbol] = ProviderValue(
+                    field="stock.quote",
+                    value=quote,
+                    provider=self.name,
+                    observed_at=checked_at,
+                )
+        return out
+
+    @staticmethod
+    def _quote_from_stock_snapshot_row(row: dict[str, Any]) -> dict[str, Any] | None:
+        last_quote = row.get("lastQuote") if isinstance(row.get("lastQuote"), dict) else {}
+        last_trade = row.get("lastTrade") if isinstance(row.get("lastTrade"), dict) else {}
+        day = row.get("day") if isinstance(row.get("day"), dict) else {}
+        bid = last_quote.get("p")
+        ask = last_quote.get("P")
+        last = last_trade.get("p")
+        mark = (
+            (bid + ask) / 2
+            if isinstance(bid, (int, float)) and isinstance(ask, (int, float))
+            else last
+        )
+        if mark is None:
+            close = day.get("c") or day.get("close")
+            mark = close if isinstance(close, (int, float)) else None
+        if mark is None:
+            return None
+        return {"mark": mark, "bid": bid, "ask": ask, "last": last}
+
+    def _stocks_metrics_batch(
+        self,
+        field: str,
+        symbols: list[str],
+        *,
+        chunk_size: int,
+    ) -> dict[str, ProviderValue]:
+        """Fetch stock snapshots in bounded chunks (one HTTP call per chunk)."""
+
+        checked_at = self.clock()
+        out: dict[str, ProviderValue] = {}
+        size = max(1, min(int(chunk_size), 100))
+        for offset in range(0, len(symbols), size):
+            chunk = symbols[offset : offset + size]
+            # Multi-ticker snapshot query — one HTTP request per chunk.
+            snapshot = self._request_value(
+                "stock.metrics.batch",
+                "/v2/snapshot/locale/us/markets/stocks/tickers",
+                {"tickers": ",".join(chunk)},
+            )
+            rows = self._extract_ticker_rows(snapshot.value if snapshot else None)
+            by_symbol = {row_symbol: row for row_symbol, row in rows}
+            for symbol in chunk:
+                row = by_symbol.get(symbol)
+                if row is None:
+                    continue
+                metrics = self._metrics_from_stock_snapshot_row(row)
+                if not metrics:
+                    continue
+                value = self._metrics_field_value(field, metrics, checked_at=checked_at)
+                if value is not None:
+                    out[symbol] = value
+        return out
+
+    def _options_metrics_batch(
+        self,
+        field: str,
+        symbols: list[str],
+        *,
+        chunk_size: int,
+    ) -> dict[str, ProviderValue]:
+        """Options batch: only concrete OCC symbols; never invent chain IV for underlyings."""
+
+        checked_at = self.clock()
+        out: dict[str, ProviderValue] = {}
+        option_symbols = [s for s in symbols if s.startswith("O:")]
+        if not option_symbols:
+            return out
+        # Chunk OCC lookups; each chunk is still multiple underlying paths but bounded.
+        size = max(1, min(int(chunk_size), 50))
+        for offset in range(0, len(option_symbols), size):
+            chunk = option_symbols[offset : offset + size]
+            for symbol in chunk:
+                snap = self.option_snapshot(symbol)
+                if snap is None or not isinstance(snap.value, dict):
+                    continue
+                metrics: dict[str, Any] = {}
+                iv = snap.value.get("implied_volatility")
+                if isinstance(iv, (int, float)):
+                    metrics["implied_volatility"] = float(iv)
+                if not metrics:
+                    continue
+                value = self._metrics_field_value(field, metrics, checked_at=checked_at)
+                if value is not None:
+                    out[symbol] = value
+        return out
+
+    @staticmethod
+    def _extract_ticker_rows(payload: Any) -> list[tuple[str, dict[str, Any]]]:
+        rows: list[Any]
+        if payload is None:
+            return []
+        if isinstance(payload, list):
+            rows = payload
+        elif isinstance(payload, dict):
+            for key in ("tickers", "results", "ticker"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    rows = value
+                    break
+                if isinstance(value, dict) and key == "ticker":
+                    rows = [value]
+                    break
+            else:
+                rows = [payload]
+        else:
+            return []
+        out: list[tuple[str, dict[str, Any]]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            ticker = str(row.get("ticker") or row.get("symbol") or row.get("T") or "").upper()
+            nested = row.get("ticker")
+            if isinstance(nested, dict) and not ticker:
+                ticker = str(nested.get("ticker") or nested.get("symbol") or "").upper()
+                row = nested
+            if ticker:
+                out.append((ticker, row))
+        return out
+
+    @staticmethod
+    def _metrics_from_stock_snapshot_row(row: dict[str, Any]) -> dict[str, Any]:
+        """Best-effort metrics from a Massive/Polygon stock snapshot row.
+
+        Does not invent IV rank/percentile when the provider omits them.
+        """
+
+        metrics: dict[str, Any] = {}
+        day = row.get("day") if isinstance(row.get("day"), dict) else {}
+        prev = row.get("prevDay") if isinstance(row.get("prevDay"), dict) else {}
+        volume = day.get("v") or day.get("volume")
+        prev_volume = prev.get("v") or prev.get("volume")
+        if isinstance(volume, (int, float)) and volume > 0:
+            if volume >= 20_000_000:
+                metrics["liquidity_rating"] = 5
+            elif volume >= 5_000_000:
+                metrics["liquidity_rating"] = 4
+            elif volume >= 1_000_000:
+                metrics["liquidity_rating"] = 3
+            elif volume >= 250_000:
+                metrics["liquidity_rating"] = 2
+            else:
+                metrics["liquidity_rating"] = 1
+        elif isinstance(prev_volume, (int, float)) and prev_volume > 0:
+            metrics["liquidity_rating"] = 2 if prev_volume >= 1_000_000 else 1
+        # Pass through IV fields only when explicitly present (never invent).
+        for src, dest in (
+            ("implied_volatility", "implied_volatility"),
+            ("iv_rank", "iv_rank"),
+            ("iv_percentile", "iv_percentile"),
+        ):
+            value = row.get(src)
+            if isinstance(value, (int, float)):
+                metrics[dest] = float(value)
+        return metrics
+
+    def _metrics_field_value(
+        self, field: str, metrics: dict[str, Any], *, checked_at: datetime
+    ) -> ProviderValue | None:
+        if field == "stock.metrics":
+            value: object = {
+                key: metrics[key]
+                for key in (
+                    "implied_volatility",
+                    "iv_rank",
+                    "iv_percentile",
+                    "liquidity_rating",
+                )
+                if metrics.get(key) is not None
+            }
+            if not value:
+                return None
+        else:
+            key_map = {
+                "stock.iv": "implied_volatility",
+                "stock.iv_rank": "iv_rank",
+                "stock.iv_percentile": "iv_percentile",
+                "stock.liquidity": "liquidity_rating",
+            }
+            value = metrics.get(key_map.get(field, ""))
+            if value is None:
+                return None
+        return ProviderValue(
+            field=field,
+            value=value,
+            provider=self.name,
+            observed_at=checked_at,
+        )
 
     def bars(self, symbol: str, start: datetime, end: datetime) -> ProviderValue | None:
         path = (
@@ -180,6 +447,7 @@ class MassiveProvider:
             )
             return None
         try:
+            self.http_call_count += 1
             response = self.client.get(
                 f"{MASSIVE_API_URL}{path}",
                 params={**parameters, "apiKey": self.api_key},
@@ -215,6 +483,19 @@ class MassiveProvider:
             value = payload.get("result")
         if value is None and field == "stock.quote":
             value = payload.get("ticker")
+        # Full/multi snapshot responses often use "tickers".
+        if value is None and field in {
+            "stock.quote.batch",
+            "stock.metrics.batch",
+            "stock.metrics",
+        }:
+            value = payload.get("tickers")
+        if value is None and field in {"stock.quote.batch", "stock.metrics.batch"}:
+            # Some responses nest under status/tickers; keep whole payload for row extract.
+            if isinstance(payload.get("tickers"), list):
+                value = payload.get("tickers")
+            elif isinstance(payload, dict):
+                value = payload
         if value is None:
             return None
         return ProviderValue(

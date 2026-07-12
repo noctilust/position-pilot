@@ -40,6 +40,7 @@ EARLY_CLOSE_MARKET = time(13, 0)
 EARLY_CLOSE_MONITOR_END = time(15, 0)
 RISK_INTERVAL_SECONDS = 60
 REEVALUATION_SECONDS = 30 * 60
+DEFAULT_NEWS_CADENCE_SECONDS = 300  # 5-minute held-symbol catalyst schedule
 WAKE_GAP_SECONDS = 120  # > 2 risk intervals implies sleep/wake gap
 
 # Live-market materiality thresholds for the 60-second tactical pulse.
@@ -150,12 +151,14 @@ class MonitoringStatus(BaseModel):
     window_end: str = "18:00"
     evaluation_minutes: int = 30
     risk_refresh_seconds: int = 60
+    news_cadence_seconds: int = DEFAULT_NEWS_CADENCE_SECONDS
     is_trading_day: bool
     is_holiday: bool
     is_early_close: bool
     last_risk_tick_at: datetime | None = None
     last_evaluation_at: datetime | None = None
     last_recovery_evaluation_at: datetime | None = None
+    last_catalyst_scan_at: datetime | None = None
     provider_status: str = "not_checked"
     running: bool = False
     notice: str | None = None
@@ -339,10 +342,12 @@ class MonitoringService:
         *,
         portfolio_loader: Callable[[], PortfolioSnapshot | None] | None = None,
         catalyst_loader: Callable[[str], list[dict[str, Any]]] | None = None,
+        catalyst_scan: Callable[[list[str]], dict[str, list[dict[str, Any]]]] | None = None,
         thesis_loader: Callable[[str], dict[str, Any] | None] | None = None,
         plan_loader: Callable[[str], dict[str, Any] | None] | None = None,
         risk_snapshot_loader: Callable[[PortfolioSnapshot], dict[str, Any] | None] | None = None,
         market_context_loader: Callable[[str], dict[str, Any] | None] | None = None,
+        news_cadence_seconds: int | Callable[[], int] | None = None,
         clock: Callable[[], datetime] | None = None,
         risk_interval_seconds: int = RISK_INTERVAL_SECONDS,
         reevaluation_seconds: int = REEVALUATION_SECONDS,
@@ -353,10 +358,12 @@ class MonitoringService:
         self.notifications = notifications
         self.portfolio_loader = portfolio_loader
         self.catalyst_loader = catalyst_loader or (lambda _symbol: [])
+        self.catalyst_scan = catalyst_scan
         self.thesis_loader = thesis_loader or (lambda _sid: None)
         self.plan_loader = plan_loader or (lambda _sid: None)
         self.risk_snapshot_loader = risk_snapshot_loader
         self.market_context_loader = market_context_loader
+        self._news_cadence_seconds = news_cadence_seconds
         self._clock = clock or (lambda: datetime.now(UTC))
         self.risk_interval_seconds = risk_interval_seconds
         self.reevaluation_seconds = reevaluation_seconds
@@ -367,6 +374,8 @@ class MonitoringService:
         self._last_risk_tick_at: datetime | None = None
         self._last_evaluation_at: datetime | None = None
         self._last_recovery_evaluation_at: datetime | None = None
+        self._last_catalyst_scan_at: datetime | None = None
+        self._last_catalyst_scan_key: str | None = None
         self._last_loop_tick_at: datetime | None = None
         self._next_eval_at: datetime | None = None
         self._network_available = True
@@ -377,6 +386,21 @@ class MonitoringService:
         self._seen_catalyst_keys: set[str] = set()
         self._restore_runtime()
 
+    def news_cadence_seconds(self) -> int:
+        """Configurable held-symbol catalyst cadence (default 5 minutes)."""
+
+        if callable(self._news_cadence_seconds):
+            try:
+                value = int(self._news_cadence_seconds())
+            except Exception:
+                value = DEFAULT_NEWS_CADENCE_SECONDS
+        elif self._news_cadence_seconds is not None:
+            value = int(self._news_cadence_seconds)
+        else:
+            stored = self.database.get_setting("catalysts", {}) or {}
+            value = int(stored.get("news_cadence_seconds", DEFAULT_NEWS_CADENCE_SECONDS))
+        return max(60, min(3600, value))
+
     def _restore_runtime(self) -> None:
         runtime = self.database.get_setting("monitoring.runtime", {}) or {}
         self._last_evaluation_at = _parse_iso(runtime.get("last_evaluation_at"))
@@ -384,6 +408,8 @@ class MonitoringService:
         self._last_risk_tick_at = _parse_iso(
             self.database.get_setting("monitoring.last_risk_tick_at")
         )
+        self._last_catalyst_scan_at = _parse_iso(runtime.get("last_catalyst_scan_at"))
+        self._last_catalyst_scan_key = runtime.get("last_catalyst_scan_key")
         self._last_risk_fingerprint = runtime.get("last_risk_fingerprint")
         state_name = runtime.get("last_risk_state")
         if state_name in {item.value for item in RiskLevelState}:
@@ -428,9 +454,7 @@ class MonitoringService:
         consent = self.get_consent()
         session = session_for(self._clock())
         inside = inside_monitoring_window(self._clock())
-        end_label = (
-            EARLY_CLOSE_MONITOR_END.strftime("%H:%M") if session.early_close else "18:00"
-        )
+        end_label = EARLY_CLOSE_MONITOR_END.strftime("%H:%M") if session.early_close else "18:00"
         notice = None
         if not consent.enabled:
             notice = "Monitoring is disabled until you grant onboarding consent."
@@ -443,12 +467,14 @@ class MonitoringService:
             consented=consent.enabled,
             inside_window=inside,
             window_end=end_label,
+            news_cadence_seconds=self.news_cadence_seconds(),
             is_trading_day=session.trading_day,
             is_holiday=session.holiday,
             is_early_close=session.early_close,
             last_risk_tick_at=self._last_risk_tick_at,
             last_evaluation_at=self._last_evaluation_at,
             last_recovery_evaluation_at=self._last_recovery_evaluation_at,
+            last_catalyst_scan_at=self._last_catalyst_scan_at,
             provider_status=self.recommendations.provider_public_status(),
             running=self._running,
             notice=notice,
@@ -476,6 +502,10 @@ class MonitoringService:
             else None,
             "last_risk_tick_at": status.last_risk_tick_at.isoformat()
             if status.last_risk_tick_at
+            else None,
+            "news_cadence_seconds": status.news_cadence_seconds,
+            "last_catalyst_scan_at": status.last_catalyst_scan_at.isoformat()
+            if status.last_catalyst_scan_at
             else None,
         }
 
@@ -683,9 +713,7 @@ class MonitoringService:
                     from .recommendations import equity_context
 
                     market = self._market_for(position.underlying_symbol)
-                    self._remember_market_baseline(
-                        position.underlying_symbol, market, force=True
-                    )
+                    self._remember_market_baseline(position.underlying_symbol, market, force=True)
                     context = equity_context(
                         symbol=position.underlying_symbol.upper(),
                         quantity=position.quantity,
@@ -748,6 +776,105 @@ class MonitoringService:
             "evaluated": evaluated,
             "material_alerts": material_alerts,
             "failures": failures,
+        }
+
+    def held_underlying_symbols(self, snapshot: PortfolioSnapshot) -> list[str]:
+        """Every unique held underlying across strategies and strategic stock/LEAPS legs."""
+
+        symbols: list[str] = []
+        seen: set[str] = set()
+        for strategy in snapshot.strategies:
+            symbol = str(strategy.underlying or "").upper()
+            if symbol and symbol not in seen:
+                seen.add(symbol)
+                symbols.append(symbol)
+        for account in snapshot.accounts:
+            for position in account.positions:
+                symbol = str(position.underlying_symbol or "").upper()
+                if symbol and symbol not in seen:
+                    seen.add(symbol)
+                    symbols.append(symbol)
+        return symbols
+
+    def catalyst_tick(self, *, force: bool = False) -> dict[str, Any]:
+        """Independent held-symbol catalyst scan on news_cadence_seconds.
+
+        Scans every unique held underlying (strategic stock/LEAPS and tactical).
+        Does not invoke AI recommendations. Dedupes scans within the cadence window
+        and when the held-symbol set is unchanged mid-cadence.
+        """
+
+        now = self._clock()
+        if not self.get_consent().enabled or not inside_monitoring_window(now):
+            return {"skipped": True, "reason": "outside_window_or_consent"}
+
+        cadence = self.news_cadence_seconds()
+        if (
+            not force
+            and self._last_catalyst_scan_at is not None
+            and (now - self._last_catalyst_scan_at).total_seconds() < cadence
+        ):
+            return {
+                "skipped": True,
+                "reason": "cadence",
+                "cadence_seconds": cadence,
+                "last_catalyst_scan_at": self._last_catalyst_scan_at.isoformat(),
+            }
+
+        snapshot = self._load_portfolio()
+        if snapshot is None:
+            return {"skipped": False, "at": now.isoformat(), "scanned": 0, "no_portfolio": True}
+
+        symbols = self.held_underlying_symbols(snapshot)
+        scan_key = ",".join(symbols)
+        if (
+            not force
+            and self._last_catalyst_scan_at is not None
+            and self._last_catalyst_scan_key == scan_key
+            and (now - self._last_catalyst_scan_at).total_seconds() < cadence
+        ):
+            return {
+                "skipped": True,
+                "reason": "duplicate",
+                "symbols": symbols,
+                "cadence_seconds": cadence,
+            }
+
+        by_symbol: dict[str, list[dict[str, Any]]] = {}
+        if self.catalyst_scan is not None:
+            try:
+                by_symbol = self.catalyst_scan(symbols) or {}
+            except Exception:
+                logger.exception("catalyst_scan failed")
+                by_symbol = {}
+        else:
+            for symbol in symbols:
+                try:
+                    by_symbol[symbol] = list(self.catalyst_loader(symbol) or [])
+                except Exception:
+                    logger.exception("catalyst_loader failed for %s", symbol)
+                    by_symbol[symbol] = []
+
+        high_impact = 0
+        for symbol in symbols:
+            catalysts = by_symbol.get(symbol) or by_symbol.get(symbol.upper()) or []
+            before = len(self._seen_catalyst_keys)
+            self._raise_catalyst_alerts(symbol, catalysts, strategy_type=None)
+            if len(self._seen_catalyst_keys) > before:
+                high_impact += 1
+
+        self._last_catalyst_scan_at = now
+        self._last_catalyst_scan_key = scan_key
+        self._persist_runtime(reason="catalyst_scan", evaluated=len(symbols))
+        return {
+            "skipped": False,
+            "at": now.isoformat(),
+            "scanned": len(symbols),
+            "symbols": symbols,
+            "high_impact_symbols": high_impact,
+            "cadence_seconds": cadence,
+            # Explicit: catalyst freshness never forces Codex/AI recommendations.
+            "ai_invoked": False,
         }
 
     def risk_tick(self) -> dict[str, Any]:
@@ -982,9 +1109,7 @@ class MonitoringService:
             unrealized_pnl=float(risk_payload.get("unrealized_pnl") or 0),
         )
         previous_state = self._last_risk_state
-        fingerprint = fingerprint_inputs(
-            {**risk_payload, "state": current_state.value}
-        )
+        fingerprint = fingerprint_inputs({**risk_payload, "state": current_state.value})
         # Update tracked state even when we do not alert.
         emit = should_emit_risk_alert(previous_state, current_state)
         self._last_risk_state = current_state
@@ -1052,6 +1177,10 @@ class MonitoringService:
             "last_recovery_evaluation_at": self._last_recovery_evaluation_at.isoformat()
             if self._last_recovery_evaluation_at
             else None,
+            "last_catalyst_scan_at": self._last_catalyst_scan_at.isoformat()
+            if self._last_catalyst_scan_at
+            else None,
+            "last_catalyst_scan_key": self._last_catalyst_scan_key,
             "last_risk_fingerprint": self._last_risk_fingerprint,
             "last_risk_state": self._last_risk_state.value if self._last_risk_state else None,
             "market_baselines": {
@@ -1077,6 +1206,7 @@ class MonitoringService:
             "wake": False,
             "recovery": False,
             "risk": None,
+            "catalysts": None,
             "scheduled": None,
             "inside_window": inside_monitoring_window(now),
             "enabled": consent.enabled,
@@ -1096,17 +1226,19 @@ class MonitoringService:
 
         if consent.enabled and inside_monitoring_window(now):
             before_unavailable = self._portfolio_unavailable
+            # 60-second tactical risk pulse (market materiality → Codex only when due).
             outcome["risk"] = await asyncio.to_thread(self.risk_tick)
+            # Independent held-symbol catalyst cadence (default 5 minutes).
+            outcome["catalysts"] = await asyncio.to_thread(self.catalyst_tick)
             if before_unavailable and not self._portfolio_unavailable:
                 outcome["recovery"] = True
                 outcome["recovery_result"] = await asyncio.to_thread(self.on_network_recovery)
                 self._next_eval_at = now + timedelta(seconds=self.reevaluation_seconds)
 
+            # 30-minute deterministic evaluation cadence.
             due = self._next_eval_at is None or now >= self._next_eval_at
             if due:
-                outcome["scheduled"] = await asyncio.to_thread(
-                    self.run_once, reason="scheduled"
-                )
+                outcome["scheduled"] = await asyncio.to_thread(self.run_once, reason="scheduled")
                 self._next_eval_at = now + timedelta(seconds=self.reevaluation_seconds)
             try:
                 await asyncio.to_thread(self.database.ensure_daily_backup, now=now)

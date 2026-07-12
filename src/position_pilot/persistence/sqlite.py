@@ -1283,6 +1283,25 @@ class PositionPilotDatabase:
     def clear_catalyst_full_text(self, *, provider: str, url: str) -> int:
         return self.apply_catalyst_removal(provider=provider, url=url)
 
+    def clear_stored_catalyst_full_text(self, *, provider: str | None = None) -> int:
+        """Null retained full article text for one provider or all providers.
+
+        Public domain API for consent revocation — does not delete articles or
+        mutate feedback; only clears the licensed full_text column.
+        """
+
+        with self._connect() as connection:
+            if provider:
+                cursor = connection.execute(
+                    "UPDATE catalyst_articles SET full_text = NULL WHERE lower(provider) = ?",
+                    (provider.lower(),),
+                )
+            else:
+                cursor = connection.execute(
+                    "UPDATE catalyst_articles SET full_text = NULL WHERE full_text IS NOT NULL"
+                )
+            return int(cursor.rowcount)
+
     def apply_catalyst_removal(self, *, provider: str, url: str) -> int:
         """Remove licensed content and any unsupported derived presentation for a URL.
 

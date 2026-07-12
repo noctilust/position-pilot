@@ -1718,6 +1718,15 @@ function SettingsSection({
   const [benzingaEnabled, setBenzingaEnabled] = useState(
     catalystSettings?.benzinga.enabled ?? true,
   );
+  const [publicWebEnabled, setPublicWebEnabled] = useState(
+    catalystSettings?.public_web?.enabled ?? false,
+  );
+  const [publicWebSourcesJson, setPublicWebSourcesJson] = useState(
+    JSON.stringify(catalystSettings?.public_web?.sources ?? [], null, 2),
+  );
+  const [benzingaFullText, setBenzingaFullText] = useState(
+    Boolean(catalystSettings?.store_full_text?.consent?.benzinga?.active),
+  );
   const [saveState, setSaveState] = useState<string | null>(null);
   const [consentBusy, setConsentBusy] = useState(false);
   const [richPreview, setRichPreview] = useState(
@@ -1730,6 +1739,11 @@ function SettingsSection({
     setStockThreshold(String(catalystSettings.stock_move_threshold_pct));
     setEtfThreshold(String(catalystSettings.etf_move_threshold_pct));
     setBenzingaEnabled(catalystSettings.benzinga.enabled);
+    setPublicWebEnabled(catalystSettings.public_web?.enabled ?? false);
+    setPublicWebSourcesJson(
+      JSON.stringify(catalystSettings.public_web?.sources ?? [], null, 2),
+    );
+    setBenzingaFullText(Boolean(catalystSettings.store_full_text?.consent?.benzinga?.active));
   }, [catalystSettings]);
 
   useEffect(() => {
@@ -1935,11 +1949,44 @@ function SettingsSection({
               void (async () => {
                 setSaveState(null);
                 try {
+                  let publicSources: Array<{
+                    name: string;
+                    url_template: string;
+                    format?: string;
+                    source_tier?: string;
+                    enabled?: boolean;
+                  }> = [];
+                  try {
+                    const parsed = JSON.parse(publicWebSourcesJson || "[]") as unknown;
+                    if (!Array.isArray(parsed)) {
+                      throw new Error("Public web sources must be a JSON array.");
+                    }
+                    publicSources = parsed as typeof publicSources;
+                  } catch (parseError: unknown) {
+                    setSaveState(
+                      parseError instanceof Error
+                        ? parseError.message
+                        : "Invalid public web sources JSON.",
+                    );
+                    return;
+                  }
                   const next = await saveCatalystSettings({
                     news_cadence_seconds: Number(cadence),
                     stock_move_threshold_pct: Number(stockThreshold),
                     etf_move_threshold_pct: Number(etfThreshold),
                     benzinga_enabled: benzingaEnabled,
+                    public_web_enabled: publicWebEnabled,
+                    public_web_sources: publicSources,
+                    store_full_text_providers: benzingaFullText ? ["benzinga"] : [],
+                    full_text_consent: {
+                      benzinga: {
+                        enabled: benzingaFullText,
+                        agreement_permits_retention_and_ai: benzingaFullText,
+                      },
+                    },
+                    ...(benzingaFullText
+                      ? {}
+                      : { clear_full_text_provider: "benzinga" }),
                   });
                   onCatalystSettingsSaved(next);
                   setSaveState("Saved locally.");
@@ -1993,6 +2040,48 @@ function SettingsSection({
               Benzinga status: {catalystSettings?.benzinga.status ?? "unknown"}. Provider keys never
               appear in the browser.
             </p>
+            <label className="compact-field checkbox-field">
+              <input
+                type="checkbox"
+                checked={publicWebEnabled}
+                onChange={(event) => setPublicWebEnabled(event.target.checked)}
+              />
+              Enable public web/news supplementation (after Massive/Benzinga gaps)
+            </label>
+            <label className="compact-field">
+              Public web sources (JSON array; empty = off)
+              <textarea
+                rows={4}
+                value={publicWebSourcesJson}
+                onChange={(event) => setPublicWebSourcesJson(event.target.value)}
+                spellCheck={false}
+              />
+            </label>
+            <p className="microcopy">
+              {catalystSettings?.public_web?.note ??
+                "Public sources respect robots.txt and never bypass paywalls or login walls."}{" "}
+              Status: {catalystSettings?.public_web?.status ?? "disabled"}.
+            </p>
+            <fieldset className="stack-form">
+              <legend>Full article text retention (opt-in)</legend>
+              <p className="microcopy" role="note">
+                {catalystSettings?.full_text_warning ??
+                  "Full article text is not stored by default. Only metadata and short excerpts are kept unless you enable a provider and confirm your agreement permits retention and AI processing."}
+              </p>
+              <label className="compact-field checkbox-field">
+                <input
+                  type="checkbox"
+                  checked={benzingaFullText}
+                  onChange={(event) => setBenzingaFullText(event.target.checked)}
+                />
+                Store Benzinga full text (I confirm my provider agreement permits retention and AI
+                processing)
+              </label>
+              <p className="microcopy">
+                Mode: {catalystSettings?.store_full_text?.mode ?? "metadata_and_excerpt_only"}.
+                Default providers: none.
+              </p>
+            </fieldset>
             <button type="submit" className="primary-action">
               Save catalyst settings
             </button>

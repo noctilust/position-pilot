@@ -124,6 +124,11 @@ class CatalystSettingsRequest(BaseModel):
     etf_move_threshold_pct: float | None = Field(default=None, ge=0.1, le=50)
     news_cadence_seconds: int | None = Field(default=None, ge=60, le=3600)
     benzinga_enabled: bool | None = None
+    public_web_enabled: bool | None = None
+    public_web_sources: list[dict[str, Any]] | None = None
+    store_full_text_providers: list[str] | None = None
+    full_text_consent: dict[str, dict[str, Any]] | None = None
+    clear_full_text_provider: str | None = Field(default=None, max_length=64)
 
 
 class MonitoringConsentRequest(BaseModel):

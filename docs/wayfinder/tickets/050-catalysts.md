@@ -51,7 +51,11 @@ Phase 5 is implemented on shared domain services over SQLite schema v5, with rev
 
 - Exchange-holiday calendar is still simplified (weekend-aware prior close only; no holiday calendar).
 - Unusual volume/OI/skew/gamma depend on provider fields; when absent they are explicitly marked **unavailable** rather than invented.
-- Public-web supplementation is intentionally not implemented.
-- News cadence is stored/exposed; background polling remains Phase 6.
 - Live Benzinga/Massive network behavior is mocked in tests; real entitlements remain operator-configured via `.env`.
 - Massive option metrics cover held contracts in the latest portfolio snapshot; whole-chain market aggregates remain provider-dependent.
+
+## Pre-push repair (public sources, cadence, full-text consent)
+
+- **Public-web supplementation** — configurable `PublicWebNewsProvider` (`providers/public_web.py`) runs only after Massive/Benzinga when `public_web_enabled` is true and sources are configured. Supports RSS/JSON/HTML with robots.txt respect, timeouts, byte limits, attribution, URL dedupe, and abstention on login/paywall/blocked/uncertain content. Relevant items remain visible only as low-confidence `supporting` evidence and can never become `confirmed`. Off by default with no sources.
+- **News cadence** — `news_cadence_seconds` (default 300) drives an independent held-symbol catalyst schedule inside the monitoring window (strategic + tactical underlyings), separate from the 60s risk pulse and 30-minute evaluation cadence; does not force AI without material change.
+- **Full-text license consent** — `store_full_text_providers` defaults to empty; full text is stored only when the trader enables a provider and records that their agreement permits retention and AI processing. Settings UI/API surface the warning; clear controls null stored full text.

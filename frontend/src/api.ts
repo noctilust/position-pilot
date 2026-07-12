@@ -194,6 +194,24 @@ export function saveCatalystSettings(payload: {
   news_cadence_seconds?: number;
   stock_move_threshold_pct?: number;
   etf_move_threshold_pct?: number;
+  public_web_enabled?: boolean;
+  public_web_sources?: Array<{
+    name: string;
+    url_template: string;
+    format?: string;
+    source_tier?: string;
+    enabled?: boolean;
+  }>;
+  store_full_text_providers?: string[];
+  full_text_consent?: Record<
+    string,
+    {
+      enabled: boolean;
+      agreement_permits_retention_and_ai: boolean;
+      note?: string | null;
+    }
+  >;
+  clear_full_text_provider?: string;
 }) {
   return api<CatalystSettings>("/api/v1/settings/catalysts", {
     method: "PUT",

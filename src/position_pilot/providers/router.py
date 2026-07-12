@@ -32,12 +32,17 @@ class FieldRouter:
         *,
         diagnostics: bool = False,
         required_keys: set[str] | None = None,
+        skip_providers: set[str] | frozenset[str] | None = None,
     ) -> ProviderValue | None:
         route = self.routes.get(field, [])
         selected: ProviderValue | None = None
         failed: list[str] = []
         comparisons: list[ProviderValue] = []
+        skip = set(skip_providers or ())
         for route_index, provider_name in enumerate(route):
+            if provider_name in skip:
+                failed.append(f"{provider_name} skipped")
+                continue
             provider = self.providers[provider_name]
             try:
                 value = provider.fetch(field, symbol)

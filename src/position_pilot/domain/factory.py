@@ -21,6 +21,7 @@ from .alerts import AlertService
 from .catalysts import (
     CatalystService,
     CatalystSettings,
+    FullTextProviderConsent,
     SymbolMoveInput,
     derive_move_from_bars,
     is_broad_etf,
@@ -198,12 +199,18 @@ def get_field_router() -> FieldRouter:
     news_route = ["massive-stocks"]
     if os.getenv("BENZINGA_API_KEY"):
         news_route.append("benzinga")
+    metrics_route = ["tastytrade", "massive-stocks", "massive-options"]
     return FieldRouter(
         providers=providers,
         routes={
             "stock.quote": ["tastytrade", "massive-stocks"],
             "stock.bars": ["massive-stocks"],
             "stock.news": news_route,
+            "stock.metrics": metrics_route,
+            "stock.iv": metrics_route,
+            "stock.iv_rank": metrics_route,
+            "stock.iv_percentile": metrics_route,
+            "stock.liquidity": metrics_route,
             "option.mark": ["tastytrade", "massive-options"],
             "option.greeks": ["tastytrade", "massive-options"],
             "option.snapshot": ["massive-options"],
@@ -231,6 +238,13 @@ def get_catalyst_service() -> CatalystService:
         benzinga = router.providers.get("benzinga")
         if benzinga is not None and benzinga_enabled and os.getenv("BENZINGA_API_KEY"):
             providers.append(benzinga)
+        # Public web supplements only after licensed/configured providers, when enabled.
+        public_enabled = bool(stored.get("public_web_enabled", False))
+        public_sources = stored.get("public_web_sources") or []
+        if public_enabled and isinstance(public_sources, list) and public_sources:
+            from ..providers.public_web import PublicWebNewsProvider
+
+            providers.append(PublicWebNewsProvider(sources=public_sources))
         return providers
 
     def quote_source(symbol: str) -> SymbolMoveInput | None:
@@ -402,6 +416,22 @@ def get_catalyst_service() -> CatalystService:
         return metrics or None
 
     stored = get_database().get_setting("catalysts", {}) or {}
+    full_text_providers = {
+        str(item).lower()
+        for item in (stored.get("store_full_text_providers") or [])
+        if str(item).strip()
+    }
+    consent_map: dict[str, FullTextProviderConsent] = {}
+    raw_consent = stored.get("full_text_consent") or {}
+    if isinstance(raw_consent, dict):
+        for provider, payload in raw_consent.items():
+            try:
+                consent_map[str(provider).lower()] = FullTextProviderConsent.model_validate(payload)
+            except Exception:
+                continue
+    public_sources = stored.get("public_web_sources") or []
+    if not isinstance(public_sources, list):
+        public_sources = []
     settings = CatalystSettings(
         stock_move_threshold_pct=float(
             stored.get("stock_move_threshold_pct", CatalystSettings().stock_move_threshold_pct)
@@ -413,6 +443,10 @@ def get_catalyst_service() -> CatalystService:
             stored.get("news_cadence_seconds", CatalystSettings().news_cadence_seconds)
         ),
         benzinga_enabled=bool(stored.get("benzinga_enabled", True)),
+        store_full_text_providers=full_text_providers,
+        full_text_consent=consent_map,
+        public_web_enabled=bool(stored.get("public_web_enabled", False)),
+        public_web_sources=list(public_sources),
     )
     return CatalystService(
         database=get_database(),
@@ -588,11 +622,31 @@ def get_monitoring_service() -> MonitoringService:
             return get_database().latest_portfolio_snapshot()
 
     def catalyst_loader(symbol: str) -> list[dict]:
+        """Prefer cached held-symbol results; live scan is owned by catalyst_tick cadence."""
+
         try:
-            result = get_catalyst_service().analyze_symbol(symbol)
+            service = get_catalyst_service()
+            cached = service.database.get_latest_symbol_catalyst(symbol.upper())
+            if isinstance(cached, dict) and cached.get("catalysts") is not None:
+                return list(cached.get("catalysts") or [])
+            result = service.analyze_symbol(symbol)
             return [event.model_dump(mode="json") for event in result.catalysts]
         except Exception:
             return []
+
+    def catalyst_scan(symbols: list[str]) -> dict[str, list[dict]]:
+        """Fresh scan of every unique held underlying for the news cadence schedule."""
+
+        try:
+            snapshot = get_catalyst_service().scan_held(symbols)
+        except Exception:
+            return {}
+        out: dict[str, list[dict]] = {}
+        for result in snapshot.results:
+            out[result.symbol.upper()] = [
+                event.model_dump(mode="json") for event in result.catalysts
+            ]
+        return out
 
     def thesis_loader(strategy_id: str) -> dict | None:
         thesis = get_plans_service().get_thesis(strategy_id)
@@ -619,6 +673,10 @@ def get_monitoring_service() -> MonitoringService:
         except Exception:
             return None
 
+    def news_cadence_seconds() -> int:
+        stored = get_database().get_setting("catalysts", {}) or {}
+        return int(stored.get("news_cadence_seconds", 300))
+
     return MonitoringService(
         database=get_database(),
         recommendations=get_recommendation_service(),
@@ -626,8 +684,10 @@ def get_monitoring_service() -> MonitoringService:
         notifications=get_notification_service(),
         portfolio_loader=portfolio_loader,
         catalyst_loader=catalyst_loader,
+        catalyst_scan=catalyst_scan,
         thesis_loader=thesis_loader,
         plan_loader=plan_loader,
         risk_snapshot_loader=risk_snapshot_loader,
         market_context_loader=build_market_context_loader(),
+        news_cadence_seconds=news_cadence_seconds,
     )
