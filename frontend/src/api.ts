@@ -1,8 +1,11 @@
 import type {
   AlertRecord,
+  BackupInfo,
   BootstrapPayload,
   CatalystScanSnapshot,
   CatalystSettings,
+  DiagnosticBundle,
+  EnvDiagnostic,
   MarketOverview,
   MarketQuote,
   MonitoringStatus,
@@ -11,12 +14,16 @@ import type {
   PortfolioSnapshot,
   RecommendationRecord,
   RecommendationSettings,
+  RestoreResult,
+  RetentionPreview,
+  RetentionSettings,
   RollChain,
   RollHeatmap,
   RollPatterns,
   StrategyDetail,
   SymbolCatalystResult,
   TraderDecision,
+  UpdateReadiness,
   WatchlistSnapshot,
 } from "./types";
 
@@ -277,6 +284,97 @@ export function saveRecommendationSettings(payload: {
     method: "PUT",
     body: JSON.stringify(payload),
   });
+}
+
+export type {
+  BackupInfo,
+  DiagnosticBundle,
+  EnvDiagnostic,
+  RestoreResult,
+  RetentionPreview,
+  RetentionSettings,
+  UpdateReadiness,
+} from "./types";
+
+export function fetchEnvDiagnostics() {
+  return api<EnvDiagnostic>("/api/v1/diagnostics/env");
+}
+
+export function fetchDiagnosticBundle() {
+  return api<DiagnosticBundle>("/api/v1/diagnostics/bundle");
+}
+
+export function fetchRetentionSettings() {
+  return api<RetentionSettings>("/api/v1/settings/retention");
+}
+
+export function saveRetentionSettings(payload: Partial<RetentionSettings>) {
+  return api<RetentionSettings>("/api/v1/settings/retention", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchRetentionPreview() {
+  return api<RetentionPreview>("/api/v1/settings/retention/preview");
+}
+
+export function applyRetention(confirm: boolean) {
+  return api<Record<string, unknown>>("/api/v1/settings/retention/apply", {
+    method: "POST",
+    body: JSON.stringify({ confirm }),
+  });
+}
+
+export function fetchBackups() {
+  return api<BackupInfo[]>("/api/v1/backups");
+}
+
+export function createBackup() {
+  return api<BackupInfo>("/api/v1/backups", { method: "POST" });
+}
+
+export function restoreBackup(backupId: string, confirm: boolean) {
+  return api<RestoreResult>(`/api/v1/backups/${encodeURIComponent(backupId)}/restore`, {
+    method: "POST",
+    body: JSON.stringify({ confirm }),
+  });
+}
+
+export function fetchUpdateStatus() {
+  return api<UpdateReadiness>("/api/v1/update/status");
+}
+
+export function fetchUpdateReadiness() {
+  return fetchUpdateStatus();
+}
+
+/** Trigger authenticated file downloads without reading response bodies as JSON. */
+export async function downloadExport(path: string, fallbackName = "export"): Promise<void> {
+  const response = await fetch(path, {
+    credentials: "same-origin",
+    headers: { Accept: "*/*" },
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `Export failed (${response.status})`);
+  }
+  const disposition = response.headers.get("content-disposition") ?? "";
+  const match = /filename="([^"]+)"/i.exec(disposition);
+  const filename = match?.[1] ?? fallbackName;
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+export function downloadAuthenticated(path: string, fallbackName: string) {
+  return downloadExport(path, fallbackName);
 }
 
 export async function fetchStreamingState(): Promise<

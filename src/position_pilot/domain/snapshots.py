@@ -11,10 +11,11 @@ from ..models import PositionType
 
 
 class SnapshotState(StrEnum):
-    """Whether a snapshot came from a live refresh or durable cache."""
+    """Whether a snapshot came from a live refresh, durable cache, or daily compaction."""
 
     LIVE = "live"
     CACHED = "cached"
+    DAILY = "daily"
 
 
 class FreshnessState(StrEnum):
@@ -128,6 +129,15 @@ class PortfolioTotals(BaseModel):
     unrealized_pnl: float = 0
 
 
+class SnapshotCompaction(BaseModel):
+    """Metadata recorded when a full snapshot is compacted into a daily summary."""
+
+    kind: str = "daily_summary"
+    day: str
+    source_snapshot_id: str | None = None
+    source_count: int | None = None
+
+
 class PortfolioSnapshot(BaseModel):
     """Atomic versioned state consumed by CLI and web surfaces."""
 
@@ -142,6 +152,7 @@ class PortfolioSnapshot(BaseModel):
     totals: PortfolioTotals = Field(default_factory=PortfolioTotals)
     selected_account_id: str = "all"
     notice: str | None = None
+    compaction: SnapshotCompaction | None = None
 
     def for_account(self, account_id: str) -> "PortfolioSnapshot":
         """Return one account view while preserving the snapshot identity."""

@@ -35,6 +35,7 @@ from ..domain.factory import (
     get_field_router,
     get_market_service,
     get_monitoring_service,
+    get_operations_service,
     get_order_service,
     get_plans_service,
     get_portfolio_service,
@@ -45,6 +46,7 @@ from ..domain.factory import (
     set_live_market_hub,
 )
 from ..domain.market import ChartSnapshot, MarketOverview, MarketSnapshot
+from ..domain.operations import package_diagnostic_zip
 from ..domain.orders import OrderSnapshot
 from ..domain.plans import AuditEvent, Thesis, TradePlan
 from ..domain.portfolio import PortfolioService
@@ -69,6 +71,8 @@ class WebSettings:
     session_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
     enforce_loopback: bool = True
     enable_streaming: bool = True
+    # Production default is one-time launch tokens. Browser suites may reuse a fixed token.
+    single_use_launch_token: bool = True
 
 
 class SessionExchangeRequest(BaseModel):
@@ -148,6 +152,26 @@ class AlertMuteRequest(BaseModel):
 
 class EvaluateRequest(BaseModel):
     force: bool = False
+
+
+class RetentionSettingsRequest(BaseModel):
+    portfolio_snapshots_days: int | None = Field(default=None, ge=30, le=3650)
+    catalyst_events_days: int | None = Field(default=None, ge=30, le=3650)
+    article_metadata_days: int | None = Field(default=None, ge=7, le=365)
+    recommendation_history_days: int | None = Field(default=None, ge=0, le=3650)
+    transaction_history: str | None = Field(default=None, max_length=32)
+
+
+class ConfirmRequest(BaseModel):
+    confirm: bool = False
+
+
+class BackupCreateRequest(BaseModel):
+    reason: str = Field(default="manual", max_length=40)
+
+
+class RestoreBackupRequest(BaseModel):
+    confirm: bool = False
 
 
 class PortfolioReader(Protocol):
@@ -460,7 +484,8 @@ def create_app(
                 active_settings.launch_token,
             ):
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
-            app.state.launch_token_available = False
+            if active_settings.single_use_launch_token:
+                app.state.launch_token_available = False
 
         response = Response(status_code=status.HTTP_204_NO_CONTENT)
         response.set_cookie(
@@ -531,7 +556,7 @@ def create_app(
                 "application": {
                     "name": "Position Pilot",
                     "version": __version__,
-                    "phase": "codex-monitoring",
+                    "phase": "hardening-retirement",
                 },
                 "providers": {
                     "tastytrade": _configured(
@@ -1408,6 +1433,290 @@ def create_app(
         for provider, state in health_map.items():
             get_database().save_provider_health(provider, state.model_dump(mode="json"))
         return {provider: state.model_dump(mode="json") for provider, state in health_map.items()}
+
+    # ── Phase 7 operations: export, diagnostics, backup, retention, update ──
+
+    @app.get("/api/v1/exports/portfolio.csv")
+    async def export_portfolio_csv(
+        account_id: str = "all",
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> Response:
+        _require_session(session, active_settings.session_token)
+        try:
+            filename, body = await run_in_threadpool(
+                lambda: get_operations_service().export_portfolio_csv(account_id)
+            )
+        except LookupError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+        return Response(
+            content=body,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/api/v1/exports/history.csv")
+    async def export_history_csv(
+        limit: int = 365,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> Response:
+        _require_session(session, active_settings.session_token)
+        filename, body = await run_in_threadpool(
+            lambda: get_operations_service().export_history_csv(limit=limit)
+        )
+        return Response(
+            content=body,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/api/v1/exports/snapshot.html")
+    async def export_snapshot_html(
+        account_id: str = "all",
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> Response:
+        _require_session(session, active_settings.session_token)
+        try:
+            filename, body = await run_in_threadpool(
+                lambda: get_operations_service().printable_html(account_id)
+            )
+        except LookupError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+        return Response(
+            content=body,
+            media_type="text/html; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/api/v1/exports/snapshot.pdf")
+    async def export_snapshot_pdf(
+        account_id: str = "all",
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> Response:
+        _require_session(session, active_settings.session_token)
+        try:
+            filename, body = await run_in_threadpool(
+                lambda: get_operations_service().printable_pdf(account_id)
+            )
+        except LookupError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+        return Response(
+            content=body,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/api/v1/diagnostics/bundle")
+    async def diagnostics_bundle(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        bundle = await run_in_threadpool(get_operations_service().diagnostic_bundle)
+        return bundle.model_dump(mode="json")
+
+    @app.get("/api/v1/diagnostics/bundle.zip")
+    async def diagnostics_bundle_zip(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> Response:
+        _require_session(session, active_settings.session_token)
+        bundle = await run_in_threadpool(get_operations_service().diagnostic_bundle)
+        payload = package_diagnostic_zip(bundle)
+        return Response(
+            content=payload,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": 'attachment; filename="position-pilot-diagnostics.zip"'
+            },
+        )
+
+    @app.get("/api/v1/diagnostics/env")
+    async def diagnostics_env(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        report = await run_in_threadpool(get_operations_service().env_diagnostics)
+        return report.model_dump(mode="json")
+
+    @app.get("/api/v1/settings/retention")
+    async def get_retention_settings(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        settings = await run_in_threadpool(get_operations_service().retention_settings)
+        return settings.model_dump(mode="json")
+
+    @app.put("/api/v1/settings/retention")
+    async def put_retention_settings(
+        payload: RetentionSettingsRequest,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        updates = {key: value for key, value in payload.model_dump().items() if value is not None}
+        try:
+            settings = await run_in_threadpool(
+                lambda: get_operations_service().update_retention_settings(updates)
+            )
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+        return settings.model_dump(mode="json")
+
+    @app.get("/api/v1/settings/retention/preview")
+    async def retention_preview(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        preview = await run_in_threadpool(get_operations_service().retention_preview)
+        return preview.model_dump(mode="json")
+
+    @app.post("/api/v1/settings/retention/apply")
+    async def retention_apply(
+        payload: ConfirmRequest,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        try:
+            result = await run_in_threadpool(
+                lambda: get_operations_service().apply_retention(confirm=payload.confirm)
+            )
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+        return result
+
+    @app.get("/api/v1/backups")
+    async def list_backups(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> list[dict[str, Any]]:
+        _require_session(session, active_settings.session_token)
+        items = await run_in_threadpool(get_operations_service().list_backups)
+        return [item.model_dump(mode="json") for item in items]
+
+    @app.post("/api/v1/backups")
+    async def create_backup(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        try:
+            item = await run_in_threadpool(
+                lambda: get_operations_service().create_backup(reason="manual")
+            )
+        except RuntimeError as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(error),
+            ) from error
+        return item.model_dump(mode="json")
+
+    @app.get("/api/v1/backups/{backup_id}")
+    async def download_backup(
+        backup_id: str,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> Response:
+        """Browser download: sanitized portable archive (not the faithful restore file)."""
+
+        _require_session(session, active_settings.session_token)
+        try:
+            filename, payload = await run_in_threadpool(
+                lambda: get_operations_service().portable_backup_archive(backup_id)
+            )
+        except (FileNotFoundError, ValueError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+        return Response(
+            content=payload,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.post("/api/v1/backups/{backup_id}/restore")
+    async def restore_backup(
+        backup_id: str,
+        payload: RestoreBackupRequest,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        try:
+            result = await run_in_threadpool(
+                lambda: get_operations_service().restore_backup(backup_id, confirm=payload.confirm)
+            )
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(error),
+            ) from error
+        except RuntimeError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
+        return result.model_dump(mode="json")
+
+    @app.get("/api/v1/update/status")
+    async def update_status(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        readiness = await run_in_threadpool(get_operations_service().update_readiness)
+        return readiness.model_dump(mode="json")
 
     @app.get("/api/v1/streaming/status")
     async def streaming_status(

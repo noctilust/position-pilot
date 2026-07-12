@@ -54,6 +54,7 @@ import {
   snoozeAlert,
   submitCatalystFeedback,
 } from "./api";
+import { OperationsPanel } from "./OperationsPanel";
 import type {
   AlertRecord,
   BootstrapPayload,
@@ -76,6 +77,25 @@ import type {
   WatchlistSnapshot,
 } from "./types";
 
+const STRATEGY_PAGE_SIZE = 50;
+const ORDER_PAGE_SIZE = 40;
+/** Matches PRD phone simplified read-only layout (≤48rem / ~390 CSS px phones). */
+const PHONE_MEDIA_QUERY = "(max-width: 48rem)";
+
+function usePhoneLayout(): boolean {
+  const [isPhone, setIsPhone] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia(PHONE_MEDIA_QUERY).matches : false,
+  );
+  useEffect(() => {
+    const media = window.matchMedia(PHONE_MEDIA_QUERY);
+    const onChange = () => setIsPhone(media.matches);
+    onChange();
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, []);
+  return isPhone;
+}
+
 type AppState =
   | { kind: "loading"; message: string }
   | { kind: "ready"; payload: BootstrapPayload }
@@ -96,6 +116,7 @@ const navigationIcons: Record<string, LucideIcon> = {
 };
 
 function App() {
+  const isPhone = usePhoneLayout();
   const [state, setState] = useState<AppState>({
     kind: "loading",
     message: "Securing local session…",
@@ -363,7 +384,7 @@ function App() {
   const snapshot = portfolio.kind === "ready" ? portfolio.snapshot : null;
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${isPhone ? " phone-readonly" : ""}`} data-layout={isPhone ? "phone" : "desktop"}>
       <NavigationRail
         items={state.payload.navigation}
         activeSection={activeSection}
@@ -376,13 +397,21 @@ function App() {
           accountOptions={accountOptions}
           liveState={liveState}
           liveMarketTick={liveMarketTick}
-          onAccountChange={selectAccount}
+          onAccountChange={isPhone ? () => undefined : selectAccount}
           onRefresh={() => void loadPortfolio(selectedAccountId, true)}
           theme={theme}
           onThemeChange={() => setTheme(theme === "dark" ? "light" : "dark")}
+          readOnlyPhone={isPhone}
         />
         <main id="main-content" className="workspace-main" tabIndex={-1}>
           <h1 className="sr-only">Position Pilot — {activeSection}</h1>
+          {isPhone ? (
+            <p className="phone-readonly-notice" role="status" aria-live="polite">
+              Phone layout is simplified and read-only. Portfolio, alerts, and catalysts remain
+              visible. Editing, destructive actions, and recommendation controls are available on a
+              wider screen.
+            </p>
+          ) : null}
           <FoundationNotice liveState={liveState} />
           {portfolio.kind === "ready" && portfolio.snapshot.notice ? (
             <p className="offline-notice" role="status">
@@ -426,6 +455,7 @@ function App() {
               markets={markets}
               watchlist={watchlist}
               onSaveWatchlist={async (symbols) => setWatchlist(await saveWatchlist(symbols))}
+              readOnlyPhone={isPhone}
             />
           ) : null}
 
@@ -435,6 +465,7 @@ function App() {
               error={alertsError}
               monitoring={monitoring ?? state.payload.monitoring}
               onRefresh={() => void loadAlerts(selectedAccountId)}
+              readOnlyPhone={isPhone}
               onAcknowledge={async (alertId) => {
                 await acknowledgeAlert(alertId);
                 await loadAlerts(selectedAccountId);
@@ -466,6 +497,7 @@ function App() {
               catalystSettings={catalysts?.settings ?? state.payload.catalysts ?? null}
               monitoring={monitoring ?? state.payload.monitoring}
               recommendationSettings={state.payload.recommendations ?? null}
+              readOnlyPhone={isPhone}
               onCatalystSettingsSaved={(next) =>
                 setCatalysts((current) =>
                   current ? { ...current, settings: next } : current,
@@ -489,6 +521,7 @@ function App() {
           key={strategyDetail.strategy.strategy_id}
           detail={strategyDetail}
           onClose={closeStrategy}
+          readOnlyPhone={isPhone}
           onSaved={async () => {
             const request = ++detailRequest.current;
             const detail = await fetchStrategyDetail(selectedStrategyId);
@@ -565,6 +598,7 @@ function WorkspaceHeader({
   onRefresh,
   theme,
   onThemeChange,
+  readOnlyPhone = false,
 }: {
   payload: BootstrapPayload;
   portfolio: PortfolioState;
@@ -575,6 +609,7 @@ function WorkspaceHeader({
   onRefresh: () => void;
   theme: "dark" | "light";
   onThemeChange: () => void;
+  readOnlyPhone?: boolean;
 }) {
   const time = useMemo(
     () =>
@@ -593,7 +628,7 @@ function WorkspaceHeader({
           aria-label="Account scope"
           value={portfolio.kind === "ready" ? portfolio.snapshot.selected_account_id : "all"}
           onChange={(event) => onAccountChange(event.target.value)}
-          disabled={portfolio.kind !== "ready"}
+          disabled={portfolio.kind !== "ready" || readOnlyPhone}
         >
           <option value="all">All accounts</option>
           {accountOptions.map((account) => (
@@ -626,7 +661,7 @@ function WorkspaceHeader({
         >
           {theme === "dark" ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
         </button>
-        <button className="command-button" type="button">
+        <button className="command-button" type="button" aria-label="Commands (⌘K)">
           <Command aria-hidden="true" />
           <span>Commands</span>
           <kbd>⌘K</kbd>
@@ -752,7 +787,7 @@ function OverviewSection({
             </div>
           </div>
           {risk?.concentration?.length ? (
-            <div className="table-wrap">
+            <div className="table-wrap" tabIndex={0} role="region" aria-label="Portfolio concentration table">
               <table className="data-table">
                 <caption className="sr-only">Concentration by underlying</caption>
                 <thead>
@@ -803,7 +838,7 @@ function OverviewSection({
               <h2 id="balances-heading">Account summary</h2>
             </div>
           </div>
-          <div className="table-wrap">
+          <div className="table-wrap" tabIndex={0} role="region" aria-label="Account balances table">
             <table className="data-table">
               <caption className="sr-only">Account balances</caption>
               <thead>
@@ -985,6 +1020,7 @@ function AlertsSection({
   onSnooze,
   onResolve,
   onMute,
+  readOnlyPhone = false,
 }: {
   alerts: AlertRecord[];
   error: string | null;
@@ -994,6 +1030,7 @@ function AlertsSection({
   onSnooze: (alertId: string) => Promise<void>;
   onResolve: (alertId: string) => Promise<void>;
   onMute: (alert: AlertRecord) => Promise<void>;
+  readOnlyPhone?: boolean;
 }) {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -1046,10 +1083,10 @@ function AlertsSection({
                 minute: "2-digit",
               }).format(new Date(alert.created_at))}
             </p>
-            <div className="inline-actions">
+            <div className="inline-actions desktop-only-actions" hidden={readOnlyPhone}>
               <button
                 type="button"
-                disabled={busyId === alert.alert_id}
+                disabled={readOnlyPhone || busyId === alert.alert_id}
                 onClick={() => {
                   void (async () => {
                     setBusyId(alert.alert_id);
@@ -1068,7 +1105,7 @@ function AlertsSection({
               </button>
               <button
                 type="button"
-                disabled={busyId === alert.alert_id}
+                disabled={readOnlyPhone || busyId === alert.alert_id}
                 onClick={() => {
                   void (async () => {
                     setBusyId(alert.alert_id);
@@ -1146,11 +1183,35 @@ function PositionsSection({
   catalysts: CatalystScanSnapshot | null;
 }) {
   const strategies = snapshot?.strategies ?? [];
+  const [strategyPage, setStrategyPage] = useState(0);
+  const [orderPage, setOrderPage] = useState(0);
   const catalystBySymbol = useMemo(() => {
     const map = new Map<string, SymbolCatalystResult>();
     for (const row of catalysts?.results ?? []) map.set(row.symbol, row);
     return map;
   }, [catalysts]);
+
+  useEffect(() => {
+    setStrategyPage(0);
+  }, [snapshot?.snapshot_id, snapshot?.selected_account_id]);
+
+  useEffect(() => {
+    setOrderPage(0);
+  }, [orders]);
+
+  const strategyPageCount = Math.max(1, Math.ceil(strategies.length / STRATEGY_PAGE_SIZE));
+  const safeStrategyPage = Math.min(strategyPage, strategyPageCount - 1);
+  const pagedStrategies = strategies.slice(
+    safeStrategyPage * STRATEGY_PAGE_SIZE,
+    safeStrategyPage * STRATEGY_PAGE_SIZE + STRATEGY_PAGE_SIZE,
+  );
+  const orderPageCount = Math.max(1, Math.ceil(orders.length / ORDER_PAGE_SIZE));
+  const safeOrderPage = Math.min(orderPage, orderPageCount - 1);
+  const pagedOrders = orders.slice(
+    safeOrderPage * ORDER_PAGE_SIZE,
+    safeOrderPage * ORDER_PAGE_SIZE + ORDER_PAGE_SIZE,
+  );
+
   return (
     <div className="stack-lg">
       <section className="panel-section" aria-labelledby="positions-heading">
@@ -1161,7 +1222,11 @@ function PositionsSection({
           </div>
           <span className="section-state">{strategies.length} strategies</span>
         </div>
-        <div className="table-wrap">
+        <p className="microcopy" role="status" aria-live="polite">
+          Showing {pagedStrategies.length} of {strategies.length} (page {safeStrategyPage + 1} of{" "}
+          {strategyPageCount}). Tables stay windowed so large portfolios remain keyboard-usable.
+        </p>
+        <div className="table-wrap" tabIndex={0} role="region" aria-label="Portfolio strategies table">
           <table className="data-table dense">
             <caption className="sr-only">Grouped strategies with Greeks and P/L</caption>
             <thead>
@@ -1178,7 +1243,7 @@ function PositionsSection({
               </tr>
             </thead>
             <tbody>
-              {strategies.map((strategy) => {
+              {pagedStrategies.map((strategy) => {
                 const catalyst = catalystBySymbol.get(strategy.underlying);
                 return (
                   <tr
@@ -1228,6 +1293,31 @@ function PositionsSection({
             </tbody>
           </table>
         </div>
+        {strategies.length > STRATEGY_PAGE_SIZE ? (
+          <div className="pager" role="navigation" aria-label="Strategy pages">
+            <button
+              type="button"
+              disabled={safeStrategyPage <= 0}
+              aria-label="Previous page"
+              onClick={() => setStrategyPage((page) => Math.max(0, page - 1))}
+            >
+              Previous
+            </button>
+            <span className="microcopy">
+              page {safeStrategyPage + 1} of {strategyPageCount}
+            </span>
+            <button
+              type="button"
+              disabled={safeStrategyPage >= strategyPageCount - 1}
+              aria-label="Next page"
+              onClick={() =>
+                setStrategyPage((page) => Math.min(strategyPageCount - 1, page + 1))
+              }
+            >
+              Next
+            </button>
+          </div>
+        ) : null}
       </section>
 
       <section className="panel-section" aria-labelledby="orders-heading">
@@ -1240,42 +1330,67 @@ function PositionsSection({
         {snapshot?.selected_account_id === "all" ? (
           <p className="muted">Select a single account to load order history and fill linkage.</p>
         ) : (
-          <div className="table-wrap">
-            <table className="data-table dense">
-              <caption className="sr-only">Recent orders with fill linkage</caption>
-              <thead>
-                <tr>
-                  <th scope="col">Symbol</th>
-                  <th scope="col">Action</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">Qty</th>
-                  <th scope="col">Fill</th>
-                  <th scope="col">Fills</th>
-                </tr>
-              </thead>
-              <tbody>
-                {orders.map((order) => (
-                  <tr key={order.order_id}>
-                    <td>{order.underlying_symbol || order.symbol}</td>
-                    <td>{order.action}</td>
-                    <td>{order.status}</td>
-                    <td className="tabular">{order.quantity}</td>
-                    <td className="tabular">
-                      {order.average_fill_price == null ? "—" : order.average_fill_price.toFixed(2)}
-                    </td>
-                    <td className="tabular">{order.fills.length}</td>
-                  </tr>
-                ))}
-                {!orders.length ? (
+          <>
+            <div className="table-wrap" tabIndex={0} role="region" aria-label="Order activity table">
+              <table className="data-table dense">
+                <caption className="sr-only">Recent orders with fill linkage</caption>
+                <thead>
                   <tr>
-                    <td colSpan={6} className="muted">
-                      No recent orders for this account.
-                    </td>
+                    <th scope="col">Symbol</th>
+                    <th scope="col">Action</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Qty</th>
+                    <th scope="col">Fill</th>
+                    <th scope="col">Fills</th>
                   </tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {pagedOrders.map((order) => (
+                    <tr key={order.order_id}>
+                      <td>{order.underlying_symbol || order.symbol}</td>
+                      <td>{order.action}</td>
+                      <td>{order.status}</td>
+                      <td className="tabular">{order.quantity}</td>
+                      <td className="tabular">
+                        {order.average_fill_price == null
+                          ? "—"
+                          : order.average_fill_price.toFixed(2)}
+                      </td>
+                      <td className="tabular">{order.fills.length}</td>
+                    </tr>
+                  ))}
+                  {!orders.length ? (
+                    <tr>
+                      <td colSpan={6} className="muted">
+                        No recent orders for this account.
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+            {orders.length > ORDER_PAGE_SIZE ? (
+              <div className="pager" role="navigation" aria-label="Order pages">
+                <button
+                  type="button"
+                  disabled={safeOrderPage <= 0}
+                  onClick={() => setOrderPage((page) => Math.max(0, page - 1))}
+                >
+                  Previous
+                </button>
+                <span className="microcopy">
+                  Page {safeOrderPage + 1} / {orderPageCount}
+                </span>
+                <button
+                  type="button"
+                  disabled={safeOrderPage >= orderPageCount - 1}
+                  onClick={() => setOrderPage((page) => Math.min(orderPageCount - 1, page + 1))}
+                >
+                  Next
+                </button>
+              </div>
+            ) : null}
+          </>
         )}
       </section>
     </div>
@@ -1310,7 +1425,7 @@ function RollsSection({
             <h2 id="rolls-heading">Roll chains</h2>
           </div>
         </div>
-        <div className="table-wrap">
+        <div className="table-wrap" tabIndex={0} role="region" aria-label="Roll chains table">
           <table className="data-table dense">
             <caption className="sr-only">Roll chains and credits</caption>
             <thead>
@@ -1437,10 +1552,12 @@ function MarketsSection({
   markets,
   watchlist,
   onSaveWatchlist,
+  readOnlyPhone = false,
 }: {
   markets: MarketOverview | null;
   watchlist: WatchlistSnapshot | null;
   onSaveWatchlist: (symbols: string[]) => Promise<void>;
+  readOnlyPhone?: boolean;
 }) {
   const [draft, setDraft] = useState("");
   return (
@@ -1452,7 +1569,7 @@ function MarketsSection({
             <h2 id="market-heading">Market overview</h2>
           </div>
         </div>
-        <div className="table-wrap">
+        <div className="table-wrap" tabIndex={0} role="region" aria-label="Market overview table">
           <table className="data-table dense">
             <caption className="sr-only">Broad market quotes and IV</caption>
             <thead>
@@ -1490,28 +1607,30 @@ function MarketsSection({
             <h2 id="watchlist-heading">Quotes</h2>
           </div>
         </div>
-        <form
-          className="inline-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const symbol = draft.trim().toUpperCase();
-            if (!symbol) return;
-            const next = Array.from(new Set([...(watchlist?.symbols ?? []), symbol]));
-            void onSaveWatchlist(next).then(() => setDraft(""));
-          }}
-        >
-          <label>
-            <span className="sr-only">Add symbol</span>
-            <input
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              placeholder="Add symbol"
-              aria-label="Add watchlist symbol"
-            />
-          </label>
-          <button type="submit">Add</button>
-        </form>
-        <div className="table-wrap">
+        {readOnlyPhone ? null : (
+          <form
+            className="inline-form desktop-only-actions"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const symbol = draft.trim().toUpperCase();
+              if (!symbol) return;
+              const next = Array.from(new Set([...(watchlist?.symbols ?? []), symbol]));
+              void onSaveWatchlist(next).then(() => setDraft(""));
+            }}
+          >
+            <label>
+              <span className="sr-only">Add symbol</span>
+              <input
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                placeholder="Add symbol"
+                aria-label="Add watchlist symbol"
+              />
+            </label>
+            <button type="submit">Add</button>
+          </form>
+        )}
+        <div className="table-wrap" tabIndex={0} role="region" aria-label="Watchlist quotes table">
           <table className="data-table dense">
             <caption className="sr-only">Watchlist quotes</caption>
             <thead>
@@ -1520,7 +1639,11 @@ function MarketsSection({
                 <th scope="col">Price</th>
                 <th scope="col">IV</th>
                 <th scope="col">IV rank</th>
-                <th scope="col" />
+                {readOnlyPhone ? null : (
+                  <th scope="col">
+                    <span className="sr-only">Actions</span>
+                  </th>
+                )}
               </tr>
             </thead>
             <tbody>
@@ -1536,19 +1659,21 @@ function MarketsSection({
                     <td className="tabular">
                       {quote?.iv_rank == null ? "—" : quote.iv_rank.toFixed(0)}
                     </td>
-                    <td>
-                      <button
-                        type="button"
-                        className="linkish"
-                        onClick={() =>
-                          void onSaveWatchlist(
-                            (watchlist?.symbols ?? []).filter((item) => item !== symbol),
-                          )
-                        }
-                      >
-                        Remove
-                      </button>
-                    </td>
+                    {readOnlyPhone ? null : (
+                      <td>
+                        <button
+                          type="button"
+                          className="linkish"
+                          onClick={() =>
+                            void onSaveWatchlist(
+                              (watchlist?.symbols ?? []).filter((item) => item !== symbol),
+                            )
+                          }
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 );
               })}
@@ -1569,6 +1694,7 @@ function SettingsSection({
   onCatalystSettingsSaved,
   onMonitoringChanged,
   onRecommendationSettingsSaved,
+  readOnlyPhone = false,
 }: {
   payload: BootstrapPayload;
   accountOptions: PortfolioAccount[];
@@ -1578,6 +1704,7 @@ function SettingsSection({
   onCatalystSettingsSaved: (settings: CatalystSettings) => void;
   onMonitoringChanged: (status: MonitoringStatus) => void;
   onRecommendationSettingsSaved: (settings: RecommendationSettings) => void;
+  readOnlyPhone?: boolean;
 }) {
   const [cadence, setCadence] = useState(
     String(catalystSettings?.news_cadence_seconds ?? 300),
@@ -1612,6 +1739,9 @@ function SettingsSection({
 
   return (
     <div className="stack-lg">
+      <p className="muted" role="note">
+        Outputs are decision support only. Position Pilot never places, stages, or cancels orders.
+      </p>
       <ProviderLedger providers={payload.providers} />
 
       <section className="panel-section" aria-labelledby="monitoring-consent-heading">
@@ -1649,52 +1779,56 @@ function SettingsSection({
           </div>
         </dl>
         {monitoring.notice ? <p className="muted" role="status">{monitoring.notice}</p> : null}
-        <div className="inline-actions">
-          <button
-            type="button"
-            disabled={consentBusy}
-            onClick={() => {
-              void (async () => {
-                setConsentBusy(true);
-                try {
-                  const result = await saveMonitoringConsent(!monitoring.enabled);
-                  onMonitoringChanged(result.status);
-                  setSaveState(
-                    result.consent.enabled
-                      ? "Monitoring consent granted and persisted."
-                      : "Monitoring disabled.",
-                  );
-                } catch (error: unknown) {
-                  setSaveState(
-                    error instanceof Error ? error.message : "Could not update monitoring consent.",
-                  );
-                } finally {
-                  setConsentBusy(false);
-                }
-              })();
-            }}
-          >
-            {monitoring.enabled ? "Disable monitoring" : "Enable monitoring"}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              void (async () => {
-                try {
-                  await runMonitoringEvaluation(false);
-                  onMonitoringChanged(await fetchMonitoring());
-                  setSaveState("On-demand evaluation requested.");
-                } catch (error: unknown) {
-                  setSaveState(
-                    error instanceof Error ? error.message : "Evaluation failed.",
-                  );
-                }
-              })();
-            }}
-          >
-            Evaluate now
-          </button>
-        </div>
+        {readOnlyPhone ? null : (
+          <div className="inline-actions desktop-only-actions">
+            <button
+              type="button"
+              disabled={consentBusy}
+              onClick={() => {
+                void (async () => {
+                  setConsentBusy(true);
+                  try {
+                    const result = await saveMonitoringConsent(!monitoring.enabled);
+                    onMonitoringChanged(result.status);
+                    setSaveState(
+                      result.consent.enabled
+                        ? "Monitoring consent granted and persisted."
+                        : "Monitoring disabled.",
+                    );
+                  } catch (error: unknown) {
+                    setSaveState(
+                      error instanceof Error
+                        ? error.message
+                        : "Could not update monitoring consent.",
+                    );
+                  } finally {
+                    setConsentBusy(false);
+                  }
+                })();
+              }}
+            >
+              {monitoring.enabled ? "Disable monitoring" : "Enable monitoring"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void (async () => {
+                  try {
+                    await runMonitoringEvaluation(false);
+                    onMonitoringChanged(await fetchMonitoring());
+                    setSaveState("On-demand evaluation requested.");
+                  } catch (error: unknown) {
+                    setSaveState(
+                      error instanceof Error ? error.message : "Evaluation failed.",
+                    );
+                  }
+                })();
+              }}
+            >
+              Evaluate now
+            </button>
+          </div>
+        )}
       </section>
 
       <section className="panel-section" aria-labelledby="recommendation-settings-heading">
@@ -1712,36 +1846,46 @@ function SettingsSection({
           Provider: {recommendationSettings?.selected_provider ?? "codex-cli"} · API-key fallback:{" "}
           {recommendationSettings?.api_key_fallback_available ? "available" : "unavailable"}
         </p>
-        <form
-          className="stack-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void (async () => {
-              try {
-                const next = await saveRecommendationSettings({
-                  rich_notification_preview: richPreview,
-                });
-                onRecommendationSettingsSaved(next);
-                setSaveState("Recommendation settings saved.");
-              } catch (error: unknown) {
-                setSaveState(
-                  error instanceof Error ? error.message : "Could not save recommendation settings.",
-                );
-              }
-            })();
-          }}
-        >
-          <label className="compact-field checkbox-field">
-            <input
-              type="checkbox"
-              checked={richPreview}
-              onChange={(event) => setRichPreview(event.target.checked)}
-            />
-            Opt in to richer macOS notification previews (still excludes account ids, quantities,
-            balances, and P/L)
-          </label>
-          <button type="submit">Save recommendation settings</button>
-        </form>
+        {readOnlyPhone ? (
+          <p className="muted">
+            Rich notification preview:{" "}
+            {recommendationSettings?.rich_notification_preview ? "enabled" : "disabled"}. Editing is
+            available on desktop widths.
+          </p>
+        ) : (
+          <form
+            className="stack-form desktop-only-actions"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void (async () => {
+                try {
+                  const next = await saveRecommendationSettings({
+                    rich_notification_preview: richPreview,
+                  });
+                  onRecommendationSettingsSaved(next);
+                  setSaveState("Recommendation settings saved.");
+                } catch (error: unknown) {
+                  setSaveState(
+                    error instanceof Error
+                      ? error.message
+                      : "Could not save recommendation settings.",
+                  );
+                }
+              })();
+            }}
+          >
+            <label className="compact-field checkbox-field">
+              <input
+                type="checkbox"
+                checked={richPreview}
+                onChange={(event) => setRichPreview(event.target.checked)}
+              />
+              Opt in to richer macOS notification previews (still excludes account ids, quantities,
+              balances, and P/L)
+            </label>
+            <button type="submit">Save recommendation settings</button>
+          </form>
+        )}
       </section>
 
       <section className="panel-section">
@@ -1772,77 +1916,92 @@ function SettingsSection({
             <h2 id="catalyst-settings-heading">News cadence and thresholds</h2>
           </div>
         </div>
-        <form
-          className="stack-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void (async () => {
-              setSaveState(null);
-              try {
-                const next = await saveCatalystSettings({
-                  news_cadence_seconds: Number(cadence),
-                  stock_move_threshold_pct: Number(stockThreshold),
-                  etf_move_threshold_pct: Number(etfThreshold),
-                  benzinga_enabled: benzingaEnabled,
-                });
-                onCatalystSettingsSaved(next);
-                setSaveState("Saved locally.");
-              } catch (error: unknown) {
-                setSaveState(
-                  error instanceof Error ? error.message : "Could not save catalyst settings.",
-                );
-              }
-            })();
-          }}
-        >
-          <label className="compact-field">
-            News cadence (seconds)
-            <input
-              type="number"
-              min={60}
-              max={3600}
-              value={cadence}
-              onChange={(event) => setCadence(event.target.value)}
-            />
-          </label>
-          <label className="compact-field">
-            Stock move threshold (%)
-            <input
-              type="number"
-              min={0.1}
-              step={0.1}
-              value={stockThreshold}
-              onChange={(event) => setStockThreshold(event.target.value)}
-            />
-          </label>
-          <label className="compact-field">
-            Broad ETF move threshold (%)
-            <input
-              type="number"
-              min={0.1}
-              step={0.1}
-              value={etfThreshold}
-              onChange={(event) => setEtfThreshold(event.target.value)}
-            />
-          </label>
-          <label className="compact-field checkbox-field">
-            <input
-              type="checkbox"
-              checked={benzingaEnabled}
-              onChange={(event) => setBenzingaEnabled(event.target.checked)}
-            />
-            Enable Benzinga premium catalysts when configured
-          </label>
-          <p className="microcopy">
-            Benzinga status: {catalystSettings?.benzinga.status ?? "unknown"}. Provider keys never
-            appear in the browser.
-          </p>
-          <button type="submit" className="primary-action">
-            Save catalyst settings
-          </button>
-          {saveState ? <p role="status">{saveState}</p> : null}
-        </form>
+        {readOnlyPhone ? (
+          <div className="stack-form">
+            <p className="microcopy">News cadence: {cadence}s</p>
+            <p className="microcopy">Stock move threshold: {stockThreshold}%</p>
+            <p className="microcopy">Broad ETF move threshold: {etfThreshold}%</p>
+            <p className="microcopy">
+              Benzinga: {benzingaEnabled ? "enabled when configured" : "disabled"} · status:{" "}
+              {catalystSettings?.benzinga.status ?? "unknown"}
+            </p>
+            <p className="muted">Catalyst settings are read-only on phone widths.</p>
+          </div>
+        ) : (
+          <form
+            className="stack-form desktop-only-actions"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void (async () => {
+                setSaveState(null);
+                try {
+                  const next = await saveCatalystSettings({
+                    news_cadence_seconds: Number(cadence),
+                    stock_move_threshold_pct: Number(stockThreshold),
+                    etf_move_threshold_pct: Number(etfThreshold),
+                    benzinga_enabled: benzingaEnabled,
+                  });
+                  onCatalystSettingsSaved(next);
+                  setSaveState("Saved locally.");
+                } catch (error: unknown) {
+                  setSaveState(
+                    error instanceof Error ? error.message : "Could not save catalyst settings.",
+                  );
+                }
+              })();
+            }}
+          >
+            <label className="compact-field">
+              News cadence (seconds)
+              <input
+                type="number"
+                min={60}
+                max={3600}
+                value={cadence}
+                onChange={(event) => setCadence(event.target.value)}
+              />
+            </label>
+            <label className="compact-field">
+              Stock move threshold (%)
+              <input
+                type="number"
+                min={0.1}
+                step={0.1}
+                value={stockThreshold}
+                onChange={(event) => setStockThreshold(event.target.value)}
+              />
+            </label>
+            <label className="compact-field">
+              Broad ETF move threshold (%)
+              <input
+                type="number"
+                min={0.1}
+                step={0.1}
+                value={etfThreshold}
+                onChange={(event) => setEtfThreshold(event.target.value)}
+              />
+            </label>
+            <label className="compact-field checkbox-field">
+              <input
+                type="checkbox"
+                checked={benzingaEnabled}
+                onChange={(event) => setBenzingaEnabled(event.target.checked)}
+              />
+              Enable Benzinga premium catalysts when configured
+            </label>
+            <p className="microcopy">
+              Benzinga status: {catalystSettings?.benzinga.status ?? "unknown"}. Provider keys never
+              appear in the browser.
+            </p>
+            <button type="submit" className="primary-action">
+              Save catalyst settings
+            </button>
+            {saveState ? <p role="status">{saveState}</p> : null}
+          </form>
+        )}
       </section>
+
+      <OperationsPanel accountId={payload.primary_account_id || "all"} readOnlyPhone={readOnlyPhone} />
     </div>
   );
 }
@@ -1851,10 +2010,12 @@ function StrategyDetailDrawer({
   detail,
   onClose,
   onSaved,
+  readOnlyPhone = false,
 }: {
   detail: StrategyDetail;
   onClose: () => void;
   onSaved: () => Promise<void>;
+  readOnlyPhone?: boolean;
 }) {
   const strategy = detail.strategy;
   const panelRef = useRef<HTMLElement>(null);
@@ -2090,7 +2251,7 @@ function StrategyDetailDrawer({
 
           <section>
             <h3>Legs</h3>
-            <div className="table-wrap">
+            <div className="table-wrap" tabIndex={0} role="region" aria-label="Strategy legs table">
               <table className="data-table dense">
                 <thead>
                   <tr>
@@ -2220,96 +2381,110 @@ function StrategyDetailDrawer({
                     ))}
                   </ul>
                 ) : null}
-                <label className="compact-field">
-                  Decision note
-                  <input
-                    value={decisionNote}
-                    onChange={(event) => setDecisionNote(event.target.value)}
-                    maxLength={500}
-                  />
-                </label>
-                <div className="inline-actions">
-                  {(
-                    [
-                      ["accepted", "Accept"],
-                      ["dismissed", "Dismiss"],
-                      ["deferred", "Defer"],
-                      ["handled_in_tastytrade", "Handled in Tastytrade"],
-                    ] as const
-                  ).map(([value, label]) => (
-                    <button
-                      key={value}
-                      type="button"
-                      disabled={recBusy}
-                      onClick={() => {
-                        void (async () => {
-                          setRecBusy(true);
-                          setRecMessage(null);
-                          try {
-                            await recordTraderDecision(
-                              recommendation.recommendation_id,
-                              value,
-                              decisionNote,
-                            );
-                            setRecMessage(`Recorded: ${label}`);
-                            await onSaved();
-                          } catch (error: unknown) {
-                            setRecMessage(
-                              error instanceof Error ? error.message : "Could not record decision.",
-                            );
-                          } finally {
-                            setRecBusy(false);
-                          }
-                        })();
-                      }}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
+                {readOnlyPhone ? null : (
+                  <>
+                    <label className="compact-field">
+                      Decision note
+                      <input
+                        value={decisionNote}
+                        onChange={(event) => setDecisionNote(event.target.value)}
+                        maxLength={500}
+                      />
+                    </label>
+                    <div className="inline-actions desktop-only-actions">
+                      {(
+                        [
+                          ["accepted", "Accept"],
+                          ["dismissed", "Dismiss"],
+                          ["deferred", "Defer"],
+                          ["handled_in_tastytrade", "Handled in Tastytrade"],
+                        ] as const
+                      ).map(([value, label]) => (
+                        <button
+                          key={value}
+                          type="button"
+                          disabled={recBusy}
+                          onClick={() => {
+                            void (async () => {
+                              setRecBusy(true);
+                              setRecMessage(null);
+                              try {
+                                await recordTraderDecision(
+                                  recommendation.recommendation_id,
+                                  value,
+                                  decisionNote,
+                                );
+                                setRecMessage(`Recorded: ${label}`);
+                                await onSaved();
+                              } catch (error: unknown) {
+                                setRecMessage(
+                                  error instanceof Error
+                                    ? error.message
+                                    : "Could not record decision.",
+                                );
+                              } finally {
+                                setRecBusy(false);
+                              }
+                            })();
+                          }}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
             ) : (
               <p className="muted">No recommendation stored for this strategy yet.</p>
             )}
-            <div className="inline-actions">
-              <button
-                type="button"
-                disabled={recBusy}
-                onClick={() => {
-                  void (async () => {
-                    setRecBusy(true);
-                    setRecMessage(null);
-                    try {
-                      const next = await evaluateStrategyRecommendation(strategy.strategy_id, true);
-                      setRecommendation(next);
-                      setRecMessage(
-                        next.provider_status === "ok" || next.provider_status === "skipped_unchanged"
-                          ? "Evaluation complete."
-                          : `Provider status: ${next.provider_status}${next.error ? ` — ${next.error}` : ""}`,
-                      );
-                      await onSaved();
-                    } catch (error: unknown) {
-                      setRecMessage(
-                        error instanceof Error ? error.message : "Evaluation failed.",
-                      );
-                    } finally {
-                      setRecBusy(false);
-                    }
-                  })();
-                }}
-              >
-                {recBusy ? "Evaluating…" : "Evaluate with Codex"}
-              </button>
-            </div>
+            {readOnlyPhone ? null : (
+              <div className="inline-actions desktop-only-actions">
+                <button
+                  type="button"
+                  disabled={recBusy}
+                  onClick={() => {
+                    void (async () => {
+                      setRecBusy(true);
+                      setRecMessage(null);
+                      try {
+                        const next = await evaluateStrategyRecommendation(
+                          strategy.strategy_id,
+                          true,
+                        );
+                        setRecommendation(next);
+                        setRecMessage(
+                          next.provider_status === "ok" ||
+                            next.provider_status === "skipped_unchanged"
+                            ? "Evaluation complete."
+                            : `Provider status: ${next.provider_status}${next.error ? ` — ${next.error}` : ""}`,
+                        );
+                        await onSaved();
+                      } catch (error: unknown) {
+                        setRecMessage(
+                          error instanceof Error ? error.message : "Evaluation failed.",
+                        );
+                      } finally {
+                        setRecBusy(false);
+                      }
+                    })();
+                  }}
+                >
+                  {recBusy ? "Evaluating…" : "Evaluate with Codex"}
+                </button>
+              </div>
+            )}
             {recMessage ? <p role="status">{recMessage}</p> : null}
           </section>
 
           <section>
             <h3>{strategy.horizon === "strategic" ? "Thesis" : "Trade plan"}</h3>
             {saveError ? <p role="alert">{saveError}</p> : null}
-            {strategy.horizon === "strategic" ? (
+            {readOnlyPhone ? (
+              <p className="muted">Editing is available on desktop widths.</p>
+            ) : strategy.horizon === "strategic" ? (
               <form
-                className="stack-form"
+                className="stack-form desktop-only-actions"
                 onSubmit={(event) => {
                   event.preventDefault();
                   void saveAndReload(saveThesis(strategy.strategy_id, thesisDraft));

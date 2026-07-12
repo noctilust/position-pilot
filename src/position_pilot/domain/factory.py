@@ -29,6 +29,7 @@ from .catalysts import (
 from .market import MarketService, ProviderRoutedMarketSource
 from .monitoring import MonitoringService
 from .notifications import NotificationService
+from .operations import OperationsService
 from .orders import OrderService
 from .plans import PlansService
 from .portfolio import PortfolioService
@@ -64,6 +65,20 @@ class TastytradePortfolioSource:
 
     def enrich_positions_greeks_batch(self, positions: list[Position]) -> list[Position]:
         return self.client.enrich_positions_greeks_batch(positions)
+
+    def get_quotes_batch(self, symbols: list[str], force_refresh: bool = False) -> dict:
+        return self.client.get_quotes_batch(symbols, force_refresh=force_refresh)
+
+    def get_market_metrics_batch(self, symbols: list[str], force_refresh: bool = False) -> dict:
+        batch = getattr(self.client, "get_market_metrics_batch", None)
+        if callable(batch):
+            return batch(symbols, force_refresh=force_refresh)
+        out: dict = {}
+        for symbol in symbols:
+            metrics = self.client.get_market_metrics(symbol, force_refresh=force_refresh)
+            if metrics is not None:
+                out[symbol] = metrics
+        return out
 
     def get_orders(self, account_number: str, *, limit: int = 100) -> list[Order]:
         return self.client.get_orders(account_number, limit=limit)
@@ -460,10 +475,7 @@ def _market_fields_from_dxlink(symbol: str) -> dict | None:
         if isinstance(values, dict):
             merged.update(values)
     price = (
-        merged.get("price")
-        or merged.get("mark")
-        or merged.get("last")
-        or merged.get("bidPrice")
+        merged.get("price") or merged.get("mark") or merged.get("last") or merged.get("bidPrice")
     )
     bid = merged.get("bid") or merged.get("bidPrice")
     ask = merged.get("ask") or merged.get("askPrice")
@@ -517,6 +529,54 @@ def build_market_context_loader() -> Any:
         }
 
     return market_context_loader
+
+
+@lru_cache(maxsize=1)
+def get_operations_service() -> OperationsService:
+    """Local export, diagnostics, backup, retention, and update readiness."""
+
+    def monitoring_active() -> bool:
+        """Fail closed: unknown/error is treated as active so restore/update block."""
+
+        try:
+            status = get_monitoring_service().status()
+            # Block restore while the scheduler is running, or status is unknown.
+            running = getattr(status, "running", None)
+            if running is None:
+                return True
+            return bool(running)
+        except Exception:
+            return True
+
+    def provider_status() -> dict[str, str]:
+        status: dict[str, str] = {
+            "tastytrade": (
+                "configured"
+                if os.getenv("TASTYTRADE_CLIENT_SECRET") and os.getenv("TASTYTRADE_REFRESH_TOKEN")
+                else "not_configured"
+            ),
+            "massive": "configured" if os.getenv("MASSIVE_API_KEY") else "not_configured",
+            "benzinga": "configured" if os.getenv("BENZINGA_API_KEY") else "not_configured",
+        }
+        try:
+            status["codex"] = get_recommendation_service().provider_public_status()
+        except Exception:
+            status["codex"] = "unavailable"
+        return status
+
+    # Prefer repository root (contains .gitignore / .env) when running from source.
+    project_root = Path(__file__).resolve().parents[3]
+    if not (project_root / "pyproject.toml").exists():
+        project_root = Path.cwd()
+
+    return OperationsService(
+        database=get_database(),
+        portfolio=get_portfolio_service(),
+        data_directory=data_directory(),
+        project_root=project_root,
+        monitoring_active_fn=monitoring_active,
+        provider_status_fn=provider_status,
+    )
 
 
 @lru_cache(maxsize=1)

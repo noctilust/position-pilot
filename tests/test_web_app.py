@@ -155,7 +155,7 @@ def test_authenticated_bootstrap_reports_capabilities_without_secrets(monkeypatc
     assert payload["application"] == {
         "name": "Position Pilot",
         "version": "0.1.0",
-        "phase": "codex-monitoring",
+        "phase": "hardening-retirement",
     }
     assert payload["providers"] == {
         "tastytrade": "configured",

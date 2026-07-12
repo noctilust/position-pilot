@@ -11,7 +11,19 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from ..domain.snapshots import PortfolioSnapshot
+from pydantic import ValidationError
+
+from ..domain.snapshots import (
+    AccountSnapshot,
+    DataFreshness,
+    FreshnessState,
+    PortfolioSnapshot,
+    PortfolioTotals,
+    PositionSnapshot,
+    SnapshotCompaction,
+    SnapshotState,
+    StrategySnapshot,
+)
 
 CURRENT_SCHEMA_VERSION = 6
 
@@ -313,6 +325,551 @@ class PositionPilotDatabase:
                 """
             ).fetchone()
         return PortfolioSnapshot.model_validate_json(row[0]) if row else None
+
+    def list_portfolio_snapshots(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Return lightweight snapshot metadata newest-first (payload excluded)."""
+
+        capped = min(max(limit, 1), 5_000)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT snapshot_id, schema_version, captured_at, state, created_at
+                FROM portfolio_snapshots
+                ORDER BY captured_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                (capped,),
+            ).fetchall()
+        return [
+            {
+                "snapshot_id": row[0],
+                "schema_version": int(row[1]),
+                "captured_at": row[2],
+                "state": row[3],
+                "created_at": row[4],
+            }
+            for row in rows
+        ]
+
+    def list_portfolio_snapshot_payloads(self, *, limit: int = 100) -> list[PortfolioSnapshot]:
+        """Return full snapshot payloads newest-first for history export."""
+
+        capped = min(max(limit, 1), 1_000)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json FROM portfolio_snapshots
+                ORDER BY captured_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                (capped,),
+            ).fetchall()
+        return [PortfolioSnapshot.model_validate_json(row[0]) for row in rows]
+
+    def count_table(self, table: str) -> int:
+        """Return row count for a known application table (whitelist)."""
+
+        allowed = {
+            "portfolio_snapshots",
+            "catalyst_events",
+            "catalyst_articles",
+            "catalyst_sources",
+            "recommendation_history",
+            "recommendations",
+            "alerts",
+            "audit_events",
+            "roll_chains",
+            "provider_health",
+            "trader_decisions",
+        }
+        if table not in allowed:
+            raise ValueError(f"Unsupported table count: {table}")
+        with self._connect() as connection:
+            row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+        return int(row[0] or 0)
+
+    def integrity_ok(self) -> tuple[bool, str]:
+        """Run SQLite integrity_check against the live database file."""
+
+        if not self.path.exists():
+            return False, "database file missing"
+        with self._connect() as connection:
+            row = connection.execute("PRAGMA integrity_check").fetchone()
+        message = str(row[0]) if row else "unknown"
+        return message.lower() == "ok", message
+
+    def list_portfolio_snapshot_summaries(self, *, limit: int = 365) -> list[dict[str, Any]]:
+        """Return compact history rows for export without full payloads."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT snapshot_id, schema_version, captured_at, state, payload_json
+                FROM portfolio_snapshots
+                ORDER BY captured_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        summaries: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            accounts = payload.get("accounts") or []
+            strategies = payload.get("strategies") or []
+            positions = sum(len(account.get("positions") or []) for account in accounts)
+            totals = payload.get("totals") or {}
+            summaries.append(
+                {
+                    "snapshot_id": row["snapshot_id"],
+                    "schema_version": row["schema_version"],
+                    "captured_at": row["captured_at"],
+                    "state": row["state"],
+                    "account_count": len(accounts),
+                    "strategy_count": len(strategies),
+                    "position_count": positions,
+                    "net_liquidating_value": totals.get("net_liquidating_value"),
+                    "unrealized_pnl": totals.get("unrealized_pnl"),
+                }
+            )
+        return summaries
+
+    def all_settings(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT key, value_json FROM settings ORDER BY key"
+            ).fetchall()
+        result: dict[str, Any] = {}
+        for row in rows:
+            try:
+                result[row["key"]] = json.loads(row["value_json"])
+            except (TypeError, json.JSONDecodeError):
+                result[row["key"]] = None
+        return result
+
+    def operational_counts(self) -> dict[str, int]:
+        tables = {
+            "portfolio_snapshots": "portfolio_snapshots",
+            "catalyst_events": "catalyst_events",
+            "catalyst_articles": "catalyst_articles",
+            "recommendations": "recommendations",
+            "recommendation_history": "recommendation_history",
+            "alerts": "alerts",
+            "roll_chains": "roll_chains",
+            "audit_events": "audit_events",
+            "trader_decisions": "trader_decisions",
+        }
+        counts: dict[str, int] = {}
+        with self._connect() as connection:
+            for label, table in tables.items():
+                exists = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+                if not exists:
+                    counts[label] = 0
+                    continue
+                counts[label] = int(
+                    connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                )
+        return counts
+
+    def retention_candidates(
+        self,
+        *,
+        portfolio_snapshots_days: int,
+        catalyst_events_days: int,
+        article_metadata_days: int,
+        recommendation_history_days: int,
+    ) -> dict[str, int]:
+        now = datetime.now(UTC)
+        candidates: dict[str, int] = {}
+        with self._connect() as connection:
+            snap_cutoff = now.timestamp() - portfolio_snapshots_days * 86400
+            # captured_at is ISO text; compare lexicographically with ISO cutoff.
+            snap_iso = datetime.fromtimestamp(snap_cutoff, tz=UTC).isoformat()
+            candidates["portfolio_snapshots"] = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM portfolio_snapshots WHERE captured_at < ?",
+                    (snap_iso,),
+                ).fetchone()[0]
+            )
+            # Non-daily older snapshots compact into one durable daily summary per day.
+            candidates["portfolio_snapshots_compactable"] = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM portfolio_snapshots
+                    WHERE captured_at < ? AND state != 'daily'
+                    """,
+                    (snap_iso,),
+                ).fetchone()[0]
+            )
+            cat_iso = datetime.fromtimestamp(
+                now.timestamp() - catalyst_events_days * 86400, tz=UTC
+            ).isoformat()
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalyst_events'"
+            ).fetchone():
+                candidates["catalyst_events"] = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM catalyst_events WHERE event_at < ?",
+                        (cat_iso,),
+                    ).fetchone()[0]
+                )
+            else:
+                candidates["catalyst_events"] = 0
+            art_iso = datetime.fromtimestamp(
+                now.timestamp() - article_metadata_days * 86400, tz=UTC
+            ).isoformat()
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalyst_articles'"
+            ).fetchone():
+                candidates["catalyst_articles"] = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM catalyst_articles WHERE stored_at < ?",
+                        (art_iso,),
+                    ).fetchone()[0]
+                )
+            else:
+                candidates["catalyst_articles"] = 0
+            # Recommendation history is audit-critical: report count but ordinary
+            # apply never purges it (recommendation_history_days ignored for delete).
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='recommendation_history'"
+            ).fetchone():
+                candidates["recommendation_history"] = int(
+                    connection.execute("SELECT COUNT(*) FROM recommendation_history").fetchone()[0]
+                )
+            else:
+                candidates["recommendation_history"] = 0
+            _ = recommendation_history_days  # retained for API compatibility
+            for table, label in (
+                ("roll_chains", "roll_chains"),
+                ("audit_events", "audit_events"),
+                ("trader_decisions", "trader_decisions"),
+            ):
+                if connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone():
+                    candidates[label] = int(
+                        connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    )
+                else:
+                    candidates[label] = 0
+        return candidates
+
+    def apply_retention(
+        self,
+        *,
+        portfolio_snapshots_days: int,
+        catalyst_events_days: int,
+        article_metadata_days: int,
+        recommendation_history_days: int,
+        clear_transactions: bool = False,
+        compact_portfolio_snapshots: bool = True,
+    ) -> dict[str, int]:
+        """Apply ordinary retention. Never touches credentials or audit-critical tables.
+
+        Portfolio snapshots older than the retention window are compacted into one
+        durable daily summary per calendar day instead of deleting all history.
+        ``clear_transactions`` is accepted for API compatibility but is ignored —
+        roll chains, trader decisions, audit events, recommendation history, and
+        transactions are never cleared by ordinary apply.
+        """
+
+        now = datetime.now(UTC)
+        deleted: dict[str, int] = {}
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            snap_iso = datetime.fromtimestamp(
+                now.timestamp() - portfolio_snapshots_days * 86400, tz=UTC
+            ).isoformat()
+            # Keep at least the newest snapshot even if outside the window.
+            newest = connection.execute(
+                """
+                SELECT snapshot_id FROM portfolio_snapshots
+                ORDER BY captured_at DESC, rowid DESC LIMIT 1
+                """
+            ).fetchone()
+            newest_id = newest[0] if newest else None
+
+            compacted = 0
+            if compact_portfolio_snapshots:
+                compacted = self._compact_old_portfolio_snapshots(
+                    connection,
+                    older_than_iso=snap_iso,
+                    protect_snapshot_id=newest_id,
+                )
+            deleted["portfolio_snapshots_compacted"] = compacted
+
+            # After compaction, no older non-daily rows should remain; do not hard-delete
+            # daily summaries or the newest snapshot.
+            if newest_id:
+                cursor = connection.execute(
+                    """
+                    DELETE FROM portfolio_snapshots
+                    WHERE captured_at < ? AND snapshot_id != ? AND state != 'daily'
+                    """,
+                    (snap_iso, newest_id),
+                )
+            else:
+                cursor = connection.execute(
+                    """
+                    DELETE FROM portfolio_snapshots
+                    WHERE captured_at < ? AND state != 'daily'
+                    """,
+                    (snap_iso,),
+                )
+            deleted["portfolio_snapshots_intraday"] = cursor.rowcount
+            deleted["portfolio_snapshots"] = compacted + cursor.rowcount
+
+            cat_iso = datetime.fromtimestamp(
+                now.timestamp() - catalyst_events_days * 86400, tz=UTC
+            ).isoformat()
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalyst_events'"
+            ).fetchone():
+                expired_ids = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT catalyst_id FROM catalyst_events WHERE event_at < ?",
+                        (cat_iso,),
+                    ).fetchall()
+                ]
+                for catalyst_id in expired_ids:
+                    connection.execute(
+                        "DELETE FROM catalyst_sources WHERE catalyst_id = ?",
+                        (catalyst_id,),
+                    )
+                    connection.execute(
+                        "DELETE FROM catalyst_source_links WHERE catalyst_id = ?",
+                        (catalyst_id,),
+                    )
+                cursor = connection.execute(
+                    "DELETE FROM catalyst_events WHERE event_at < ?",
+                    (cat_iso,),
+                )
+                deleted["catalyst_events"] = cursor.rowcount
+            else:
+                deleted["catalyst_events"] = 0
+
+            art_iso = datetime.fromtimestamp(
+                now.timestamp() - article_metadata_days * 86400, tz=UTC
+            ).isoformat()
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalyst_articles'"
+            ).fetchone():
+                cursor = connection.execute(
+                    "DELETE FROM catalyst_articles WHERE stored_at < ?",
+                    (art_iso,),
+                )
+                deleted["catalyst_articles"] = cursor.rowcount
+            else:
+                deleted["catalyst_articles"] = 0
+
+            # Ordinary apply never purges recommendation history / rolls / audit / decisions.
+            deleted["recommendation_history"] = 0
+            _ = recommendation_history_days
+            _ = clear_transactions
+            connection.commit()
+        return deleted
+
+    def _compact_old_portfolio_snapshots(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        older_than_iso: str,
+        protect_snapshot_id: str | None,
+    ) -> int:
+        """Replace older 30-minute snapshots with one durable daily summary per day.
+
+        Migration-compatible: reuses ``portfolio_snapshots`` with ``state='daily'``.
+        Payload is always a fully valid ``PortfolioSnapshot`` plus compaction metadata
+        (never a sparse summary dict that would fail Pydantic readers).
+        """
+
+        rows = connection.execute(
+            """
+            SELECT snapshot_id, schema_version, captured_at, state, payload_json, created_at
+            FROM portfolio_snapshots
+            WHERE captured_at < ?
+            ORDER BY captured_at ASC, rowid ASC
+            """,
+            (older_than_iso,),
+        ).fetchall()
+        by_day: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            if protect_snapshot_id and row["snapshot_id"] == protect_snapshot_id:
+                continue
+            day_key = str(row["captured_at"])[:10]
+            by_day.setdefault(day_key, []).append(row)
+
+        compacted = 0
+        for day_key, day_rows in by_day.items():
+            # Prefer an existing daily summary; otherwise build from the last snapshot of the day.
+            existing_daily = [r for r in day_rows if str(r["state"]) == "daily"]
+            source = existing_daily[-1] if existing_daily else day_rows[-1]
+            try:
+                payload = json.loads(source["payload_json"])
+            except (TypeError, json.JSONDecodeError):
+                payload = {}
+            daily_snapshot = self._build_daily_portfolio_snapshot(
+                day_key=day_key,
+                source_snapshot_id=str(source["snapshot_id"]),
+                schema_version=int(source["schema_version"] or 1),
+                payload=payload if isinstance(payload, dict) else {},
+                source_count=len(day_rows),
+            )
+            daily_id = daily_snapshot.snapshot_id
+            connection.execute(
+                """
+                INSERT INTO portfolio_snapshots(
+                    snapshot_id, schema_version, captured_at, state, payload_json, created_at
+                ) VALUES (?, ?, ?, 'daily', ?, ?)
+                ON CONFLICT(snapshot_id) DO UPDATE SET
+                    schema_version = excluded.schema_version,
+                    captured_at = excluded.captured_at,
+                    state = 'daily',
+                    payload_json = excluded.payload_json
+                """,
+                (
+                    daily_id,
+                    daily_snapshot.schema_version,
+                    daily_snapshot.captured_at.isoformat(),
+                    daily_snapshot.model_dump_json(),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            # Remove non-daily rows for this day (history retained via daily summary).
+            for row in day_rows:
+                if row["snapshot_id"] == daily_id:
+                    continue
+                if str(row["state"]) == "daily" and row["snapshot_id"] != daily_id:
+                    connection.execute(
+                        "DELETE FROM portfolio_snapshots WHERE snapshot_id = ?",
+                        (row["snapshot_id"],),
+                    )
+                    compacted += 1
+                    continue
+                if str(row["state"]) != "daily":
+                    connection.execute(
+                        "DELETE FROM portfolio_snapshots WHERE snapshot_id = ?",
+                        (row["snapshot_id"],),
+                    )
+                    compacted += 1
+        return compacted
+
+    def _build_daily_portfolio_snapshot(
+        self,
+        *,
+        day_key: str,
+        source_snapshot_id: str,
+        schema_version: int,
+        payload: dict[str, Any],
+        source_count: int,
+    ) -> PortfolioSnapshot:
+        """Build a fully valid daily PortfolioSnapshot from a source row payload."""
+
+        captured_at = datetime.fromisoformat(f"{day_key}T23:59:59+00:00")
+        compaction = SnapshotCompaction(
+            kind="daily_summary",
+            day=day_key,
+            source_snapshot_id=source_snapshot_id,
+            source_count=source_count,
+        )
+        try:
+            full = PortfolioSnapshot.model_validate(payload)
+            notice_parts = [
+                part for part in (full.notice, f"Compacted daily summary for {day_key}") if part
+            ]
+            return full.model_copy(
+                update={
+                    "snapshot_id": f"daily-{day_key}",
+                    "schema_version": schema_version or full.schema_version,
+                    "captured_at": captured_at,
+                    "state": SnapshotState.DAILY,
+                    "compaction": compaction,
+                    "notice": " · ".join(notice_parts),
+                }
+            )
+        except ValidationError:
+            pass
+
+        accounts: list[AccountSnapshot] = []
+        for index, raw_account in enumerate(payload.get("accounts") or []):
+            if not isinstance(raw_account, dict):
+                continue
+            positions = []
+            for raw_position in raw_account.get("positions") or []:
+                if not isinstance(raw_position, dict):
+                    continue
+                try:
+                    positions.append(PositionSnapshot.model_validate(raw_position))
+                except ValidationError:
+                    continue
+            accounts.append(
+                AccountSnapshot(
+                    account_id=str(raw_account.get("account_id") or f"account-{index + 1}"),
+                    label=str(raw_account.get("label") or "Account"),
+                    account_type=str(raw_account.get("account_type") or "unknown"),
+                    net_liquidating_value=float(raw_account.get("net_liquidating_value") or 0),
+                    cash_balance=float(raw_account.get("cash_balance") or 0),
+                    buying_power=float(raw_account.get("buying_power") or 0),
+                    positions=positions,
+                )
+            )
+        strategies: list[StrategySnapshot] = []
+        for raw_strategy in payload.get("strategies") or []:
+            if not isinstance(raw_strategy, dict):
+                continue
+            try:
+                strategies.append(StrategySnapshot.model_validate(raw_strategy))
+            except ValidationError:
+                continue
+        totals_raw = payload.get("totals") if isinstance(payload.get("totals"), dict) else {}
+        totals = PortfolioTotals(
+            net_liquidating_value=float(totals_raw.get("net_liquidating_value") or 0),
+            cash_balance=float(totals_raw.get("cash_balance") or 0),
+            buying_power=float(totals_raw.get("buying_power") or 0),
+            unrealized_pnl=float(totals_raw.get("unrealized_pnl") or 0),
+        )
+        raw_freshness = payload.get("freshness")
+        freshness_raw = raw_freshness if isinstance(raw_freshness, dict) else {}
+        try:
+            freshness = DataFreshness.model_validate(freshness_raw) if freshness_raw else None
+        except ValidationError:
+            freshness = None
+        if freshness is None:
+            freshness = DataFreshness(
+                as_of=captured_at,
+                provider=str(freshness_raw.get("provider") or "position-pilot-compaction"),
+                state=FreshnessState.STALE,
+            )
+        return PortfolioSnapshot(
+            schema_version=schema_version,
+            snapshot_id=f"daily-{day_key}",
+            captured_at=captured_at,
+            state=SnapshotState.DAILY,
+            freshness=freshness,
+            accounts=accounts,
+            strategies=strategies,
+            totals=totals,
+            selected_account_id=str(payload.get("selected_account_id") or "all"),
+            notice=f"Compacted daily summary for {day_key}",
+            compaction=compaction,
+        )
+
+    def reopen_after_restore(self) -> None:
+        """Re-run migrations after an atomic file restore (upgrade only)."""
+
+        self._migrate()
+        try:
+            self.path.chmod(0o600)
+        except OSError:
+            pass
 
     def account_identity(self, account_number: str, account_type: str) -> AccountIdentity:
         with self._connect() as connection:
@@ -789,9 +1346,7 @@ class PositionPilotDatabase:
                         event_payload["sources"] = [
                             source
                             for source in event_payload.get("sources") or []
-                            if not (
-                                source.get("provider") == provider and source.get("url") == url
-                            )
+                            if not (source.get("provider") == provider and source.get("url") == url)
                         ]
                         event_payload["summary"] = str(event_row[0])
                         connection.execute(
@@ -1092,8 +1647,7 @@ class PositionPilotDatabase:
                 "history_id": existing[0],
                 "evaluation_count": count,
                 "summary": (
-                    f"Unchanged evaluation ×{count} on {day_key} "
-                    f"({payload.get('action') or 'n/a'})"
+                    f"Unchanged evaluation ×{count} on {day_key} ({payload.get('action') or 'n/a'})"
                 ),
             }
             connection.execute(
@@ -1351,18 +1905,171 @@ class PositionPilotDatabase:
         return [json.loads(row[0]) for row in rows]
 
     def backup(self, *, reason: str = "daily") -> Path | None:
-        """Create a credentials-free SQLite backup and apply retention."""
+        """Create a credentials-free SQLite backup and apply retention.
+
+        Backups contain application state only (SQLite). Credentials live in
+        ``.env`` and are never copied into backup files. Licensed full article
+        text may exist in the DB under provider license rules; diagnostics
+        exports deliberately omit it even when present here.
+        """
 
         if not self.path.exists():
             return None
         self.backup_directory.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        destination = self.backup_directory / f"position-pilot-{reason}-{timestamp}.sqlite3"
+        safe_reason = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in reason)[:40]
+        destination = self.backup_directory / f"position-pilot-{safe_reason}-{timestamp}.sqlite3"
         with sqlite3.connect(self.path) as source, sqlite3.connect(destination) as target:
             source.backup(target)
         os.chmod(destination, 0o600)
+        self._write_backup_sidecar(destination, reason=safe_reason)
         self._prune_backups()
         return destination
+
+    def write_backup_sidecar(
+        self,
+        destination: Path,
+        *,
+        reason: str,
+        created_at: str | None = None,
+        app_version: str | None = None,
+    ) -> None:
+        """Write unified backup sidecar metadata (schema, version, integrity, exclusions)."""
+
+        from .. import __version__ as package_version
+
+        version = app_version or package_version
+        meta = {
+            "schema_version": self.schema_version,
+            "app_version": version,
+            "application_version": version,  # backward-compatible alias
+            "reason": reason,
+            "created_at": created_at or datetime.now(UTC).isoformat(),
+            "source_db": self.path.name,
+            "integrity": self._file_integrity(destination),
+            "excludes": [
+                "credentials",
+                ".env",
+                "oauth_tokens",
+                "session_cookies",
+                "launch_tokens",
+                "prompts",
+            ],
+        }
+        sidecar = destination.with_suffix(destination.suffix + ".meta.json")
+        sidecar.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        try:
+            os.chmod(sidecar, 0o600)
+        except OSError:
+            pass
+
+    def _write_backup_sidecar(self, destination: Path, *, reason: str) -> None:
+        self.write_backup_sidecar(destination, reason=reason)
+
+    def _file_integrity(self, path: Path) -> str:
+        try:
+            with sqlite3.connect(path) as connection:
+                row = connection.execute("PRAGMA integrity_check").fetchone()
+            return str(row[0]) if row else "unknown"
+        except sqlite3.Error as error:
+            return f"error:{error}"
+
+    def list_backups(self) -> list[dict[str, Any]]:
+        """List backup files under the controlled backup directory only."""
+
+        if not self.backup_directory.exists():
+            return []
+        items: list[dict[str, Any]] = []
+        for path in sorted(self.backup_directory.glob("position-pilot-*.sqlite3"), reverse=True):
+            if not path.is_file():
+                continue
+            # Reject path traversal / unexpected names.
+            if path.parent.resolve() != self.backup_directory.resolve():
+                continue
+            if ".." in path.name or "/" in path.name or "\\" in path.name:
+                continue
+            meta_path = path.with_suffix(path.suffix + ".meta.json")
+            meta: dict[str, Any] = {}
+            if meta_path.is_file():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    meta = {}
+            stat = path.stat()
+            items.append(
+                {
+                    "backup_id": path.name,
+                    "path_name": path.name,
+                    "size_bytes": stat.st_size,
+                    "modified_at": datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+                    "schema_version": meta.get("schema_version"),
+                    "application_version": meta.get("application_version"),
+                    "reason": meta.get("reason"),
+                    "integrity": meta.get("integrity") or self._file_integrity(path),
+                    "excludes": meta.get("excludes", []),
+                }
+            )
+        return items
+
+    def resolve_backup_path(self, backup_id: str) -> Path:
+        """Resolve a backup id to a file strictly inside the backup directory."""
+
+        if not backup_id or backup_id != Path(backup_id).name:
+            raise ValueError("Invalid backup identifier")
+        if not backup_id.startswith("position-pilot-") or not backup_id.endswith(".sqlite3"):
+            raise ValueError("Invalid backup identifier")
+        if ".." in backup_id or "/" in backup_id or "\\" in backup_id:
+            raise ValueError("Invalid backup identifier")
+        candidate = (self.backup_directory / backup_id).resolve()
+        backup_root = self.backup_directory.resolve()
+        if not str(candidate).startswith(str(backup_root) + os.sep) and candidate != backup_root:
+            raise ValueError("Backup path escapes backup directory")
+        if not candidate.is_file():
+            raise FileNotFoundError(backup_id)
+        return candidate
+
+    def restore_backup(self, backup_id: str) -> Path:
+        """Atomically replace the live database with a verified backup.
+
+        Creates a pre-restore backup first. Caller must ensure monitoring is
+        stopped before invoking this method.
+        """
+
+        source = self.resolve_backup_path(backup_id)
+        message = self._file_integrity(source)
+        if message.lower() != "ok":
+            raise ValueError(f"Backup failed integrity check: {message}")
+
+        # Pre-restore safety copy of the current DB.
+        if self.path.exists():
+            self.backup(reason="pre-restore")
+
+        staging = self.path.with_suffix(".restore-staging.sqlite3")
+        if staging.exists():
+            staging.unlink()
+        with sqlite3.connect(source) as src, sqlite3.connect(staging) as dst:
+            src.backup(dst)
+        staging_ok = self._file_integrity(staging)
+        if staging_ok.lower() != "ok":
+            staging.unlink(missing_ok=True)
+            raise ValueError(f"Staged restore failed integrity check: {staging_ok}")
+
+        # Atomic replace: move current aside, promote staging, remove old.
+        previous = self.path.with_suffix(".pre-restore-live.sqlite3")
+        if previous.exists():
+            previous.unlink()
+        if self.path.exists():
+            self.path.replace(previous)
+        staging.replace(self.path)
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass
+        if previous.exists():
+            previous.unlink(missing_ok=True)
+        # Ensure migrations are current after reopen.
+        self._migrate()
+        return self.path
 
     def ensure_daily_backup(self, now: datetime | None = None) -> Path | None:
         """Create at most one daily backup and a weekly copy every Monday."""
@@ -1378,7 +2085,13 @@ class PositionPilotDatabase:
         return daily
 
     def _prune_backups(self) -> None:
-        retention = {"daily": 7, "weekly": 4, "pre-migration": 2}
+        retention = {
+            "daily": 7,
+            "weekly": 4,
+            "pre-migration": 2,
+            "pre-restore": 3,
+            "manual": 10,
+        }
         for reason, keep in retention.items():
             backups = sorted(
                 self.backup_directory.glob(f"position-pilot-{reason}-*.sqlite3"),
@@ -1386,3 +2099,5 @@ class PositionPilotDatabase:
             )
             for expired in backups[keep:]:
                 expired.unlink(missing_ok=True)
+                meta = expired.with_suffix(expired.suffix + ".meta.json")
+                meta.unlink(missing_ok=True)

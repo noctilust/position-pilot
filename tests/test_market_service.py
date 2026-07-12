@@ -80,6 +80,112 @@ def test_market_service_uses_configured_fallback_with_field_provenance() -> None
     assert snapshot.provenance["price"].fallback_reason == "tastytrade returned no value"
 
 
+def test_quotes_batch_empty_primary_falls_back_via_router_with_provenance() -> None:
+    """Primary batch {} must not skip Massive/router fallback for missing symbols."""
+
+    class EmptyBatchPrimary:
+        batch_calls = 0
+
+        def get_quote(self, symbol: str, force_refresh: bool = False) -> dict | None:
+            return None
+
+        def get_quotes_batch(self, symbols: list[str], force_refresh: bool = False) -> dict:
+            self.batch_calls += 1
+            return {}
+
+        def get_market_metrics(self, symbol: str, force_refresh: bool = False) -> dict | None:
+            return {
+                "iv_rank": 40.0,
+                "implied_volatility": 0.2,
+                "iv_percentile": 50.0,
+                "liquidity_rating": 4,
+            }
+
+    class EmptyTasty:
+        name = "tastytrade"
+
+        def fetch(self, field: str, symbol: str):
+            return None
+
+        def health(self) -> ProviderHealth:
+            return ProviderHealth(provider=self.name, state=ProviderState.UNAVAILABLE)
+
+    class MassiveFallback(EmptyTasty):
+        name = "massive-stocks"
+
+        def fetch(self, field: str, symbol: str) -> ProviderValue:
+            return ProviderValue(
+                field=field,
+                value={"mark": 412.5, "bid": 412.4, "ask": 412.6, "last": 412.5},
+                provider=self.name,
+                observed_at=datetime(2026, 7, 11, 16, 50, tzinfo=UTC),
+            )
+
+    primary = EmptyBatchPrimary()
+    router = FieldRouter(
+        providers={
+            "tastytrade": EmptyTasty(),
+            "massive-stocks": MassiveFallback(),
+        },
+        routes={"stock.quote": ["tastytrade", "massive-stocks"]},
+    )
+    source = ProviderRoutedMarketSource(primary=primary, router=router)
+    snapshots = MarketService(source=source).snapshots_batch(["SPY", "QQQ"])
+
+    assert primary.batch_calls == 1
+    assert len(snapshots) == 2
+    assert all(snap.freshness.provider == "massive-stocks" for snap in snapshots)
+    assert all(snap.price == 412.5 for snap in snapshots)
+    assert snapshots[0].provenance["price"].fallback_reason == "tastytrade returned no value"
+
+
+def test_quotes_batch_healthy_primary_stays_bounded_for_100_symbols() -> None:
+    class CountingPrimary:
+        batch_calls = 0
+        quote_calls = 0
+
+        def get_quote(self, symbol: str, force_refresh: bool = False) -> dict | None:
+            self.quote_calls += 1
+            return {"mark": 1.0}
+
+        def get_quotes_batch(self, symbols: list[str], force_refresh: bool = False) -> dict:
+            self.batch_calls += 1
+            return {
+                symbol: {"mark": 100.0 + index, "bid": 99.0, "ask": 101.0, "last": 100.0 + index}
+                for index, symbol in enumerate(symbols)
+            }
+
+        def get_market_metrics(self, symbol: str, force_refresh: bool = False) -> dict | None:
+            return {"iv_rank": 30.0}
+
+        def get_market_metrics_batch(
+            self, symbols: list[str], force_refresh: bool = False
+        ) -> dict[str, dict]:
+            return {symbol: {"iv_rank": 30.0} for symbol in symbols}
+
+    class OkProvider:
+        name = "tastytrade"
+
+        def fetch(self, field: str, symbol: str):
+            raise AssertionError("router should not be needed for healthy primary batch")
+
+        def health(self) -> ProviderHealth:
+            return ProviderHealth(provider=self.name, state=ProviderState.HEALTHY)
+
+    primary = CountingPrimary()
+    router = FieldRouter(
+        providers={"tastytrade": OkProvider()},
+        routes={"stock.quote": ["tastytrade"]},
+    )
+    source = ProviderRoutedMarketSource(primary=primary, router=router)
+    symbols = [f"S{index:03d}" for index in range(100)]
+    snapshots = MarketService(source=source).snapshots_batch(symbols)
+
+    assert len(snapshots) == 100
+    assert primary.batch_calls == 1
+    assert primary.quote_calls == 0
+
+
 def test_chart_normalizes_massive_compact_aggregate_bars() -> None:
     service = MarketService(
         source=FakeMarketSource(),

@@ -23,6 +23,88 @@ export type RecommendationSettings = {
   rich_notification_preview: boolean;
 };
 
+export type EnvDiagnostic = {
+  path: string;
+  exists: boolean;
+  gitignored: boolean;
+  tracked_by_git: boolean | null;
+  permission_mode: string | null;
+  broadly_readable: boolean;
+  warnings: string[];
+  note: string;
+};
+
+export type RetentionSettings = {
+  portfolio_snapshots_days: number;
+  catalyst_events_days: number;
+  article_metadata_days: number;
+  recommendation_history_days: number;
+  transaction_history: string;
+  updated_at?: string | null;
+};
+
+export type RetentionPreview = {
+  settings: RetentionSettings;
+  candidates: Record<string, number>;
+  audit_critical_preserved: string[];
+  would_delete: Record<string, number>;
+  disclaimer: string;
+};
+
+export type BackupInfo = {
+  backup_id: string;
+  filename: string;
+  path: string;
+  size_bytes: number;
+  created_at: string;
+  reason: string;
+  schema_version: number | null;
+  app_version: string | null;
+  sha256: string;
+  integrity_ok: boolean;
+};
+
+export type RestoreResult = {
+  restored: boolean;
+  backup_id: string;
+  pre_restore_backup_id: string | null;
+  schema_version: number | null;
+  message: string;
+  disclaimer: string;
+};
+
+export type UpdateReadiness = {
+  current_version: string;
+  latest_version: string | null;
+  update_available: boolean;
+  schema_version: number;
+  schema_migrations_pending: boolean;
+  backup_required_before_update: boolean;
+  monitoring_active: boolean;
+  blocked_reason: string | null;
+  reversible_instructions: string[];
+  auto_install: boolean;
+  note: string;
+  disclaimer: string;
+};
+
+export type DiagnosticBundle = {
+  generated_at: string;
+  app_version: string;
+  schema_version: number;
+  provider_status: Record<string, string>;
+  settings_redacted: Record<string, unknown>;
+  env_diagnostics: EnvDiagnostic;
+  monitoring: Record<string, unknown>;
+  counts: Record<string, number>;
+  redaction: {
+    excluded: string[];
+    redacted_keys: string[];
+    policy: string;
+  };
+  disclaimer: string;
+};
+
 export type MonitoringStatus = {
   market_timezone: string;
   window_start: string;
@@ -271,7 +353,7 @@ export type PortfolioAccount = {
 export type PortfolioSnapshot = {
   snapshot_id: string;
   captured_at: string;
-  state: "live" | "cached";
+  state: "live" | "cached" | "daily";
   accounts: PortfolioAccount[];
   strategies: Strategy[];
   totals: {

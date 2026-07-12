@@ -16,14 +16,11 @@ def test_dashboard_command_launches_the_web_experience_by_default(monkeypatch) -
     assert launches == [False]
 
 
-def test_dashboard_command_preserves_the_tui_fallback(monkeypatch) -> None:
-    launches: list[str] = []
-    monkeypatch.setattr(
-        "position_pilot.dashboard.run_dashboard",
-        lambda: launches.append("tui"),
-    )
-
+def test_dashboard_command_rejects_retired_tui_flag() -> None:
     result = CliRunner().invoke(app, ["dashboard", "--tui"])
 
-    assert result.exit_code == 0
-    assert launches == ["tui"]
+    assert result.exit_code != 0
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert (
+        "tui" in combined.lower() or "no such option" in combined.lower() or result.exit_code == 2
+    )

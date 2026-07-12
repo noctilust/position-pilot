@@ -177,7 +177,7 @@ def test_bootstrap_reports_codex_monitoring_phase(tmp_path, monkeypatch) -> None
     response = client.get("/api/v1/bootstrap")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["application"]["phase"] == "codex-monitoring"
+    assert payload["application"]["phase"] == "hardening-retirement"
     assert "enabled" in payload["monitoring"]
     assert payload["recommendations"]["selected_provider"] == "codex-cli"
     assert payload["recommendations"].get("api_key_fallback_available") is False

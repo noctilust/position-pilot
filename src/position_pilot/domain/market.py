@@ -62,11 +62,62 @@ class ProviderRoutedMarketSource:
         }
         return quote
 
+    def get_quotes_batch(self, symbols: list[str], force_refresh: bool = False) -> dict[str, dict]:
+        """Batch primary quotes first, then resolve every miss via FieldRouter/get_quote.
+
+        Healthy full-primary batches stay one bounded call. Missing/failed symbols
+        (absent keys, empty payloads, or unusable marks) fall through to the router
+        so Massive provenance and fallback_reason are preserved.
+        """
+
+        normalized = [str(symbol).upper() for symbol in symbols]
+        out: dict[str, dict] = {}
+        batch = getattr(self.primary, "get_quotes_batch", None)
+        if callable(batch) and normalized:
+            try:
+                raw = batch(list(normalized), force_refresh=force_refresh) or {}
+            except Exception:
+                raw = {}
+            observed = datetime.now(UTC)
+            for symbol, payload in raw.items():
+                key = str(symbol).upper()
+                quote = dict(payload) if isinstance(payload, dict) else {"mark": payload}
+                # Unusable primary rows are treated as misses so router fallback runs.
+                if quote.get("mark") is None and quote.get("last") is None:
+                    continue
+                quote.setdefault(
+                    "__provenance__",
+                    {"provider": "tastytrade", "observed_at": observed},
+                )
+                out[key] = quote
+        missing = [symbol for symbol in normalized if symbol not in out]
+        for symbol in missing:
+            quote = self.get_quote(symbol, force_refresh=force_refresh)
+            if quote is not None:
+                out[symbol] = quote
+        return out
+
     def get_market_metrics(self, symbol: str, force_refresh: bool = False) -> dict | None:
         try:
             return self.primary.get_market_metrics(symbol, force_refresh=force_refresh)
         except Exception:
             return None
+
+    def get_market_metrics_batch(
+        self, symbols: list[str], force_refresh: bool = False
+    ) -> dict[str, dict]:
+        batch = getattr(self.primary, "get_market_metrics_batch", None)
+        if callable(batch):
+            try:
+                return batch(symbols, force_refresh=force_refresh) or {}
+            except Exception:
+                return {}
+        result: dict[str, dict] = {}
+        for symbol in symbols:
+            metrics = self.get_market_metrics(symbol, force_refresh=force_refresh)
+            if metrics is not None:
+                result[symbol] = metrics
+        return result
 
 
 class MarketBar(BaseModel):
@@ -126,58 +177,98 @@ class MarketService:
         self.bar_source = bar_source
 
     def snapshot(self, symbol: str, *, force_refresh: bool = False) -> MarketSnapshot | None:
-        normalized = symbol.upper()
-        quote = self.source.get_quote(normalized, force_refresh=force_refresh)
-        if not quote:
-            return None
-        metrics = self.source.get_market_metrics(normalized, force_refresh=force_refresh) or {}
-        quote_provenance = quote.pop("__provenance__", {})
-        price = quote.get("mark") or quote.get("last")
-        if price is None:
-            return None
+        batch = self.snapshots_batch([symbol], force_refresh=force_refresh)
+        return batch[0] if batch else None
+
+    def snapshots_batch(
+        self, symbols: list[str], *, force_refresh: bool = False
+    ) -> list[MarketSnapshot]:
+        """Shared enrichment for many symbols with batch provider calls when available."""
+
+        normalized = [symbol.upper() for symbol in symbols]
+        if not normalized:
+            return []
+        quotes_batch_fn = getattr(self.source, "get_quotes_batch", None)
+        metrics_batch_fn = getattr(self.source, "get_market_metrics_batch", None)
+        if callable(quotes_batch_fn):
+            quotes_map = quotes_batch_fn(normalized, force_refresh=force_refresh) or {}
+        else:
+            quotes_map = {}
+            for symbol in normalized:
+                quote = self.source.get_quote(symbol, force_refresh=force_refresh)
+                if quote is not None:
+                    quotes_map[symbol] = quote
+        if callable(metrics_batch_fn):
+            metrics_map = metrics_batch_fn(normalized, force_refresh=force_refresh) or {}
+        else:
+            metrics_map = {}
+            for symbol in normalized:
+                metrics = self.source.get_market_metrics(symbol, force_refresh=force_refresh)
+                if metrics is not None:
+                    metrics_map[symbol] = metrics
+
         observed_at = self.clock()
-        quote_observed_at = quote_provenance.get("observed_at", observed_at)
-        quote_provider = quote_provenance.get("provider", "tastytrade")
-        fallback_reason = quote_provenance.get("fallback_reason")
-        iv_rank = metrics.get("iv_rank")
-        environment = self._iv_environment(iv_rank)
-        bid = quote.get("bid")
-        ask = quote.get("ask")
-        spread = ((ask - bid) / price) * 100 if bid is not None and ask is not None else None
-        fields = {
-            "price": price,
-            "bid": bid,
-            "ask": ask,
-            "iv": metrics.get("implied_volatility"),
-            "iv_rank": iv_rank,
-            "iv_percentile": metrics.get("iv_percentile"),
-            "liquidity_rating": metrics.get("liquidity_rating"),
-        }
-        return MarketSnapshot(
-            symbol=normalized,
-            price=price,
-            bid=bid,
-            ask=ask,
-            iv=fields["iv"],
-            iv_rank=iv_rank,
-            iv_percentile=fields["iv_percentile"],
-            liquidity_rating=fields["liquidity_rating"],
-            iv_environment=environment,
-            spread_percent=spread,
-            freshness=DataFreshness(as_of=quote_observed_at, provider=quote_provider),
-            provenance={
-                field: FieldProvenance(
-                    provider=(quote_provider if field in {"price", "bid", "ask"} else "tastytrade"),
-                    observed_at=(
-                        quote_observed_at if field in {"price", "bid", "ask"} else observed_at
-                    ),
-                    field=field,
-                    fallback_reason=(fallback_reason if field in {"price", "bid", "ask"} else None),
+        snapshots: list[MarketSnapshot] = []
+        for symbol in normalized:
+            quote = dict(quotes_map.get(symbol) or {})
+            if not quote:
+                continue
+            metrics = metrics_map.get(symbol) or {}
+            quote_provenance = quote.pop("__provenance__", {}) if isinstance(quote, dict) else {}
+            price = quote.get("mark") or quote.get("last")
+            if price is None:
+                continue
+            quote_observed_at = quote_provenance.get("observed_at", observed_at)
+            quote_provider = quote_provenance.get("provider", "tastytrade")
+            fallback_reason = quote_provenance.get("fallback_reason")
+            iv_rank = metrics.get("iv_rank")
+            environment = self._iv_environment(iv_rank)
+            bid = quote.get("bid")
+            ask = quote.get("ask")
+            spread = ((ask - bid) / price) * 100 if bid is not None and ask is not None else None
+            fields = {
+                "price": price,
+                "bid": bid,
+                "ask": ask,
+                "iv": metrics.get("implied_volatility"),
+                "iv_rank": iv_rank,
+                "iv_percentile": metrics.get("iv_percentile"),
+                "liquidity_rating": metrics.get("liquidity_rating"),
+            }
+            snapshots.append(
+                MarketSnapshot(
+                    symbol=symbol,
+                    price=price,
+                    bid=bid,
+                    ask=ask,
+                    iv=fields["iv"],
+                    iv_rank=iv_rank,
+                    iv_percentile=fields["iv_percentile"],
+                    liquidity_rating=fields["liquidity_rating"],
+                    iv_environment=environment,
+                    spread_percent=spread,
+                    freshness=DataFreshness(as_of=quote_observed_at, provider=quote_provider),
+                    provenance={
+                        field: FieldProvenance(
+                            provider=(
+                                quote_provider if field in {"price", "bid", "ask"} else "tastytrade"
+                            ),
+                            observed_at=(
+                                quote_observed_at
+                                if field in {"price", "bid", "ask"}
+                                else observed_at
+                            ),
+                            field=field,
+                            fallback_reason=(
+                                fallback_reason if field in {"price", "bid", "ask"} else None
+                            ),
+                        )
+                        for field, value in fields.items()
+                        if value is not None
+                    },
                 )
-                for field, value in fields.items()
-                if value is not None
-            },
-        )
+            )
+        return snapshots
 
     def overview(
         self,
@@ -186,13 +277,9 @@ class MarketService:
         force_refresh: bool = False,
     ) -> MarketOverview:
         selected = [symbol.upper() for symbol in (symbols or list(DEFAULT_MARKET_SYMBOLS))]
-        quotes: list[MarketSnapshot] = []
+        quotes = self.snapshots_batch(selected, force_refresh=force_refresh)
         iv_summary = {env.value: 0 for env in IVEnvironment}
-        for symbol in selected:
-            snap = self.snapshot(symbol, force_refresh=force_refresh)
-            if snap is None:
-                continue
-            quotes.append(snap)
+        for snap in quotes:
             iv_summary[snap.iv_environment.value] = iv_summary.get(snap.iv_environment.value, 0) + 1
         return MarketOverview(
             captured_at=self.clock(),

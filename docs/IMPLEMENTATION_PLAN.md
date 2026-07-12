@@ -94,6 +94,8 @@ This plan delivers the confirmed PRD incrementally. Each phase must preserve a r
 
 **Exit:** The web dashboard is the verified default and the legacy TUI is removed.
 
+**Status:** Implemented and review-blocker repaired in-tree (see [docs/wayfinder/tickets/070-hardening-retirement.md](wayfinder/tickets/070-hardening-retirement.md)). Diagnostics use a strict allowlist; browser backups are sanitized portable archives; retention fails closed on audit-critical data and compacts old snapshots to daily summaries; restore/update guards fail closed; PDF is multi-page with full strategy coverage; phone 390 is read-only; packaging excludes node_modules/caches/Playwright artifacts.
+
 ## Delivery rules
 
 - Never request or use Tastytrade write scope.

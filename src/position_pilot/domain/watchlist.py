@@ -50,10 +50,16 @@ class WatchlistService:
         return self.set_symbols([item for item in self.list_symbols() if item != normalized])
 
     def snapshot(self, *, force_refresh: bool = False) -> WatchlistSnapshot:
+        """Assemble watchlist quotes via shared batch enrichment (≤100 symbols)."""
+
         symbols = self.list_symbols()
-        quotes: list[MarketSnapshot] = []
-        for symbol in symbols:
-            quote = self.market.snapshot(symbol, force_refresh=force_refresh)
-            if quote is not None:
-                quotes.append(quote)
-        return WatchlistSnapshot(symbols=symbols, quotes=quotes)
+        batch = getattr(self.market, "snapshots_batch", None)
+        if callable(batch):
+            quotes = batch(symbols, force_refresh=force_refresh)
+        else:
+            quotes = []
+            for symbol in symbols:
+                quote = self.market.snapshot(symbol, force_refresh=force_refresh)
+                if quote is not None:
+                    quotes.append(quote)
+        return WatchlistSnapshot(symbols=symbols, quotes=list(quotes))
