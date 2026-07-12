@@ -54,6 +54,7 @@ import {
   snoozeAlert,
   submitCatalystFeedback,
 } from "./api";
+import { filterDisplayableAccounts } from "./accountDisplay";
 import { OperationsPanel } from "./OperationsPanel";
 import type {
   AlertRecord,
@@ -72,6 +73,7 @@ import type {
   RollChain,
   RollHeatmap,
   RollPatterns,
+  Strategy,
   StrategyDetail,
   SymbolCatalystResult,
   WatchlistSnapshot,
@@ -124,7 +126,11 @@ function App() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [activeSection, setActiveSection] = useState("Overview");
   const [portfolio, setPortfolio] = useState<PortfolioState>({ kind: "loading" });
-  const [accountOptions, setAccountOptions] = useState<PortfolioAccount[]>([]);
+  /** Unfiltered all-accounts catalog; display eligibility is applied at render time. */
+  const [accountCatalog, setAccountCatalog] = useState<PortfolioAccount[]>([]);
+  const [accountCatalogStrategies, setAccountCatalogStrategies] = useState<
+    Pick<Strategy, "account_id">[]
+  >([]);
   const [risk, setRisk] = useState<PortfolioRisk | null>(null);
   const [markets, setMarkets] = useState<MarketOverview | null>(null);
   const [watchlist, setWatchlist] = useState<WatchlistSnapshot | null>(null);
@@ -153,6 +159,18 @@ function App() {
   const selectedAccountId =
     portfolio.kind === "ready" ? portfolio.snapshot.selected_account_id : "all";
 
+  /**
+   * Presentation-only account list for selector and Settings identities.
+   * Preserves an explicitly selected inactive scope so the <select> stays valid.
+   */
+  const accountOptions = useMemo(
+    () =>
+      filterDisplayableAccounts(accountCatalog, accountCatalogStrategies, {
+        preserveAccountId: selectedAccountId,
+      }),
+    [accountCatalog, accountCatalogStrategies, selectedAccountId],
+  );
+
   const loadPortfolio = useCallback(
     async (accountId = "all", refresh = false, background = false) => {
       const request = ++portfolioRequest.current;
@@ -163,7 +181,13 @@ function App() {
       try {
         const snapshot = await fetchPortfolio(accountId, refresh);
         if (request !== portfolioRequest.current) return;
-        if (accountId === "all") setAccountOptions(snapshot.accounts);
+        if (accountId === "all") {
+          // Retain full server payload; filtering is presentation-only at render.
+          setAccountCatalog(snapshot.accounts);
+          setAccountCatalogStrategies(
+            snapshot.strategies.map((strategy) => ({ account_id: strategy.account_id })),
+          );
+        }
         setPortfolio({ kind: "ready", snapshot });
         try {
           const riskSnapshot = await fetchPortfolioRisk(accountId);
@@ -715,6 +739,15 @@ function OverviewSection({
   recommendations: RecommendationRecord[];
 }) {
   const snapshot = portfolio.kind === "ready" ? portfolio.snapshot : null;
+  const displayAccounts = useMemo(
+    () =>
+      snapshot
+        ? filterDisplayableAccounts(snapshot.accounts, snapshot.strategies, {
+            preserveAccountId: snapshot.selected_account_id,
+          })
+        : [],
+    [snapshot],
+  );
   const promoted = (catalysts?.results ?? []).filter((row) => row.promoted);
   const quietCount = (catalysts?.results ?? []).filter((row) => row.quiet).length;
   const urgentRecs = recommendations
@@ -868,7 +901,7 @@ function OverviewSection({
           <div className="metric-rail" aria-label="Portfolio metrics">
             <div>
               <span>Accounts</span>
-              <strong className="tabular">{snapshot?.accounts.length ?? "—"}</strong>
+              <strong className="tabular">{snapshot ? displayAccounts.length : "—"}</strong>
             </div>
             <div>
               <span>Strategies</span>
@@ -974,7 +1007,7 @@ function OverviewSection({
                 </tr>
               </thead>
               <tbody>
-                {(snapshot?.accounts ?? []).map((account) => (
+                {displayAccounts.map((account) => (
                   <tr key={account.account_id}>
                     <td>
                       {account.label}
@@ -996,6 +1029,13 @@ function OverviewSection({
                     </td>
                   </tr>
                 ))}
+                {snapshot && !displayAccounts.length ? (
+                  <tr>
+                    <td colSpan={7} className="muted">
+                      No active accounts
+                    </td>
+                  </tr>
+                ) : null}
               </tbody>
             </table>
           </div>
