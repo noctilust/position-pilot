@@ -339,8 +339,11 @@ test.describe("Phase 7 accessibility, keyboard, responsive, visual", () => {
     await page.getByRole("button", { name: "Positions" }).focus();
     await page.keyboard.press("Enter");
     await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
-    await expect(page.getByText("page 1 of 2", { exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Next page" })).toBeVisible();
+    // Flat strategy pagination removed: all strategies appear in symbol groups (no silent truncation).
+    await expect(page.getByRole("button", { name: "Next page" })).toHaveCount(0);
+    await expect(page.getByRole("checkbox", { name: /Show stock positions/i })).toBeVisible();
+    await expect(page.getByRole("checkbox", { name: /Show options positions/i })).toBeVisible();
+    await expect(page.getByText(/60 strategies across/i)).toBeVisible();
 
     // Settings operations surface
     await page.getByRole("button", { name: "Settings" }).click();

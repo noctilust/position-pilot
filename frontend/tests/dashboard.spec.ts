@@ -129,14 +129,176 @@ async function mockDashboardApis(page: Page) {
             total_delta: -20,
             total_theta: 4,
             horizon: "tactical",
-            legs: [],
+            legs: [
+              {
+                symbol: "SPY  260821P00500000",
+                underlying_symbol: "SPY",
+                quantity: 1,
+                quantity_direction: "Short",
+                position_type: "Equity Option",
+                strike_price: 500,
+                option_type: "P",
+                expiration_date: "2026-08-21",
+                days_to_expiration: 21,
+                mark_price: 2.1,
+                market_value: -210,
+                unrealized_pnl: 40,
+                unrealized_pnl_percent: 10,
+                delta: -0.2,
+                gamma: 0.01,
+                theta: 0.04,
+                vega: -0.08,
+                implied_volatility: 0.2,
+                multiplier: 100,
+                horizon: "tactical",
+              },
+            ],
+          },
+          {
+            strategy_id: "strat-spy-stock",
+            account_id: "public-account-id",
+            underlying: "spy",
+            strategy_type: "Long Stock",
+            expiration_date: null,
+            days_to_expiration: null,
+            quantity: 100,
+            strikes: "",
+            unrealized_pnl: 120,
+            unrealized_pnl_percent: 2.4,
+            total_delta: 100,
+            total_theta: 0,
+            horizon: "strategic",
+            legs: [
+              {
+                symbol: "SPY",
+                underlying_symbol: "SPY",
+                quantity: 100,
+                quantity_direction: "Long",
+                position_type: "Equity",
+                strike_price: null,
+                option_type: null,
+                expiration_date: null,
+                days_to_expiration: null,
+                mark_price: 500,
+                market_value: 50000,
+                unrealized_pnl: 120,
+                unrealized_pnl_percent: 2.4,
+                delta: 1,
+                gamma: 0,
+                theta: 0,
+                vega: 0,
+                implied_volatility: null,
+                multiplier: 1,
+                horizon: "strategic",
+              },
+            ],
+          },
+          {
+            strategy_id: "strat-qqq",
+            account_id: "public-account-id",
+            underlying: "QQQ",
+            strategy_type: "Iron Condor",
+            expiration_date: "2026-08-15",
+            days_to_expiration: 18,
+            quantity: 1,
+            strikes: "$470 / $475 / $505 / $510",
+            unrealized_pnl: -25,
+            unrealized_pnl_percent: -8,
+            total_delta: 2,
+            total_theta: 12,
+            horizon: "tactical",
+            legs: [
+              {
+                symbol: "QQQ  260815P00470000",
+                underlying_symbol: "QQQ",
+                quantity: 1,
+                quantity_direction: "Long",
+                position_type: "Equity Option",
+                strike_price: 470,
+                option_type: "P",
+                expiration_date: "2026-08-15",
+                days_to_expiration: 18,
+                mark_price: 0.4,
+                market_value: 40,
+                unrealized_pnl: -10,
+                unrealized_pnl_percent: null,
+                delta: 0.05,
+                gamma: 0.01,
+                theta: 0.02,
+                vega: 0.03,
+                implied_volatility: 0.18,
+                multiplier: 100,
+                horizon: "tactical",
+              },
+            ],
+          },
+          {
+            strategy_id: "strat-aapl-cc",
+            account_id: "public-account-id",
+            underlying: "AAPL",
+            strategy_type: "Covered Call",
+            expiration_date: "2026-08-21",
+            days_to_expiration: 21,
+            quantity: 1,
+            strikes: "$220",
+            unrealized_pnl: 55,
+            unrealized_pnl_percent: 3,
+            total_delta: 70,
+            total_theta: 8,
+            horizon: "tactical",
+            legs: [
+              {
+                symbol: "AAPL",
+                underlying_symbol: "AAPL",
+                quantity: 100,
+                quantity_direction: "Long",
+                position_type: "Equity",
+                strike_price: null,
+                option_type: null,
+                expiration_date: null,
+                days_to_expiration: null,
+                mark_price: 210,
+                market_value: 21000,
+                unrealized_pnl: 80,
+                unrealized_pnl_percent: null,
+                delta: 1,
+                gamma: 0,
+                theta: 0,
+                vega: 0,
+                implied_volatility: null,
+                multiplier: 1,
+                horizon: "tactical",
+              },
+              {
+                symbol: "AAPL 260821C00220000",
+                underlying_symbol: "AAPL",
+                quantity: 1,
+                quantity_direction: "Short",
+                position_type: "Equity Option",
+                strike_price: 220,
+                option_type: "C",
+                expiration_date: "2026-08-21",
+                days_to_expiration: 21,
+                mark_price: 1.5,
+                market_value: -150,
+                unrealized_pnl: -25,
+                unrealized_pnl_percent: null,
+                delta: -0.3,
+                gamma: 0.02,
+                theta: 0.08,
+                vega: -0.05,
+                implied_volatility: 0.22,
+                multiplier: 100,
+                horizon: "tactical",
+              },
+            ],
           },
         ],
         totals: {
           net_liquidating_value: 25000,
           cash_balance: 5000,
           buying_power: 10000,
-          unrealized_pnl: 40,
+          unrealized_pnl: 190,
         },
         selected_account_id: new URL(route.request().url()).searchParams.get("account_id") ?? "all",
         notice: null,
@@ -729,6 +891,15 @@ test("secure dashboard shell renders without console or accessibility errors", a
   await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
   await expect(page.getByText("Short Put").first()).toBeVisible();
   await expect(page.getByText("No confirmed catalyst found").first()).toBeVisible();
+  // Symbol groups: alphabetical AAPL, QQQ, SPY; SPY holds stock + option under one disclosure.
+  await expect(page.getByRole("button", { name: /SPY/i }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /AAPL/i }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /QQQ/i }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open SPY Short Put" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open SPY Long Stock" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open AAPL Covered Call" })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /Show stock positions/i })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: /Show options positions/i })).toBeChecked();
   await expect(page.getByRole("heading", { name: "Order activity" })).toBeVisible();
   // Roll ledger rail sits beside Positions with flattened events (newest first).
   await expect(page.getByRole("heading", { name: "Roll ledger" })).toBeVisible();
@@ -749,7 +920,7 @@ test("secure dashboard shell renders without console or accessibility errors", a
   await expect(ledgerRows.nth(2)).toContainText("$500");
   await expect(page.getByRole("button", { name: "Open advanced Roll analytics" })).toBeVisible();
 
-  await page.getByRole("button", { name: "SPY" }).first().click();
+  await page.getByRole("button", { name: "Open SPY Short Put" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await expect(page.getByText("Remaining max profit")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Catalysts" })).toBeVisible();
@@ -791,6 +962,107 @@ test("secure dashboard shell renders without console or accessibility errors", a
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(accessibility.violations).toEqual([]);
   expect(consoleErrors).toEqual([]);
+});
+
+test("symbol-grouped positions: collapse, category toggles, ledger isolation, overflow, a11y", async ({
+  page,
+}) => {
+  await mockDashboardApis(page);
+  const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";
+  await page.goto(`/?launch_token=${encodeURIComponent(launchToken)}`);
+  await page.getByRole("button", { name: "Positions" }).click();
+  await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
+
+  // Deterministic alphabetical group order and same-symbol stock+option co-location.
+  const groupToggles = page.locator("button.symbol-group-toggle");
+  await expect(groupToggles).toHaveCount(3);
+  await expect(groupToggles.nth(0)).toContainText("AAPL");
+  await expect(groupToggles.nth(1)).toContainText("QQQ");
+  await expect(groupToggles.nth(2)).toContainText("SPY");
+  await expect(groupToggles.nth(2)).toContainText("2 positions");
+  await expect(groupToggles.nth(2)).toContainText("1 stock");
+  await expect(groupToggles.nth(2)).toContainText("1 option");
+  await expect(groupToggles.nth(2)).not.toContainText("1 options");
+  await expect(groupToggles.nth(2)).toHaveAttribute("aria-expanded", "true");
+  await expect(groupToggles.nth(2)).toHaveAttribute("aria-controls", "symbol-group-panel-SPY");
+  await expect(page.locator("th[scope='rowgroup']")).toHaveCount(3);
+  await expect(
+    page.locator("th[scope='rowgroup']").filter({ hasText: "SPY" }),
+  ).toBeVisible();
+
+  // Collapse only SPY; AAPL/QQQ rows remain visible.
+  await groupToggles.nth(2).click();
+  await expect(groupToggles.nth(2)).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByRole("button", { name: "Open SPY Short Put" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Open SPY Long Stock" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Open AAPL Covered Call" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open QQQ Iron Condor" })).toBeVisible();
+
+  // Re-expand SPY.
+  await groupToggles.nth(2).click();
+  await expect(groupToggles.nth(2)).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByRole("button", { name: "Open SPY Short Put" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open SPY Long Stock" })).toBeVisible();
+
+  const stockToggle = page.getByRole("checkbox", { name: /Show stock positions/i });
+  const optionsToggle = page.getByRole("checkbox", { name: /Show options positions/i });
+  const ledgerRows = page.locator(".roll-ledger-row");
+  await expect(ledgerRows).toHaveCount(3);
+
+  // Stock off: hide Long Stock, keep option/mixed; ledger unchanged.
+  await stockToggle.uncheck();
+  await expect(page.getByRole("button", { name: "Open SPY Long Stock" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Open SPY Short Put" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open AAPL Covered Call" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open QQQ Iron Condor" })).toBeVisible();
+  await expect(ledgerRows).toHaveCount(3);
+  await expect(page.getByText("+$0.35").first()).toBeVisible();
+
+  // Collapse state for SPY preserved while filtering.
+  await groupToggles.filter({ hasText: "SPY" }).click();
+  await expect(groupToggles.filter({ hasText: "SPY" })).toHaveAttribute("aria-expanded", "false");
+  await stockToggle.check();
+  await expect(groupToggles.filter({ hasText: "SPY" })).toHaveAttribute("aria-expanded", "false");
+  await groupToggles.filter({ hasText: "SPY" }).click();
+
+  // Options off: hide option/mixed, keep stock-only; ledger unchanged.
+  await optionsToggle.uncheck();
+  await expect(page.getByRole("button", { name: "Open SPY Long Stock" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open SPY Short Put" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Open AAPL Covered Call" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Open QQQ Iron Condor" })).toHaveCount(0);
+  await expect(ledgerRows).toHaveCount(3);
+
+  // Both off → filtered empty state with recovery actions; ledger still present.
+  await stockToggle.uncheck();
+  await expect(page.getByText(/All position categories are hidden/i)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Show Stock" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Show Options" })).toBeVisible();
+  await expect(ledgerRows).toHaveCount(3);
+  await page.getByRole("button", { name: "Show Options" }).click();
+  await expect(page.getByRole("button", { name: "Open SPY Short Put" })).toBeVisible();
+  await expect(optionsToggle).toBeChecked();
+
+  // No document horizontal overflow at desktop and phone widths on Positions.
+  for (const size of [
+    { width: 1280, height: 800 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(size);
+    await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
+    const overflow = await page.evaluate(() => {
+      const doc = document.documentElement;
+      return {
+        scrollWidth: doc.scrollWidth,
+        clientWidth: doc.clientWidth,
+      };
+    });
+    expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
+  }
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(accessibility.violations).toEqual([]);
 });
 
 test("keyboard navigation reaches sections and respects reduced motion", async ({ page }) => {
@@ -1614,7 +1886,7 @@ test("catalyst risk gauges render accessible labels and semantic classes on Over
 
   // Position detail: aggregate + event-level gauges.
   await page.getByRole("button", { name: "Positions" }).click();
-  await page.getByRole("button", { name: "SPY" }).click();
+  await page.getByRole("button", { name: "Open SPY Short Put" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Catalysts" })).toBeVisible();
 

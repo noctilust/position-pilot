@@ -16,7 +16,7 @@ import {
   X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   acknowledgeAlert,
@@ -67,6 +67,16 @@ import {
   summarizeRollLedger,
   type RollLedgerEvent,
 } from "./rollLedger";
+import {
+  countStrategiesByCategory,
+  filterStrategiesByCategory,
+  formatSymbolGroupSplit,
+  groupStrategiesBySymbol,
+  normalizeUnderlying,
+  presentSymbolsFromStrategies,
+  pruneCollapsedSymbols,
+  symbolGroupPanelId,
+} from "./positionGroups";
 import type {
   AlertRecord,
   BootstrapPayload,
@@ -90,7 +100,6 @@ import type {
   WatchlistSnapshot,
 } from "./types";
 
-const STRATEGY_PAGE_SIZE = 50;
 const ORDER_PAGE_SIZE = 40;
 /** Matches PRD phone simplified read-only layout (≤48rem / ~390 CSS px phones). */
 const PHONE_MEDIA_QUERY = "(max-width: 48rem)";
@@ -1332,8 +1341,12 @@ function PositionsSection({
   onOpenRollAnalytics: () => void;
 }) {
   const strategies = snapshot?.strategies ?? [];
-  const [strategyPage, setStrategyPage] = useState(0);
   const [orderPage, setOrderPage] = useState(0);
+  const [showStock, setShowStock] = useState(true);
+  const [showOptions, setShowOptions] = useState(true);
+  /** Symbols the user has collapsed; default is expanded (absent from set). */
+  const [collapsedSymbols, setCollapsedSymbols] = useState<Set<string>>(() => new Set());
+
   const catalystBySymbol = useMemo(() => {
     const map = new Map<string, SymbolCatalystResult>();
     for (const row of catalysts?.results ?? []) map.set(row.symbol, row);
@@ -1343,20 +1356,43 @@ function PositionsSection({
   const ledgerEvents = useMemo(() => buildRollLedger(rolls), [rolls]);
   const ledgerSummary = useMemo(() => summarizeRollLedger(rolls), [rolls]);
 
+  const categoryCounts = useMemo(
+    () => countStrategiesByCategory(strategies),
+    [strategies],
+  );
+  const filteredStrategies = useMemo(
+    () =>
+      filterStrategiesByCategory(strategies, {
+        showStock,
+        showOptions,
+      }),
+    [strategies, showStock, showOptions],
+  );
+  const symbolGroups = useMemo(
+    () => groupStrategiesBySymbol(filteredStrategies),
+    [filteredStrategies],
+  );
+  const presentSymbolKey = useMemo(
+    () => presentSymbolsFromStrategies(strategies).join("|"),
+    [strategies],
+  );
+
+  // Preserve collapse choices across filters/refreshes; prune symbols that leave the book.
   useEffect(() => {
-    setStrategyPage(0);
-  }, [snapshot?.snapshot_id, snapshot?.selected_account_id]);
+    const present = presentSymbolKey ? presentSymbolKey.split("|") : [];
+    setCollapsedSymbols((prev) => {
+      const next = pruneCollapsedSymbols(prev, present);
+      if (next.size === prev.size && [...next].every((symbol) => prev.has(symbol))) {
+        return prev;
+      }
+      return next;
+    });
+  }, [presentSymbolKey]);
 
   useEffect(() => {
     setOrderPage(0);
   }, [orders]);
 
-  const strategyPageCount = Math.max(1, Math.ceil(strategies.length / STRATEGY_PAGE_SIZE));
-  const safeStrategyPage = Math.min(strategyPage, strategyPageCount - 1);
-  const pagedStrategies = strategies.slice(
-    safeStrategyPage * STRATEGY_PAGE_SIZE,
-    safeStrategyPage * STRATEGY_PAGE_SIZE + STRATEGY_PAGE_SIZE,
-  );
   const orderPageCount = Math.max(1, Math.ceil(orders.length / ORDER_PAGE_SIZE));
   const safeOrderPage = Math.min(orderPage, orderPageCount - 1);
   const pagedOrders = orders.slice(
@@ -1364,11 +1400,32 @@ function PositionsSection({
     safeOrderPage * ORDER_PAGE_SIZE + ORDER_PAGE_SIZE,
   );
 
-  const pageStart = strategies.length ? safeStrategyPage * STRATEGY_PAGE_SIZE + 1 : 0;
-  const pageEnd = Math.min(
-    strategies.length,
-    safeStrategyPage * STRATEGY_PAGE_SIZE + pagedStrategies.length,
-  );
+  const bothCategoriesHidden = !showStock && !showOptions;
+  const statusCopy = (() => {
+    if (strategies.length === 0) {
+      return "No open positions in the current account scope.";
+    }
+    if (bothCategoriesHidden) {
+      return `0 of ${strategies.length} strategies visible — enable Stock or Options.`;
+    }
+    if (filteredStrategies.length === strategies.length) {
+      return `${strategies.length} strategies across ${symbolGroups.length} symbol${symbolGroups.length === 1 ? "" : "s"}.`;
+    }
+    return `Showing ${filteredStrategies.length} of ${strategies.length} strategies across ${symbolGroups.length} symbol${symbolGroups.length === 1 ? "" : "s"}.`;
+  })();
+
+  function toggleSymbolCollapsed(symbol: string) {
+    const key = normalizeUnderlying(symbol);
+    setCollapsedSymbols((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }
 
   return (
     <div className="positions-workspace">
@@ -1382,109 +1439,226 @@ function PositionsSection({
             <span className="section-state">{strategies.length} strategies</span>
           </div>
           <p className="microcopy" role="status" aria-live="polite">
-            {strategies.length === 0
-              ? "No open positions in the current account scope."
-              : `Showing ${pageStart}–${pageEnd} of ${strategies.length} strategies (page ${safeStrategyPage + 1} of ${strategyPageCount}).`}
+            {statusCopy}
           </p>
-          <div
-            className="table-wrap"
-            tabIndex={0}
-            role="region"
-            aria-label="Portfolio strategies table"
-          >
-            <table className="data-table dense">
-              <caption className="sr-only">Grouped strategies with Greeks and P/L</caption>
-              <thead>
-                <tr>
-                  <th scope="col">Underlying</th>
-                  <th scope="col">Strategy</th>
-                  <th scope="col">Horizon</th>
-                  <th scope="col">DTE</th>
-                  <th scope="col">Strikes</th>
-                  <th scope="col">Catalyst</th>
-                  <th scope="col">Δ</th>
-                  <th scope="col">Θ</th>
-                  <th scope="col">P/L</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pagedStrategies.map((strategy) => {
-                  const catalyst = catalystBySymbol.get(strategy.underlying);
+
+          {strategies.length > 0 ? (
+            <div className="position-category-toggles" role="group" aria-label="Position categories">
+              <label className="position-category-toggle">
+                <input
+                  type="checkbox"
+                  checked={showStock}
+                  onChange={(event) => setShowStock(event.target.checked)}
+                  aria-label={`Show stock positions (${categoryCounts.stock})`}
+                />
+                <span className="position-category-toggle-label">
+                  Stock
+                  <span className="position-category-count tabular" aria-hidden="true">
+                    {categoryCounts.stock}
+                  </span>
+                </span>
+              </label>
+              <label className="position-category-toggle">
+                <input
+                  type="checkbox"
+                  checked={showOptions}
+                  onChange={(event) => setShowOptions(event.target.checked)}
+                  aria-label={`Show options positions (${categoryCounts.options})`}
+                />
+                <span className="position-category-toggle-label">
+                  Options
+                  <span className="position-category-count tabular" aria-hidden="true">
+                    {categoryCounts.options}
+                  </span>
+                </span>
+              </label>
+            </div>
+          ) : null}
+
+          {bothCategoriesHidden && strategies.length > 0 ? (
+            <div className="positions-filter-empty" role="status">
+              <p className="muted">
+                All position categories are hidden. Enable Stock or Options to show current
+                strategies.
+              </p>
+              <div className="positions-filter-empty-actions">
+                <button type="button" onClick={() => setShowStock(true)}>
+                  Show Stock
+                </button>
+                <button type="button" onClick={() => setShowOptions(true)}>
+                  Show Options
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div
+              className="table-wrap"
+              tabIndex={0}
+              role="region"
+              aria-label="Portfolio strategies by symbol"
+            >
+              <table className="data-table dense positions-by-symbol">
+                <caption className="sr-only">
+                  Strategies grouped by underlying symbol with Greeks and P/L
+                </caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Strategy</th>
+                    <th scope="col">Horizon</th>
+                    <th scope="col">DTE</th>
+                    <th scope="col">Strikes</th>
+                    <th scope="col">Catalyst</th>
+                    <th scope="col">Δ</th>
+                    <th scope="col">Θ</th>
+                    <th scope="col">P/L</th>
+                  </tr>
+                </thead>
+                {symbolGroups.map((group) => {
+                  const expanded = !collapsedSymbols.has(group.symbol);
+                  const panelId = symbolGroupPanelId(group.symbol);
+                  const splitLabel = formatSymbolGroupSplit(
+                    group.stockCount,
+                    group.optionsCount,
+                  );
                   return (
-                    <tr
-                      key={strategy.strategy_id}
-                      className={catalyst?.quiet === false ? "row-promoted" : undefined}
-                    >
-                      <th scope="row">
-                        <button
-                          type="button"
-                          className="linkish"
-                          onClick={() => onSelectStrategy(strategy.strategy_id)}
-                        >
-                          {strategy.underlying}
-                        </button>
-                      </th>
-                      <td>{strategy.strategy_type}</td>
-                      <td>
-                        <span className={`chip horizon-${strategy.horizon}`}>
-                          {strategy.horizon}
-                        </span>
-                      </td>
-                      <td className="tabular">{strategy.days_to_expiration ?? "—"}</td>
-                      <td className="tabular">{strategy.strikes || "—"}</td>
-                      <td>
-                        <span
-                          className={`catalyst-inline ${
-                            catalyst ? (catalyst.quiet ? "quiet" : "promoted") : "quiet"
-                          }`}
-                          title={catalyst?.summary ?? "No confirmed catalyst found"}
-                        >
-                          {catalyst
-                            ? formatConfidence(catalyst.confidence)
-                            : "No confirmed catalyst found"}
-                        </span>
-                      </td>
-                      <td className="tabular">{signed(strategy.total_delta, 2)}</td>
-                      <td className="tabular">{signed(strategy.total_theta, 0)}</td>
-                      <td className="tabular">{currency(strategy.unrealized_pnl)}</td>
-                    </tr>
+                    <Fragment key={group.symbol}>
+                      <tbody className="symbol-group">
+                        <tr className="symbol-group-header-row">
+                          <th scope="rowgroup" colSpan={8}>
+                            <button
+                              type="button"
+                              className="symbol-group-toggle"
+                              aria-expanded={expanded}
+                              aria-controls={panelId}
+                              onClick={() => toggleSymbolCollapsed(group.symbol)}
+                            >
+                              <span className="symbol-group-chevron" aria-hidden="true">
+                                {expanded ? "▾" : "▸"}
+                              </span>
+                              <span className="symbol-group-symbol">{group.symbol}</span>
+                              <span className="symbol-group-meta">
+                                <span className="tabular">
+                                  {group.totalCount}{" "}
+                                  {group.totalCount === 1 ? "position" : "positions"}
+                                </span>
+                                {splitLabel ? (
+                                  <span className="symbol-group-split muted">
+                                    {splitLabel}
+                                  </span>
+                                ) : null}
+                                <span className="symbol-group-pnl tabular">
+                                  {currency(group.unrealizedPnl)}
+                                </span>
+                              </span>
+                            </button>
+                          </th>
+                        </tr>
+                      </tbody>
+                      <tbody
+                        id={panelId}
+                        className="symbol-group-body"
+                        hidden={!expanded}
+                      >
+                        {expanded
+                          ? group.strategies.map((strategy) => {
+                              const catalyst =
+                                catalystBySymbol.get(strategy.underlying) ??
+                                catalystBySymbol.get(group.symbol);
+                              return (
+                                <tr
+                                  key={strategy.strategy_id}
+                                  className={
+                                    catalyst?.quiet === false
+                                      ? "row-promoted symbol-group-row"
+                                      : "symbol-group-row"
+                                  }
+                                >
+                                  <th scope="row">
+                                    <button
+                                      type="button"
+                                      className="linkish"
+                                      aria-label={`Open ${group.symbol} ${strategy.strategy_type}`}
+                                      onClick={() =>
+                                        onSelectStrategy(strategy.strategy_id)
+                                      }
+                                    >
+                                      {strategy.strategy_type}
+                                    </button>
+                                    <span className="sr-only">
+                                      {" "}
+                                      under {group.symbol}
+                                    </span>
+                                  </th>
+                                  <td>
+                                    <span className={`chip horizon-${strategy.horizon}`}>
+                                      {strategy.horizon}
+                                    </span>
+                                  </td>
+                                  <td className="tabular">
+                                    {strategy.days_to_expiration ?? "—"}
+                                  </td>
+                                  <td className="tabular">
+                                    {strategy.strikes || "—"}
+                                  </td>
+                                  <td>
+                                    <span
+                                      className={`catalyst-inline ${
+                                        catalyst
+                                          ? catalyst.quiet
+                                            ? "quiet"
+                                            : "promoted"
+                                          : "quiet"
+                                      }`}
+                                      title={
+                                        catalyst?.summary ??
+                                        "No confirmed catalyst found"
+                                      }
+                                    >
+                                      {catalyst
+                                        ? formatConfidence(catalyst.confidence)
+                                        : "No confirmed catalyst found"}
+                                    </span>
+                                  </td>
+                                  <td className="tabular">
+                                    {signed(strategy.total_delta, 2)}
+                                  </td>
+                                  <td className="tabular">
+                                    {signed(strategy.total_theta, 0)}
+                                  </td>
+                                  <td className="tabular">
+                                    {currency(strategy.unrealized_pnl)}
+                                  </td>
+                                </tr>
+                              );
+                            })
+                          : null}
+                      </tbody>
+                    </Fragment>
                   );
                 })}
                 {!strategies.length ? (
-                  <tr>
-                    <td colSpan={9} className="muted">
-                      No open positions in the current account scope.
-                    </td>
-                  </tr>
+                  <tbody>
+                    <tr>
+                      <td colSpan={8} className="muted">
+                        No open positions in the current account scope.
+                      </td>
+                    </tr>
+                  </tbody>
                 ) : null}
-              </tbody>
-            </table>
-          </div>
-          {strategies.length > STRATEGY_PAGE_SIZE ? (
-            <div className="pager" role="navigation" aria-label="Strategy pages">
-              <button
-                type="button"
-                disabled={safeStrategyPage <= 0}
-                aria-label="Previous page"
-                onClick={() => setStrategyPage((page) => Math.max(0, page - 1))}
-              >
-                Previous
-              </button>
-              <span className="microcopy">
-                page {safeStrategyPage + 1} of {strategyPageCount}
-              </span>
-              <button
-                type="button"
-                disabled={safeStrategyPage >= strategyPageCount - 1}
-                aria-label="Next page"
-                onClick={() =>
-                  setStrategyPage((page) => Math.min(strategyPageCount - 1, page + 1))
-                }
-              >
-                Next
-              </button>
+                {strategies.length > 0 &&
+                filteredStrategies.length === 0 &&
+                !bothCategoriesHidden ? (
+                  <tbody>
+                    <tr>
+                      <td colSpan={8} className="muted">
+                        No strategies match the current category filters.
+                      </td>
+                    </tr>
+                  </tbody>
+                ) : null}
+              </table>
             </div>
-          ) : null}
+          )}
         </section>
 
         <section className="panel-section" aria-labelledby="orders-heading">

@@ -1,0 +1,337 @@
+import { expect, test } from "@playwright/test";
+
+import {
+  classifyStrategy,
+  countStrategiesByCategory,
+  filterStrategiesByCategory,
+  formatSymbolGroupSplit,
+  groupStrategiesBySymbol,
+  isEquityLeg,
+  normalizeUnderlying,
+  presentSymbolsFromStrategies,
+  pruneCollapsedSymbols,
+  sanitizeSymbolDomId,
+  symbolGroupPanelId,
+  UNKNOWN_UNDERLYING_SYMBOL,
+} from "../src/positionGroups";
+import type { PositionLeg, Strategy } from "../src/types";
+
+function leg(overrides: Partial<PositionLeg> = {}): PositionLeg {
+  return {
+    symbol: "SPY",
+    underlying_symbol: "SPY",
+    quantity: 100,
+    quantity_direction: "Long",
+    position_type: "Equity",
+    strike_price: null,
+    option_type: null,
+    expiration_date: null,
+    days_to_expiration: null,
+    mark_price: 500,
+    market_value: 50000,
+    unrealized_pnl: 100,
+    unrealized_pnl_percent: 1,
+    delta: 1,
+    gamma: 0,
+    theta: 0,
+    vega: 0,
+    implied_volatility: null,
+    multiplier: 1,
+    horizon: "strategic",
+    ...overrides,
+  };
+}
+
+function optionLeg(overrides: Partial<PositionLeg> = {}): PositionLeg {
+  return leg({
+    symbol: "SPY  260821C00500000",
+    position_type: "Equity Option",
+    strike_price: 500,
+    option_type: "C",
+    expiration_date: "2026-08-21",
+    days_to_expiration: 21,
+    multiplier: 100,
+    delta: 0.4,
+    theta: -0.05,
+    ...overrides,
+  });
+}
+
+function strategy(overrides: Partial<Strategy> & Pick<Strategy, "strategy_id">): Strategy {
+  return {
+    account_id: "acct",
+    underlying: "SPY",
+    strategy_type: "Short Put",
+    expiration_date: "2026-08-21",
+    days_to_expiration: 21,
+    quantity: 1,
+    strikes: "$500",
+    unrealized_pnl: 40,
+    unrealized_pnl_percent: 10,
+    total_delta: -20,
+    total_theta: 4,
+    horizon: "tactical",
+    legs: [],
+    ...overrides,
+  };
+}
+
+test.describe("normalizeUnderlying", () => {
+  test("trims and uppercases for stable display keys", () => {
+    expect(normalizeUnderlying("  spy ")).toBe("SPY");
+    expect(normalizeUnderlying("qQq")).toBe("QQQ");
+  });
+
+  test("maps missing or whitespace-only underlyings to UNKNOWN", () => {
+    expect(normalizeUnderlying("")).toBe(UNKNOWN_UNDERLYING_SYMBOL);
+    expect(normalizeUnderlying("   ")).toBe(UNKNOWN_UNDERLYING_SYMBOL);
+    expect(normalizeUnderlying(null)).toBe(UNKNOWN_UNDERLYING_SYMBOL);
+    expect(normalizeUnderlying(undefined)).toBe(UNKNOWN_UNDERLYING_SYMBOL);
+  });
+
+  test("preserves distinct valid symbols including special characters", () => {
+    expect(normalizeUnderlying("brk/b")).toBe("BRK/B");
+    expect(normalizeUnderlying(" spx.w ")).toBe("SPX.W");
+    expect(normalizeUnderlying("^vix")).toBe("^VIX");
+  });
+});
+
+test.describe("symbol DOM id sanitizer", () => {
+  test("leaves plain symbols intact inside panel ids", () => {
+    expect(sanitizeSymbolDomId("SPY")).toBe("SPY");
+    expect(symbolGroupPanelId("spy")).toBe("symbol-group-panel-SPY");
+  });
+
+  test("encodes fragile characters deterministically and uniquely", () => {
+    expect(sanitizeSymbolDomId("BRK/B")).toBe("BRK_2f_B");
+    expect(sanitizeSymbolDomId("SPX.W")).toBe("SPX_2e_W");
+    expect(sanitizeSymbolDomId("^VIX")).toBe("_5e_VIX");
+    expect(sanitizeSymbolDomId("FOO BAR")).toBe("FOO_20_BAR");
+    expect(symbolGroupPanelId("brk/b")).toBe("symbol-group-panel-BRK_2f_B");
+    // Distinct normalized symbols never collide after sanitizing.
+    expect(sanitizeSymbolDomId("A/B")).not.toBe(sanitizeSymbolDomId("A.B"));
+    expect(sanitizeSymbolDomId("A/B")).not.toBe(sanitizeSymbolDomId("A_B"));
+    // Regression: slash-encoding must not collide with a literal `_2f_` symbol.
+    // (normalize uppercases first, so A_2f_B → A_2F_B before encoding underscores.)
+    expect(sanitizeSymbolDomId("A/B")).toBe("A_2f_B");
+    expect(sanitizeSymbolDomId("A_2f_B")).toBe("A_5f_2F_5f_B");
+    expect(sanitizeSymbolDomId("A/B")).not.toBe(sanitizeSymbolDomId("A_2f_B"));
+  });
+
+  test("blank underlyings produce a stable UNKNOWN panel id", () => {
+    expect(sanitizeSymbolDomId("")).toBe(UNKNOWN_UNDERLYING_SYMBOL);
+    expect(symbolGroupPanelId("  ")).toBe("symbol-group-panel-UNKNOWN");
+  });
+});
+
+test.describe("formatSymbolGroupSplit", () => {
+  test("uses singular option and stock copy correctly", () => {
+    expect(formatSymbolGroupSplit(1, 1)).toBe("1 stock · 1 option");
+    expect(formatSymbolGroupSplit(2, 3)).toBe("2 stock · 3 options");
+    expect(formatSymbolGroupSplit(0, 1)).toBe("1 option");
+    expect(formatSymbolGroupSplit(1, 0)).toBe("1 stock");
+    expect(formatSymbolGroupSplit(0, 0)).toBeNull();
+  });
+});
+
+test.describe("classifyStrategy", () => {
+  test("stock-only when every leg is equity", () => {
+    expect(
+      classifyStrategy(
+        strategy({
+          strategy_id: "s1",
+          strategy_type: "Long Stock",
+          legs: [leg()],
+        }),
+      ),
+    ).toBe("stock");
+  });
+
+  test("options when any leg is an option", () => {
+    expect(
+      classifyStrategy(
+        strategy({
+          strategy_id: "s2",
+          strategy_type: "Short Put",
+          legs: [optionLeg()],
+        }),
+      ),
+    ).toBe("options");
+  });
+
+  test("mixed stock+option structures classify as options", () => {
+    expect(
+      classifyStrategy(
+        strategy({
+          strategy_id: "s3",
+          strategy_type: "Covered Call",
+          legs: [leg({ quantity: 100 }), optionLeg({ quantity_direction: "Short" })],
+        }),
+      ),
+    ).toBe("options");
+    expect(
+      classifyStrategy(
+        strategy({
+          strategy_id: "s4",
+          strategy_type: "Collar",
+          legs: [
+            leg(),
+            optionLeg({ option_type: "P", strike_price: 480 }),
+            optionLeg({ option_type: "C", strike_price: 520 }),
+          ],
+        }),
+      ),
+    ).toBe("options");
+    expect(
+      classifyStrategy(
+        strategy({
+          strategy_id: "s5",
+          strategy_type: "Protective Put",
+          legs: [leg(), optionLeg({ option_type: "P" })],
+        }),
+      ),
+    ).toBe("options");
+  });
+
+  test("missing-leg fallback recognizes stock type names", () => {
+    expect(
+      classifyStrategy(strategy({ strategy_id: "a", strategy_type: "Long Stock", legs: [] })),
+    ).toBe("stock");
+    expect(
+      classifyStrategy(strategy({ strategy_id: "b", strategy_type: "Short Stock", legs: [] })),
+    ).toBe("stock");
+    expect(
+      classifyStrategy(strategy({ strategy_id: "c", strategy_type: "Stock", legs: [] })),
+    ).toBe("stock");
+  });
+
+  test("unknown and option strategy types without legs fall back to options", () => {
+    expect(
+      classifyStrategy(strategy({ strategy_id: "d", strategy_type: "Short Put", legs: [] })),
+    ).toBe("options");
+    expect(
+      classifyStrategy(strategy({ strategy_id: "e", strategy_type: "Mystery", legs: [] })),
+    ).toBe("options");
+    expect(
+      classifyStrategy(strategy({ strategy_id: "f", strategy_type: "Iron Condor", legs: [] })),
+    ).toBe("options");
+  });
+
+  test("isEquityLeg rejects option instruments and option-like fields", () => {
+    expect(isEquityLeg(leg())).toBe(true);
+    expect(isEquityLeg(optionLeg())).toBe(false);
+    expect(isEquityLeg(leg({ position_type: "Future Option" }))).toBe(false);
+    expect(isEquityLeg(leg({ option_type: "P" }))).toBe(false);
+    expect(isEquityLeg(leg({ strike_price: 100 }))).toBe(false);
+  });
+});
+
+test.describe("groupStrategiesBySymbol", () => {
+  test("groups by normalized underlying and sorts symbols alphabetically", () => {
+    const groups = groupStrategiesBySymbol([
+      strategy({ strategy_id: "1", underlying: "qqq", strategy_type: "Iron Condor", unrealized_pnl: 10 }),
+      strategy({ strategy_id: "2", underlying: " SPY ", strategy_type: "Long Stock", unrealized_pnl: 20 }),
+      strategy({ strategy_id: "3", underlying: "spy", strategy_type: "Short Put", unrealized_pnl: 30 }),
+      strategy({ strategy_id: "4", underlying: "AAPL", strategy_type: "Covered Call", unrealized_pnl: -5 }),
+    ]);
+    expect(groups.map((g) => g.symbol)).toEqual(["AAPL", "QQQ", "SPY"]);
+    const spy = groups.find((g) => g.symbol === "SPY");
+    expect(spy?.totalCount).toBe(2);
+    expect(spy?.strategies.map((s) => s.strategy_id)).toEqual(["2", "3"]);
+    expect(spy?.unrealizedPnl).toBe(50);
+  });
+
+  test("blank underlyings collapse into a single UNKNOWN group", () => {
+    const groups = groupStrategiesBySymbol([
+      strategy({ strategy_id: "blank-a", underlying: "", strategy_type: "Short Put", unrealized_pnl: 1 }),
+      strategy({ strategy_id: "blank-b", underlying: "  ", strategy_type: "Long Stock", unrealized_pnl: 2 }),
+      strategy({ strategy_id: "spy", underlying: "SPY", strategy_type: "Short Put", unrealized_pnl: 3 }),
+    ]);
+    expect(groups.map((g) => g.symbol)).toEqual(["SPY", UNKNOWN_UNDERLYING_SYMBOL]);
+    const unknown = groups.find((g) => g.symbol === UNKNOWN_UNDERLYING_SYMBOL);
+    expect(unknown?.totalCount).toBe(2);
+    expect(unknown?.strategies.map((s) => s.strategy_id)).toEqual(["blank-a", "blank-b"]);
+  });
+
+  test("same-symbol stock and option rows share one group with split counts", () => {
+    const groups = groupStrategiesBySymbol([
+      strategy({
+        strategy_id: "stock",
+        underlying: "SPY",
+        strategy_type: "Long Stock",
+        legs: [leg()],
+        unrealized_pnl: 100,
+      }),
+      strategy({
+        strategy_id: "opt",
+        underlying: "SPY",
+        strategy_type: "Short Put",
+        legs: [optionLeg()],
+        unrealized_pnl: 40,
+      }),
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.symbol).toBe("SPY");
+    expect(groups[0]?.stockCount).toBe(1);
+    expect(groups[0]?.optionsCount).toBe(1);
+    expect(groups[0]?.totalCount).toBe(2);
+    expect(groups[0]?.unrealizedPnl).toBe(140);
+  });
+});
+
+test.describe("filterStrategiesByCategory", () => {
+  const rows = [
+    strategy({
+      strategy_id: "stock",
+      strategy_type: "Long Stock",
+      legs: [leg()],
+    }),
+    strategy({
+      strategy_id: "put",
+      strategy_type: "Short Put",
+      legs: [optionLeg()],
+    }),
+    strategy({
+      strategy_id: "cc",
+      strategy_type: "Covered Call",
+      legs: [leg(), optionLeg({ quantity_direction: "Short" })],
+    }),
+  ];
+
+  test("Stock toggle hides stock-only without hiding option/mixed", () => {
+    const filtered = filterStrategiesByCategory(rows, { showStock: false, showOptions: true });
+    expect(filtered.map((s) => s.strategy_id)).toEqual(["put", "cc"]);
+  });
+
+  test("Options toggle hides option/mixed without hiding stock-only", () => {
+    const filtered = filterStrategiesByCategory(rows, { showStock: true, showOptions: false });
+    expect(filtered.map((s) => s.strategy_id)).toEqual(["stock"]);
+  });
+
+  test("both off yields empty list", () => {
+    expect(filterStrategiesByCategory(rows, { showStock: false, showOptions: false })).toEqual([]);
+  });
+
+  test("countStrategiesByCategory reports zeros for empty categories", () => {
+    expect(countStrategiesByCategory(rows)).toEqual({ stock: 1, options: 2 });
+    expect(countStrategiesByCategory([])).toEqual({ stock: 0, options: 0 });
+  });
+});
+
+test.describe("collapse state pruning", () => {
+  test("pruneCollapsedSymbols drops symbols that disappear", () => {
+    const collapsed = new Set(["SPY", "QQQ", "IWM"]);
+    const next = pruneCollapsedSymbols(collapsed, ["spy", "AAPL"]);
+    expect([...next].sort()).toEqual(["SPY"]);
+  });
+
+  test("presentSymbolsFromStrategies is sorted and normalized", () => {
+    expect(
+      presentSymbolsFromStrategies([
+        { underlying: "qqq" },
+        { underlying: " SPY" },
+        { underlying: "spy" },
+      ]),
+    ).toEqual(["QQQ", "SPY"]);
+  });
+});
