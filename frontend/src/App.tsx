@@ -61,6 +61,12 @@ import {
   deriveSymbolCatalystRisk,
 } from "./catalystRisk";
 import { OperationsPanel } from "./OperationsPanel";
+import {
+  buildRollLedger,
+  mergeAccountRollResults,
+  summarizeRollLedger,
+  type RollLedgerEvent,
+} from "./rollLedger";
 import type {
   AlertRecord,
   BootstrapPayload,
@@ -141,6 +147,7 @@ function App() {
   const [watchlist, setWatchlist] = useState<WatchlistSnapshot | null>(null);
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [rolls, setRolls] = useState<RollChain[]>([]);
+  const [rollsLoading, setRollsLoading] = useState(false);
   const [patterns, setPatterns] = useState<RollPatterns | null>(null);
   const [heatmap, setHeatmap] = useState<RollHeatmap | null>(null);
   const [selectedStrategyId, setSelectedStrategyId] = useState<string | null>(null);
@@ -174,6 +181,12 @@ function App() {
         preserveAccountId: selectedAccountId,
       }),
     [accountCatalog, accountCatalogStrategies, selectedAccountId],
+  );
+
+  /** Displayable account ids for all-scope roll aggregation (excludes inactive shells). */
+  const displayableAccountIds = useMemo(
+    () => accountOptions.map((account) => account.account_id),
+    [accountOptions],
   );
 
   const loadPortfolio = useCallback(
@@ -268,47 +281,65 @@ function App() {
     }
   }, []);
 
-  const loadRolls = useCallback(async (accountId: string) => {
-    const request = ++rollsRequest.current;
-    if (accountId === "all") {
+  const loadRolls = useCallback(
+    async (accountId: string, scopeAccountIds: readonly string[] = []) => {
+      const request = ++rollsRequest.current;
+      // Clear immediately so a new scope never shows the previous ledger.
       setRolls([]);
+      setRollsLoading(true);
       setPatterns(null);
       setHeatmap(null);
       setOrders([]);
-      return;
-    }
-    try {
-      setRolls([]);
-      setPatterns(null);
-      setOrders([]);
-      setHeatmap(null);
-      const chainRows = await fetchRolls(accountId);
-      if (request !== rollsRequest.current) return;
-      setRolls(chainRows);
-      const [patternResult, orderResult] = await Promise.allSettled([
-        fetchRollPatterns(accountId),
-        fetchOrders(accountId),
-      ]);
-      if (request !== rollsRequest.current) return;
-      setPatterns(patternResult.status === "fulfilled" ? patternResult.value : null);
-      setOrders(orderResult.status === "fulfilled" ? orderResult.value : []);
-      const symbol = chainRows[0]?.underlying;
-      if (symbol) {
-        try {
-          const nextHeatmap = await fetchRollHeatmap(accountId, symbol);
-          if (request === rollsRequest.current) setHeatmap(nextHeatmap);
-        } catch {
-          if (request === rollsRequest.current) setHeatmap(null);
+
+      try {
+        if (accountId === "all") {
+          // Aggregate roll chains from every displayable account; order history stays single-account.
+          const ids = scopeAccountIds.filter((id) => id && id !== "all");
+          if (!ids.length) {
+            if (request !== rollsRequest.current) return;
+            setRolls([]);
+            setRollsLoading(false);
+            return;
+          }
+          const settled = await Promise.allSettled(ids.map((id) => fetchRolls(id)));
+          if (request !== rollsRequest.current) return;
+          setRolls(mergeAccountRollResults(settled));
+          setRollsLoading(false);
+          return;
         }
+
+        const chainRows = await fetchRolls(accountId);
+        if (request !== rollsRequest.current) return;
+        setRolls(chainRows);
+        setRollsLoading(false);
+
+        const [patternResult, orderResult] = await Promise.allSettled([
+          fetchRollPatterns(accountId),
+          fetchOrders(accountId),
+        ]);
+        if (request !== rollsRequest.current) return;
+        setPatterns(patternResult.status === "fulfilled" ? patternResult.value : null);
+        setOrders(orderResult.status === "fulfilled" ? orderResult.value : []);
+        const symbol = chainRows[0]?.underlying;
+        if (symbol) {
+          try {
+            const nextHeatmap = await fetchRollHeatmap(accountId, symbol);
+            if (request === rollsRequest.current) setHeatmap(nextHeatmap);
+          } catch {
+            if (request === rollsRequest.current) setHeatmap(null);
+          }
+        }
+      } catch {
+        if (request !== rollsRequest.current) return;
+        setRolls([]);
+        setRollsLoading(false);
+        setPatterns(null);
+        setHeatmap(null);
+        setOrders([]);
       }
-    } catch {
-      if (request !== rollsRequest.current) return;
-      setRolls([]);
-      setPatterns(null);
-      setHeatmap(null);
-      setOrders([]);
-    }
-  }, []);
+    },
+    [],
+  );
 
   useEffect(() => {
     getBootstrap()
@@ -343,10 +374,12 @@ function App() {
 
   useEffect(() => {
     if (portfolio.kind !== "ready") return;
-    void loadRolls(portfolio.snapshot.selected_account_id);
-    void loadCatalysts(portfolio.snapshot.selected_account_id);
-    void loadAlerts(portfolio.snapshot.selected_account_id);
-  }, [loadRolls, loadCatalysts, loadAlerts, portfolio]);
+    const scopeId = portfolio.snapshot.selected_account_id;
+    // All-scope roll aggregation uses displayable accounts only (not inactive shells).
+    void loadRolls(scopeId, scopeId === "all" ? displayableAccountIds : [scopeId]);
+    void loadCatalysts(scopeId);
+    void loadAlerts(scopeId);
+  }, [loadRolls, loadCatalysts, loadAlerts, portfolio, displayableAccountIds]);
 
   useEffect(() => {
     if (state.kind !== "ready") return;
@@ -467,6 +500,9 @@ function App() {
               onSelectStrategy={(id) => void openStrategy(id)}
               orders={orders}
               catalysts={catalysts}
+              rolls={rolls}
+              rollsLoading={rollsLoading}
+              onOpenRollAnalytics={() => setActiveSection("Roll analytics")}
             />
           ) : null}
 
@@ -1238,16 +1274,62 @@ function AlertsSection({
   );
 }
 
+function formatRollTimestamp(iso: string): string {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(iso));
+  } catch {
+    return iso;
+  }
+}
+
+function formatExpiration(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    // Date-only values (YYYY-MM-DD) parse as UTC midnight; format as calendar date.
+    const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(value);
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "2-digit",
+      timeZone: dateOnly ? "UTC" : undefined,
+    }).format(new Date(dateOnly ? `${value}T00:00:00Z` : value));
+  } catch {
+    return value;
+  }
+}
+
+/** Signed premium with explicit credit/debit label (not color-only). */
+function formatPremiumEffect(value: number): { text: string; kind: "credit" | "debit" | "flat" } {
+  if (value > 0) {
+    return { text: `Credit ${currency(value)}`, kind: "credit" };
+  }
+  if (value < 0) {
+    return { text: `Debit ${currency(Math.abs(value))}`, kind: "debit" };
+  }
+  return { text: currency(0), kind: "flat" };
+}
+
 function PositionsSection({
   snapshot,
   onSelectStrategy,
   orders,
   catalysts,
+  rolls,
+  rollsLoading,
+  onOpenRollAnalytics,
 }: {
   snapshot: PortfolioSnapshot | null;
   onSelectStrategy: (id: string) => void;
   orders: OrderRow[];
   catalysts: CatalystScanSnapshot | null;
+  rolls: RollChain[];
+  rollsLoading: boolean;
+  onOpenRollAnalytics: () => void;
 }) {
   const strategies = snapshot?.strategies ?? [];
   const [strategyPage, setStrategyPage] = useState(0);
@@ -1257,6 +1339,9 @@ function PositionsSection({
     for (const row of catalysts?.results ?? []) map.set(row.symbol, row);
     return map;
   }, [catalysts]);
+
+  const ledgerEvents = useMemo(() => buildRollLedger(rolls), [rolls]);
+  const ledgerSummary = useMemo(() => summarizeRollLedger(rolls), [rolls]);
 
   useEffect(() => {
     setStrategyPage(0);
@@ -1279,188 +1364,375 @@ function PositionsSection({
     safeOrderPage * ORDER_PAGE_SIZE + ORDER_PAGE_SIZE,
   );
 
-  return (
-    <div className="stack-lg">
-      <section className="panel-section" aria-labelledby="positions-heading">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">Strategies</p>
-            <h2 id="positions-heading">Positions</h2>
-          </div>
-          <span className="section-state">{strategies.length} strategies</span>
-        </div>
-        <p className="microcopy" role="status" aria-live="polite">
-          Showing {pagedStrategies.length} of {strategies.length} (page {safeStrategyPage + 1} of{" "}
-          {strategyPageCount}). Tables stay windowed so large portfolios remain keyboard-usable.
-        </p>
-        <div className="table-wrap" tabIndex={0} role="region" aria-label="Portfolio strategies table">
-          <table className="data-table dense">
-            <caption className="sr-only">Grouped strategies with Greeks and P/L</caption>
-            <thead>
-              <tr>
-                <th scope="col">Underlying</th>
-                <th scope="col">Strategy</th>
-                <th scope="col">Horizon</th>
-                <th scope="col">DTE</th>
-                <th scope="col">Strikes</th>
-                <th scope="col">Catalyst</th>
-                <th scope="col">Δ</th>
-                <th scope="col">Θ</th>
-                <th scope="col">P/L</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pagedStrategies.map((strategy) => {
-                const catalyst = catalystBySymbol.get(strategy.underlying);
-                return (
-                  <tr
-                    key={strategy.strategy_id}
-                    className={catalyst?.quiet === false ? "row-promoted" : undefined}
-                  >
-                    <th scope="row">
-                      <button
-                        type="button"
-                        className="linkish"
-                        onClick={() => onSelectStrategy(strategy.strategy_id)}
-                      >
-                        {strategy.underlying}
-                      </button>
-                    </th>
-                    <td>{strategy.strategy_type}</td>
-                    <td>
-                      <span className={`chip horizon-${strategy.horizon}`}>{strategy.horizon}</span>
-                    </td>
-                    <td className="tabular">{strategy.days_to_expiration ?? "—"}</td>
-                    <td className="tabular">{strategy.strikes || "—"}</td>
-                    <td>
-                      <span
-                        className={`catalyst-inline ${
-                          catalyst ? (catalyst.quiet ? "quiet" : "promoted") : "quiet"
-                        }`}
-                        title={catalyst?.summary ?? "No confirmed catalyst found"}
-                      >
-                        {catalyst
-                          ? formatConfidence(catalyst.confidence)
-                          : "No confirmed catalyst found"}
-                      </span>
-                    </td>
-                    <td className="tabular">{signed(strategy.total_delta, 2)}</td>
-                    <td className="tabular">{signed(strategy.total_theta, 0)}</td>
-                    <td className="tabular">{currency(strategy.unrealized_pnl)}</td>
-                  </tr>
-                );
-              })}
-              {!strategies.length ? (
-                <tr>
-                  <td colSpan={9} className="muted">
-                    No strategies in the current account scope.
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </div>
-        {strategies.length > STRATEGY_PAGE_SIZE ? (
-          <div className="pager" role="navigation" aria-label="Strategy pages">
-            <button
-              type="button"
-              disabled={safeStrategyPage <= 0}
-              aria-label="Previous page"
-              onClick={() => setStrategyPage((page) => Math.max(0, page - 1))}
-            >
-              Previous
-            </button>
-            <span className="microcopy">
-              page {safeStrategyPage + 1} of {strategyPageCount}
-            </span>
-            <button
-              type="button"
-              disabled={safeStrategyPage >= strategyPageCount - 1}
-              aria-label="Next page"
-              onClick={() =>
-                setStrategyPage((page) => Math.min(strategyPageCount - 1, page + 1))
-              }
-            >
-              Next
-            </button>
-          </div>
-        ) : null}
-      </section>
+  const pageStart = strategies.length ? safeStrategyPage * STRATEGY_PAGE_SIZE + 1 : 0;
+  const pageEnd = Math.min(
+    strategies.length,
+    safeStrategyPage * STRATEGY_PAGE_SIZE + pagedStrategies.length,
+  );
 
-      <section className="panel-section" aria-labelledby="orders-heading">
-        <div className="section-heading">
+  return (
+    <div className="positions-workspace">
+      <div className="positions-workspace-main">
+        <section className="panel-section positions-pane" aria-labelledby="positions-heading">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Strategies</p>
+              <h2 id="positions-heading">Positions</h2>
+            </div>
+            <span className="section-state">{strategies.length} strategies</span>
+          </div>
+          <p className="microcopy" role="status" aria-live="polite">
+            {strategies.length === 0
+              ? "No open positions in the current account scope."
+              : `Showing ${pageStart}–${pageEnd} of ${strategies.length} strategies (page ${safeStrategyPage + 1} of ${strategyPageCount}).`}
+          </p>
+          <div
+            className="table-wrap"
+            tabIndex={0}
+            role="region"
+            aria-label="Portfolio strategies table"
+          >
+            <table className="data-table dense">
+              <caption className="sr-only">Grouped strategies with Greeks and P/L</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Underlying</th>
+                  <th scope="col">Strategy</th>
+                  <th scope="col">Horizon</th>
+                  <th scope="col">DTE</th>
+                  <th scope="col">Strikes</th>
+                  <th scope="col">Catalyst</th>
+                  <th scope="col">Δ</th>
+                  <th scope="col">Θ</th>
+                  <th scope="col">P/L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pagedStrategies.map((strategy) => {
+                  const catalyst = catalystBySymbol.get(strategy.underlying);
+                  return (
+                    <tr
+                      key={strategy.strategy_id}
+                      className={catalyst?.quiet === false ? "row-promoted" : undefined}
+                    >
+                      <th scope="row">
+                        <button
+                          type="button"
+                          className="linkish"
+                          onClick={() => onSelectStrategy(strategy.strategy_id)}
+                        >
+                          {strategy.underlying}
+                        </button>
+                      </th>
+                      <td>{strategy.strategy_type}</td>
+                      <td>
+                        <span className={`chip horizon-${strategy.horizon}`}>
+                          {strategy.horizon}
+                        </span>
+                      </td>
+                      <td className="tabular">{strategy.days_to_expiration ?? "—"}</td>
+                      <td className="tabular">{strategy.strikes || "—"}</td>
+                      <td>
+                        <span
+                          className={`catalyst-inline ${
+                            catalyst ? (catalyst.quiet ? "quiet" : "promoted") : "quiet"
+                          }`}
+                          title={catalyst?.summary ?? "No confirmed catalyst found"}
+                        >
+                          {catalyst
+                            ? formatConfidence(catalyst.confidence)
+                            : "No confirmed catalyst found"}
+                        </span>
+                      </td>
+                      <td className="tabular">{signed(strategy.total_delta, 2)}</td>
+                      <td className="tabular">{signed(strategy.total_theta, 0)}</td>
+                      <td className="tabular">{currency(strategy.unrealized_pnl)}</td>
+                    </tr>
+                  );
+                })}
+                {!strategies.length ? (
+                  <tr>
+                    <td colSpan={9} className="muted">
+                      No open positions in the current account scope.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+          {strategies.length > STRATEGY_PAGE_SIZE ? (
+            <div className="pager" role="navigation" aria-label="Strategy pages">
+              <button
+                type="button"
+                disabled={safeStrategyPage <= 0}
+                aria-label="Previous page"
+                onClick={() => setStrategyPage((page) => Math.max(0, page - 1))}
+              >
+                Previous
+              </button>
+              <span className="microcopy">
+                page {safeStrategyPage + 1} of {strategyPageCount}
+              </span>
+              <button
+                type="button"
+                disabled={safeStrategyPage >= strategyPageCount - 1}
+                aria-label="Next page"
+                onClick={() =>
+                  setStrategyPage((page) => Math.min(strategyPageCount - 1, page + 1))
+                }
+              >
+                Next
+              </button>
+            </div>
+          ) : null}
+        </section>
+
+        <section className="panel-section" aria-labelledby="orders-heading">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Read-only</p>
+              <h2 id="orders-heading">Order activity</h2>
+            </div>
+          </div>
+          {snapshot?.selected_account_id === "all" ? (
+            <p className="muted">Select a single account to load order history and fill linkage.</p>
+          ) : (
+            <>
+              <div
+                className="table-wrap"
+                tabIndex={0}
+                role="region"
+                aria-label="Order activity table"
+              >
+                <table className="data-table dense">
+                  <caption className="sr-only">Recent orders with fill linkage</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Symbol</th>
+                      <th scope="col">Action</th>
+                      <th scope="col">Status</th>
+                      <th scope="col">Qty</th>
+                      <th scope="col">Fill</th>
+                      <th scope="col">Fills</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pagedOrders.map((order) => (
+                      <tr key={order.order_id}>
+                        <td>{order.underlying_symbol || order.symbol}</td>
+                        <td>{order.action}</td>
+                        <td>{order.status}</td>
+                        <td className="tabular">{order.quantity}</td>
+                        <td className="tabular">
+                          {order.average_fill_price == null
+                            ? "—"
+                            : order.average_fill_price.toFixed(2)}
+                        </td>
+                        <td className="tabular">{order.fills.length}</td>
+                      </tr>
+                    ))}
+                    {!orders.length ? (
+                      <tr>
+                        <td colSpan={6} className="muted">
+                          No recent orders for this account.
+                        </td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              </div>
+              {orders.length > ORDER_PAGE_SIZE ? (
+                <div className="pager" role="navigation" aria-label="Order pages">
+                  <button
+                    type="button"
+                    disabled={safeOrderPage <= 0}
+                    onClick={() => setOrderPage((page) => Math.max(0, page - 1))}
+                  >
+                    Previous
+                  </button>
+                  <span className="microcopy">
+                    Page {safeOrderPage + 1} / {orderPageCount}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={safeOrderPage >= orderPageCount - 1}
+                    onClick={() =>
+                      setOrderPage((page) => Math.min(orderPageCount - 1, page + 1))
+                    }
+                  >
+                    Next
+                  </button>
+                </div>
+              ) : null}
+            </>
+          )}
+        </section>
+      </div>
+
+      <RollLedgerRail
+        events={ledgerEvents}
+        summary={ledgerSummary}
+        loading={rollsLoading}
+        onOpenRollAnalytics={onOpenRollAnalytics}
+      />
+    </div>
+  );
+}
+
+function RollLedgerRail({
+  events,
+  summary,
+  loading,
+  onOpenRollAnalytics,
+}: {
+  events: RollLedgerEvent[];
+  summary: ReturnType<typeof summarizeRollLedger>;
+  loading: boolean;
+  onOpenRollAnalytics: () => void;
+}) {
+  const net = formatPremiumEffect(summary.netRollCredit);
+  const lifetimeLabel =
+    summary.knownLifetimeCredit == null
+      ? summary.lifetimePartial
+        ? "Incomplete"
+        : "—"
+      : currency(summary.knownLifetimeCredit);
+
+  return (
+    <aside
+      className="roll-ledger-rail panel-section"
+      aria-labelledby="roll-ledger-heading"
+    >
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">History</p>
+          <h2 id="roll-ledger-heading">Roll ledger</h2>
+        </div>
+        <button
+          type="button"
+          className="linkish roll-analytics-affordance"
+          onClick={onOpenRollAnalytics}
+          aria-label="Open advanced Roll analytics"
+        >
+          Advanced analytics
+        </button>
+      </div>
+
+      <div className="roll-ledger-summary" aria-live="polite">
+        <div>
+          <p className="roll-summary-label">Net roll credit</p>
+          <p className={`roll-summary-value tabular premium-${net.kind}`}>
+            <span className="sr-only">
+              {net.kind === "credit" ? "Credit " : net.kind === "debit" ? "Debit " : ""}
+            </span>
+            {net.kind === "credit"
+              ? `+${currency(summary.netRollCredit)}`
+              : net.kind === "debit"
+                ? `−${currency(Math.abs(summary.netRollCredit))}`
+                : currency(0)}
+            <span className="premium-tag" aria-hidden="true">
+              {net.kind === "credit" ? "CR" : net.kind === "debit" ? "DR" : ""}
+            </span>
+          </p>
+          <p className="microcopy">Sum of roll premiums only; excludes original opening credit.</p>
+        </div>
+        <div className="roll-ledger-counts">
           <div>
-            <p className="eyebrow">Read-only</p>
-            <h2 id="orders-heading">Order activity</h2>
+            <p className="roll-summary-label">Events</p>
+            <p className="roll-summary-value tabular">{summary.eventCount}</p>
+          </div>
+          <div>
+            <p className="roll-summary-label">Chains</p>
+            <p className="roll-summary-value tabular">{summary.chainCount}</p>
           </div>
         </div>
-        {snapshot?.selected_account_id === "all" ? (
-          <p className="muted">Select a single account to load order history and fill linkage.</p>
-        ) : (
-          <>
-            <div className="table-wrap" tabIndex={0} role="region" aria-label="Order activity table">
-              <table className="data-table dense">
-                <caption className="sr-only">Recent orders with fill linkage</caption>
-                <thead>
-                  <tr>
-                    <th scope="col">Symbol</th>
-                    <th scope="col">Action</th>
-                    <th scope="col">Status</th>
-                    <th scope="col">Qty</th>
-                    <th scope="col">Fill</th>
-                    <th scope="col">Fills</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {pagedOrders.map((order) => (
-                    <tr key={order.order_id}>
-                      <td>{order.underlying_symbol || order.symbol}</td>
-                      <td>{order.action}</td>
-                      <td>{order.status}</td>
-                      <td className="tabular">{order.quantity}</td>
-                      <td className="tabular">
-                        {order.average_fill_price == null
-                          ? "—"
-                          : order.average_fill_price.toFixed(2)}
-                      </td>
-                      <td className="tabular">{order.fills.length}</td>
-                    </tr>
-                  ))}
-                  {!orders.length ? (
-                    <tr>
-                      <td colSpan={6} className="muted">
-                        No recent orders for this account.
-                      </td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
-            </div>
-            {orders.length > ORDER_PAGE_SIZE ? (
-              <div className="pager" role="navigation" aria-label="Order pages">
-                <button
-                  type="button"
-                  disabled={safeOrderPage <= 0}
-                  onClick={() => setOrderPage((page) => Math.max(0, page - 1))}
-                >
-                  Previous
-                </button>
-                <span className="microcopy">
-                  Page {safeOrderPage + 1} / {orderPageCount}
-                </span>
-                <button
-                  type="button"
-                  disabled={safeOrderPage >= orderPageCount - 1}
-                  onClick={() => setOrderPage((page) => Math.min(orderPageCount - 1, page + 1))}
-                >
-                  Next
-                </button>
-              </div>
+        <div>
+          <p className="roll-summary-label">Known lifetime credit</p>
+          <p className="roll-summary-value tabular">
+            {lifetimeLabel}
+            {summary.lifetimePartial ? (
+              <span className="section-state lifetime-partial">Partial</span>
             ) : null}
-          </>
-        )}
-      </section>
-    </div>
+          </p>
+          <p className="microcopy">
+            Includes original opening credits
+            {summary.lifetimePartial
+              ? ". Some chain totals are unknown — lifetime total is incomplete."
+              : "."}
+          </p>
+        </div>
+      </div>
+
+      <div
+        className="roll-ledger-scroll"
+        tabIndex={0}
+        role="region"
+        aria-label="Option roll event ledger"
+      >
+        {loading ? (
+          <p className="muted" role="status">
+            Loading roll history…
+          </p>
+        ) : null}
+        {!loading && !events.length ? (
+          <p className="muted" role="status">
+            No roll history for the current account scope.
+          </p>
+        ) : null}
+        {!loading && events.length ? (
+          <ol className="roll-ledger-list">
+            {events.map((event) => (
+              <RollLedgerRow key={`${event.chain_id}:${event.roll_id}`} event={event} />
+            ))}
+          </ol>
+        ) : null}
+      </div>
+    </aside>
+  );
+}
+
+function RollLedgerRow({ event }: { event: RollLedgerEvent }) {
+  const premium = formatPremiumEffect(event.premium_effect);
+  const oldExp = formatExpiration(event.old_expiration);
+  const newExp = formatExpiration(event.new_expiration);
+  return (
+    <li className="roll-ledger-row">
+      <div className="roll-ledger-row-head">
+        <time dateTime={event.timestamp}>{formatRollTimestamp(event.timestamp)}</time>
+        <span className={`tabular premium-${premium.kind}`} title={premium.text}>
+          <span className="sr-only">{premium.text}</span>
+          <span aria-hidden="true">
+            {premium.kind === "credit"
+              ? `+${currency(event.premium_effect)}`
+              : premium.kind === "debit"
+                ? `−${currency(Math.abs(event.premium_effect))}`
+                : currency(0)}
+          </span>
+          <span className="premium-tag" aria-hidden="true">
+            {premium.kind === "credit" ? "CR" : premium.kind === "debit" ? "DR" : ""}
+          </span>
+        </span>
+      </div>
+      <div className="roll-ledger-identity">
+        <strong>{event.underlying}</strong>
+        <span className="muted">{event.strategy_type}</span>
+      </div>
+      <div className="roll-ledger-move tabular">
+        <span>
+          ${event.old_strike.toFixed(event.old_strike % 1 === 0 ? 0 : 2)}
+          <span className="muted"> / {event.old_dte}d</span>
+          {oldExp ? <span className="muted"> · {oldExp}</span> : null}
+        </span>
+        <span className="roll-ledger-arrow" aria-hidden="true">
+          →
+        </span>
+        <span>
+          ${event.new_strike.toFixed(event.new_strike % 1 === 0 ? 0 : 2)}
+          <span className="muted"> / {event.new_dte}d</span>
+          {newExp ? <span className="muted"> · {newExp}</span> : null}
+        </span>
+      </div>
+    </li>
   );
 }
 

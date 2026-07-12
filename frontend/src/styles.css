@@ -1026,6 +1026,202 @@ textarea:focus-visible,
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+/* —— Positions workspace: dense two-pane (strategies + roll ledger) —— */
+
+.positions-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 2.4fr) minmax(16rem, 0.9fr);
+  gap: 0;
+  align-items: start;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.positions-workspace-main {
+  min-width: 0;
+  display: grid;
+  gap: 0;
+  padding-right: var(--space-4);
+  border-right: 1px solid var(--line);
+}
+
+.positions-workspace-main > .panel-section {
+  padding-top: var(--space-3);
+}
+
+.positions-pane {
+  min-width: 0;
+}
+
+.roll-ledger-rail {
+  position: sticky;
+  top: calc(var(--header-h) + var(--space-2));
+  align-self: start;
+  min-width: 0;
+  max-height: calc(100vh - var(--header-h) - var(--space-4));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) 0 var(--space-3) var(--space-4);
+  border-bottom: 0;
+  overflow: hidden;
+}
+
+.roll-ledger-rail .section-heading {
+  flex-shrink: 0;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.roll-analytics-affordance {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.roll-ledger-summary {
+  flex-shrink: 0;
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.roll-ledger-summary > div {
+  min-width: 0;
+}
+
+.roll-summary-label {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.62rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.roll-summary-value {
+  margin: 0.15rem 0 0;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  font-size: 0.92rem;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.roll-ledger-summary .microcopy {
+  margin-top: 0.15rem;
+}
+
+.roll-ledger-counts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+
+.roll-ledger-counts > div {
+  min-width: 0;
+}
+
+.lifetime-partial {
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+.premium-credit {
+  color: var(--good);
+}
+
+.premium-debit {
+  color: var(--danger);
+}
+
+.premium-flat {
+  color: var(--text-soft);
+}
+
+.premium-tag {
+  margin-left: 0.25rem;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+}
+
+.roll-ledger-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: min(36rem, calc(100vh - 18rem));
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  outline-offset: 2px;
+}
+
+.roll-ledger-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0;
+}
+
+.roll-ledger-row {
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+
+.roll-ledger-row:last-child {
+  border-bottom: 0;
+}
+
+.roll-ledger-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+.roll-ledger-row-head time {
+  font-variant-numeric: tabular-nums;
+}
+
+.roll-ledger-identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.55rem;
+  margin-top: 0.15rem;
+  font-size: 0.84rem;
+}
+
+.roll-ledger-identity strong {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.roll-ledger-move {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.4rem;
+  margin-top: 0.2rem;
+  font-size: 0.78rem;
+  line-height: 1.3;
+}
+
+.roll-ledger-arrow {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+}
+
 /* —— Tables —— */
 
 .table-wrap {
@@ -1899,6 +2095,28 @@ textarea:focus-visible,
 
   .metric-rail > div:nth-child(n + 4) {
     border-top: 1px solid var(--line);
+  }
+
+  /* Stack positions first, roll ledger second; avoid horizontal overflow. */
+  .positions-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .positions-workspace-main {
+    padding-right: 0;
+    border-right: 0;
+  }
+
+  .roll-ledger-rail {
+    position: static;
+    max-height: none;
+    padding-left: 0;
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--line-strong);
+  }
+
+  .roll-ledger-scroll {
+    max-height: 22rem;
   }
 }
 

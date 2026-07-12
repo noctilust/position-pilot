@@ -59,6 +59,9 @@ async function mockDashboardApis(page: Page) {
       }),
     }),
   );
+  await page.route("**/api/v1/settings/primary-account**", (route) =>
+    route.fulfill({ status: 204 }),
+  );
   await page.route("**/api/v1/alerts**", (route) =>
     route.fulfill({ contentType: "application/json", body: "[]" }),
   );
@@ -366,20 +369,117 @@ async function mockDashboardApis(page: Page) {
     chain_total_credit: 2.8,
     rolls: [
       {
+        roll_id: "roll-public-older",
+        timestamp: "2026-07-01T15:00:00Z",
+        underlying: "SPY",
+        strategy_type: "Short Put",
+        old_symbol: "SPY  260717P00500000",
+        old_strike: 500,
+        old_expiration: "2026-07-17",
+        old_dte: 14,
+        new_symbol: "SPY  260731P00495000",
+        new_strike: 495,
+        new_expiration: "2026-07-31",
+        new_dte: 28,
+        old_quantity: 1,
+        new_quantity: 1,
+        roll_pnl: 40,
+        premium_effect: 0.2,
+        commission: 1,
+        reason: null,
+        notes: null,
+      },
+      {
         roll_id: "roll-public",
         timestamp: "2026-07-09T16:30:00Z",
-        old_strike: 500,
-        new_strike: 495,
+        underlying: "SPY",
+        strategy_type: "Short Put",
+        old_symbol: "SPY  260731P00495000",
+        old_strike: 495,
+        old_expiration: "2026-07-31",
         old_dte: 14,
+        new_symbol: "SPY  260821P00490000",
+        new_strike: 490,
+        new_expiration: "2026-08-21",
         new_dte: 35,
+        old_quantity: 1,
+        new_quantity: 1,
         roll_pnl: 50,
         premium_effect: 0.3,
+        commission: 1,
+        reason: null,
+        notes: null,
       },
     ],
   };
-  await page.route("**/api/v1/accounts/*/rolls", (route) =>
-    route.fulfill({ contentType: "application/json", body: JSON.stringify([rollChain]) }),
-  );
+  // Second chain with null lifetime total exercises partial lifetime credit honesty.
+  const rollChainPartial = {
+    chain_id: "chain-partial",
+    account_id: "public-account-id",
+    underlying: "QQQ",
+    strategy_type: "Iron Condor",
+    original_open_credit: null,
+    chain_total_credit: null,
+    rolls: [
+      {
+        roll_id: "roll-partial",
+        timestamp: "2026-07-08T14:00:00Z",
+        underlying: "QQQ",
+        strategy_type: "Iron Condor",
+        old_strike: 480,
+        new_strike: 475,
+        old_expiration: "2026-07-18",
+        new_expiration: "2026-08-15",
+        old_dte: 10,
+        new_dte: 38,
+        roll_pnl: -20,
+        premium_effect: -0.15,
+        commission: 2,
+      },
+    ],
+  };
+  await page.route("**/api/v1/accounts/*/rolls", (route) => {
+    const url = route.request().url();
+    // Account-scoped responses; default public account carries both chains.
+    if (url.includes("/accounts/public-account-id/rolls")) {
+      return route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify([rollChain, rollChainPartial]),
+      });
+    }
+    if (url.includes("/accounts/second-account-id/rolls")) {
+      return route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify([
+          {
+            chain_id: "chain-second",
+            account_id: "second-account-id",
+            underlying: "IWM",
+            strategy_type: "Short Put",
+            original_open_credit: 1.0,
+            chain_total_credit: 1.4,
+            rolls: [
+              {
+                roll_id: "roll-second",
+                timestamp: "2026-07-11T12:00:00Z",
+                underlying: "IWM",
+                strategy_type: "Short Put",
+                old_strike: 200,
+                new_strike: 198,
+                old_dte: 7,
+                new_dte: 21,
+                old_expiration: "2026-07-18",
+                new_expiration: "2026-08-01",
+                roll_pnl: 25,
+                premium_effect: 0.4,
+              },
+            ],
+          },
+        ]),
+      });
+    }
+    return route.fulfill({ contentType: "application/json", body: "[]" });
+  });
   await page.route("**/api/v1/strategies/strat-browser", (route) =>
     route.fulfill({
       contentType: "application/json",
@@ -627,11 +727,29 @@ test("secure dashboard shell renders without console or accessibility errors", a
 
   await page.getByRole("button", { name: "Positions" }).click();
   await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
-  await expect(page.getByText("Short Put")).toBeVisible();
+  await expect(page.getByText("Short Put").first()).toBeVisible();
   await expect(page.getByText("No confirmed catalyst found").first()).toBeVisible();
   await expect(page.getByRole("heading", { name: "Order activity" })).toBeVisible();
+  // Roll ledger rail sits beside Positions with flattened events (newest first).
+  await expect(page.getByRole("heading", { name: "Roll ledger" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Option roll event ledger" })).toBeVisible();
+  await expect(page.getByText("Net roll credit")).toBeVisible();
+  // Net: 0.2 + 0.3 + (-0.15) = 0.35 → +$0.35 CR (excludes opening credit)
+  await expect(page.getByText("+$0.35").first()).toBeVisible();
+  await expect(page.getByText("Known lifetime credit")).toBeVisible();
+  await expect(page.getByText("Partial")).toBeVisible();
+  await expect(page.getByText(/lifetime total is incomplete/i)).toBeVisible();
+  const ledgerRows = page.locator(".roll-ledger-row");
+  await expect(ledgerRows).toHaveCount(3);
+  // Newest first: Jul 9 SPY 495→490, then Jul 8 QQQ, then Jul 1 SPY 500→495
+  await expect(ledgerRows.nth(0)).toContainText("SPY");
+  await expect(ledgerRows.nth(0)).toContainText("$495");
+  await expect(ledgerRows.nth(0)).toContainText("$490");
+  await expect(ledgerRows.nth(1)).toContainText("QQQ");
+  await expect(ledgerRows.nth(2)).toContainText("$500");
+  await expect(page.getByRole("button", { name: "Open advanced Roll analytics" })).toBeVisible();
 
-  await page.getByRole("button", { name: "SPY" }).click();
+  await page.getByRole("button", { name: "SPY" }).first().click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await expect(page.getByText("Remaining max profit")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Catalysts" })).toBeVisible();
@@ -643,6 +761,11 @@ test("secure dashboard shell renders without console or accessibility errors", a
   expect(drawerAccessibility.violations).toEqual([]);
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).not.toBeVisible();
+
+  // Compact affordance opens advanced Roll analytics without inventing URL routing.
+  await page.getByRole("button", { name: "Open advanced Roll analytics" }).click();
+  await expect(page.getByRole("heading", { name: "Roll chains" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Pattern analytics" })).toBeVisible();
 
   await page.getByRole("button", { name: "Roll analytics" }).click();
   await expect(page.getByRole("heading", { name: "Roll chains" })).toBeVisible();
@@ -932,19 +1055,301 @@ test("content density and no page overflow at desktop, tablet, and phone", async
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByRole("button", { name: "Positions" }).click();
   await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
-  await expect(page.getByText("Short Put")).toBeVisible();
+  await expect(page.getByText("Short Put").first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Roll ledger" })).toBeVisible();
   const tableMetrics = await page.evaluate(() => {
     const row = document.querySelector(".data-table.dense tbody tr") as HTMLElement | null;
     const wrap = document.querySelector(".table-wrap") as HTMLElement | null;
+    const workspace = document.querySelector(".positions-workspace") as HTMLElement | null;
+    const rail = document.querySelector(".roll-ledger-rail") as HTMLElement | null;
+    const wsRect = workspace?.getBoundingClientRect();
+    const railRect = rail?.getBoundingClientRect();
     return {
       rowHeight: row?.getBoundingClientRect().height ?? 0,
       pageOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
       tableScrollable: wrap ? wrap.scrollWidth >= wrap.clientWidth : false,
+      sideBySide:
+        wsRect != null &&
+        railRect != null &&
+        railRect.left > (wsRect.left + wsRect.width * 0.45),
     };
   });
   expect(tableMetrics.rowHeight).toBeGreaterThan(20);
   expect(tableMetrics.rowHeight).toBeLessThan(72);
   expect(tableMetrics.pageOverflow).toBeFalsy();
+  expect(tableMetrics.sideBySide).toBeTruthy();
+
+  // Narrow/tablet: positions first, ledger second; still no document overflow.
+  await page.setViewportSize({ width: 820, height: 900 });
+  await expect(page.getByRole("heading", { name: "Roll ledger" })).toBeVisible();
+  const narrowMetrics = await page.evaluate(() => {
+    const positions = document.getElementById("positions-heading");
+    const ledger = document.getElementById("roll-ledger-heading");
+    const pTop = positions?.getBoundingClientRect().top ?? 0;
+    const lTop = ledger?.getBoundingClientRect().top ?? 0;
+    return {
+      stacked: lTop > pTop + 20,
+      pageOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+    };
+  });
+  expect(narrowMetrics.stacked).toBeTruthy();
+  expect(narrowMetrics.pageOverflow).toBeFalsy();
+});
+
+test("positions roll ledger aggregates all displayable accounts and clears on scope change", async ({
+  page,
+}) => {
+  const rollRequests: string[] = [];
+  await mockDashboardApis(page);
+
+  // Multi-account portfolio for all-scope aggregation.
+  await page.route("**/api/v1/portfolio**", (route) => {
+    // Do not intercept risk; leave that to the shared mock.
+    if (route.request().url().includes("/portfolio/risk")) {
+      return route.fallback();
+    }
+    const accountId =
+      new URL(route.request().url()).searchParams.get("account_id") ?? "all";
+    const accounts = [
+      {
+        account_id: "public-account-id",
+        label: "Individual 1",
+        account_type: "Individual",
+        net_liquidating_value: 25000,
+        cash_balance: 5000,
+        buying_power: 10000,
+        pnl_today: 0,
+        positions: [{ symbol: "SPY" }],
+      },
+      {
+        account_id: "second-account-id",
+        label: "Individual 2",
+        account_type: "Individual",
+        net_liquidating_value: 12000,
+        cash_balance: 2000,
+        buying_power: 4000,
+        pnl_today: 0,
+        positions: [{ symbol: "IWM" }],
+      },
+      // Nearly-empty inactive shell must not be fetched for the roll rail.
+      {
+        account_id: "inactive-shell",
+        label: "Shell",
+        account_type: "Individual",
+        net_liquidating_value: 5,
+        cash_balance: 5,
+        buying_power: 0,
+        pnl_today: 0,
+        positions: [],
+      },
+    ];
+    const strategies =
+      accountId === "second-account-id"
+        ? [
+            {
+              strategy_id: "strat-iwm",
+              account_id: "second-account-id",
+              underlying: "IWM",
+              strategy_type: "Short Put",
+              expiration_date: "2026-08-21",
+              days_to_expiration: 21,
+              quantity: 1,
+              strikes: "$200",
+              unrealized_pnl: 10,
+              unrealized_pnl_percent: 5,
+              total_delta: -8,
+              total_theta: 2,
+              horizon: "tactical",
+              legs: [],
+            },
+          ]
+        : accountId === "public-account-id"
+          ? [
+              {
+                strategy_id: "strat-browser",
+                account_id: "public-account-id",
+                underlying: "SPY",
+                strategy_type: "Short Put",
+                expiration_date: "2026-08-21",
+                days_to_expiration: 21,
+                quantity: 1,
+                strikes: "$500",
+                unrealized_pnl: 40,
+                unrealized_pnl_percent: 10,
+                total_delta: -20,
+                total_theta: 4,
+                horizon: "tactical",
+                legs: [],
+              },
+            ]
+          : [
+              {
+                strategy_id: "strat-browser",
+                account_id: "public-account-id",
+                underlying: "SPY",
+                strategy_type: "Short Put",
+                expiration_date: "2026-08-21",
+                days_to_expiration: 21,
+                quantity: 1,
+                strikes: "$500",
+                unrealized_pnl: 40,
+                unrealized_pnl_percent: 10,
+                total_delta: -20,
+                total_theta: 4,
+                horizon: "tactical",
+                legs: [],
+              },
+              {
+                strategy_id: "strat-iwm",
+                account_id: "second-account-id",
+                underlying: "IWM",
+                strategy_type: "Short Put",
+                expiration_date: "2026-08-21",
+                days_to_expiration: 21,
+                quantity: 1,
+                strikes: "$200",
+                unrealized_pnl: 10,
+                unrealized_pnl_percent: 5,
+                total_delta: -8,
+                total_theta: 2,
+                horizon: "tactical",
+                legs: [],
+              },
+            ];
+    return route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: 1,
+        snapshot_id: `snapshot-${accountId}`,
+        captured_at: "2026-07-11T16:30:00Z",
+        state: "live",
+        freshness: {
+          as_of: "2026-07-11T16:30:00Z",
+          provider: "tastytrade",
+          state: "fresh",
+        },
+        accounts:
+          accountId === "all"
+            ? accounts
+            : accounts.filter((account) => account.account_id === accountId),
+        strategies,
+        totals: {
+          net_liquidating_value: accountId === "all" ? 37000 : 25000,
+          cash_balance: 7000,
+          buying_power: 14000,
+          unrealized_pnl: 50,
+        },
+        selected_account_id: accountId,
+        notice: null,
+      }),
+    });
+  });
+
+  await page.route("**/api/v1/accounts/*/rolls", async (route) => {
+    rollRequests.push(route.request().url());
+    const url = route.request().url();
+    if (url.includes("inactive-shell")) {
+      return route.fulfill({ contentType: "application/json", body: "[]" });
+    }
+    if (url.includes("second-account-id")) {
+      return route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify([
+          {
+            chain_id: "chain-second",
+            account_id: "second-account-id",
+            underlying: "IWM",
+            strategy_type: "Short Put",
+            original_open_credit: 1.0,
+            chain_total_credit: 1.4,
+            rolls: [
+              {
+                roll_id: "roll-second",
+                timestamp: "2026-07-11T12:00:00Z",
+                underlying: "IWM",
+                strategy_type: "Short Put",
+                old_strike: 200,
+                new_strike: 198,
+                old_dte: 7,
+                new_dte: 21,
+                roll_pnl: 25,
+                premium_effect: 0.4,
+              },
+            ],
+          },
+        ]),
+      });
+    }
+    if (url.includes("public-account-id")) {
+      return route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify([
+          {
+            chain_id: "chain-public",
+            account_id: "public-account-id",
+            underlying: "SPY",
+            strategy_type: "Short Put",
+            original_open_credit: 2.5,
+            chain_total_credit: 2.8,
+            rolls: [
+              {
+                roll_id: "roll-public",
+                timestamp: "2026-07-09T16:30:00Z",
+                old_strike: 495,
+                new_strike: 490,
+                old_dte: 14,
+                new_dte: 35,
+                roll_pnl: 50,
+                premium_effect: 0.3,
+              },
+            ],
+          },
+        ]),
+      });
+    }
+    return route.fulfill({ contentType: "application/json", body: "[]" });
+  });
+
+  const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";
+  await page.goto(`/?launch_token=${encodeURIComponent(launchToken)}`);
+  await expect(page.getByRole("heading", { name: "Decision field" })).toBeVisible();
+  // Wait until portfolio is ready so the account scope control is enabled.
+  await expect(page.getByText("$37,000.00").or(page.getByText("$25,000.00")).first()).toBeVisible();
+  const accountScope = page.getByRole("combobox", { name: "Account scope" });
+  await expect(accountScope).toBeEnabled();
+
+  // Switch to all accounts and open Positions — should call rolls for both displayable ids.
+  await accountScope.selectOption("all");
+  await expect(page.getByText("$37,000.00").first()).toBeVisible();
+  await page.getByRole("button", { name: "Positions" }).click();
+  await expect(page.getByRole("heading", { name: "Roll ledger" })).toBeVisible();
+  await expect(page.locator(".roll-ledger-row")).toHaveCount(2, { timeout: 10_000 });
+  await expect(page.getByText("IWM").first()).toBeVisible();
+  await expect(page.getByText("SPY").first()).toBeVisible();
+  // Newest first: IWM (Jul 11) before SPY (Jul 9)
+  await expect(page.locator(".roll-ledger-row").nth(0)).toContainText("IWM");
+  await expect(page.locator(".roll-ledger-row").nth(1)).toContainText("SPY");
+  // Net: 0.3 + 0.4 = 0.70
+  await expect(page.getByText("+$0.70").first()).toBeVisible();
+
+  const allScopeRollUrls = rollRequests.filter(
+    (url) => url.includes("/rolls") && !url.includes("patterns") && !url.includes("heatmap"),
+  );
+  expect(allScopeRollUrls.some((url) => url.includes("public-account-id"))).toBeTruthy();
+  expect(allScopeRollUrls.some((url) => url.includes("second-account-id"))).toBeTruthy();
+  expect(allScopeRollUrls.some((url) => url.includes("inactive-shell"))).toBeFalsy();
+
+  // Single-account scope loads only that account; ledger must not keep the other account's events.
+  rollRequests.length = 0;
+  await accountScope.selectOption("public-account-id");
+  await expect(page.locator(".roll-ledger-row")).toHaveCount(1, { timeout: 10_000 });
+  await expect(page.locator(".roll-ledger-row").nth(0)).toContainText("SPY");
+  await expect(page.getByText("IWM")).toHaveCount(0);
+  const singleUrls = rollRequests.filter(
+    (url) => url.includes("/rolls") && !url.includes("patterns") && !url.includes("heatmap"),
+  );
+  expect(singleUrls.every((url) => url.includes("public-account-id"))).toBeTruthy();
+  expect(singleUrls.some((url) => url.includes("second-account-id"))).toBeFalsy();
 });
 
 function catalystEventFixture(overrides: Record<string, unknown> = {}) {

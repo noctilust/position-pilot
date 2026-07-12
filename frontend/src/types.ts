@@ -441,6 +441,31 @@ export type WatchlistSnapshot = {
   quotes: MarketQuote[];
 };
 
+/** Single roll event as returned by `/api/v1/accounts/{id}/rolls`. */
+export type RollEvent = {
+  roll_id: string;
+  timestamp: string;
+  underlying?: string;
+  strategy_type?: string;
+  old_symbol?: string;
+  old_strike: number;
+  old_expiration?: string;
+  old_dte: number;
+  new_symbol?: string;
+  new_strike: number;
+  new_expiration?: string;
+  new_dte: number;
+  old_quantity?: number;
+  old_delta?: number | null;
+  new_quantity?: number;
+  new_delta?: number | null;
+  roll_pnl: number;
+  premium_effect: number;
+  commission?: number;
+  reason?: string | null;
+  notes?: string | null;
+};
+
 export type RollChain = {
   chain_id: string;
   account_id: string;
@@ -448,16 +473,8 @@ export type RollChain = {
   strategy_type: string;
   original_open_credit: number | null;
   chain_total_credit: number | null;
-  rolls: Array<{
-    roll_id: string;
-    timestamp: string;
-    old_strike: number;
-    new_strike: number;
-    old_dte: number;
-    new_dte: number;
-    roll_pnl: number;
-    premium_effect: number;
-  }>;
+  original_open_date?: string | null;
+  rolls: RollEvent[];
 };
 
 export type RollPatterns = {
