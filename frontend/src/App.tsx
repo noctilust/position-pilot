@@ -55,6 +55,11 @@ import {
   submitCatalystFeedback,
 } from "./api";
 import { filterDisplayableAccounts } from "./accountDisplay";
+import { CatalystRiskGauge } from "./CatalystRiskGauge";
+import {
+  deriveEventCatalystRisk,
+  deriveSymbolCatalystRisk,
+} from "./catalystRisk";
 import { OperationsPanel } from "./OperationsPanel";
 import type {
   AlertRecord,
@@ -865,6 +870,7 @@ function OverviewSection({
                 >
                   <div className="catalyst-row-head">
                     <strong>{row.symbol}</strong>
+                    <CatalystRiskGauge level={deriveSymbolCatalystRisk(row)} />
                     <span className={`pill confidence-${row.confidence}`}>
                       {formatConfidence(row.confidence)}
                     </span>
@@ -3004,12 +3010,16 @@ function CatalystDetailPanel({
     <section>
       <h3>Catalysts</h3>
       <div className="catalyst-row-head">
+        <CatalystRiskGauge level={deriveSymbolCatalystRisk(catalyst)} />
         <span className={`pill confidence-${catalyst.confidence}`}>
           {formatConfidence(catalyst.confidence)}
         </span>
         <span className="muted">{formatAttribution(catalyst.attribution)}</span>
         {catalyst.move_percent != null ? (
           <span className="tabular">{signed(catalyst.move_percent, 2)}%</span>
+        ) : null}
+        {catalyst.freshness?.state === "stale" || catalyst.cached ? (
+          <span className="pill">Stale cache</span>
         ) : null}
       </div>
       <p>{catalyst.summary}</p>
@@ -3022,7 +3032,13 @@ function CatalystDetailPanel({
       <ul className="catalyst-list compact">
         {catalyst.catalysts.map((event) => (
           <li key={event.catalyst_id}>
-            <strong>{event.headline}</strong>
+            <div className="catalyst-event-head">
+              <strong>{event.headline}</strong>
+              <CatalystRiskGauge
+                level={deriveEventCatalystRisk(event)}
+                size="sm"
+              />
+            </div>
             <p className="microcopy">
               {event.sources.map((source) => source.name).join(" · ") || "Source attributed"} ·{" "}
               {new Intl.DateTimeFormat(undefined, {

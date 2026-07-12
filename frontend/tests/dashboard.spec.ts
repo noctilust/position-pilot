@@ -946,3 +946,293 @@ test("content density and no page overflow at desktop, tablet, and phone", async
   expect(tableMetrics.rowHeight).toBeLessThan(72);
   expect(tableMetrics.pageOverflow).toBeFalsy();
 });
+
+function catalystEventFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    catalyst_id: "evt-1",
+    symbol: "SPY",
+    headline: "Quiet headline",
+    summary: "Supporting-only note",
+    taxonomy: "company",
+    confidence: "supporting",
+    attribution: "company",
+    evidence_kind: "news",
+    event_at: "2026-07-11T14:00:00Z",
+    sources: [{ source_id: "s1", name: "Wire", tier: "1", url: "https://example.com", provider: "test", published_at: "2026-07-11T14:00:00Z", excerpt: null }],
+    rank_score: 1,
+    high_impact: false,
+    ...overrides,
+  };
+}
+
+function symbolCatalystFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    symbol: "SPY",
+    confidence: "no_confirmed_catalyst_found",
+    attribution: "none",
+    summary: "No confirmed catalyst found",
+    catalysts: [],
+    option_mechanisms: [],
+    social_side_notes: [],
+    move_percent: 0.2,
+    prior_close: 500,
+    last_price: 501,
+    meaningful_move: false,
+    promoted: false,
+    coverage: "complete",
+    coverage_notes: [],
+    quiet: true,
+    freshness: {
+      as_of: "2026-07-11T16:30:00Z",
+      provider: "catalyst-service",
+      state: "fresh",
+    },
+    ...overrides,
+  };
+}
+
+test("catalyst risk gauges render accessible labels and semantic classes on Overview and position detail", async ({
+  page,
+}) => {
+  await mockDashboardApis(page);
+
+  const highSymbol = symbolCatalystFixture({
+    symbol: "SPY",
+    confidence: "confirmed",
+    attribution: "company",
+    summary: "FOMC-driven gap risk",
+    meaningful_move: true,
+    promoted: true,
+    quiet: false,
+    move_percent: 3.2,
+    catalysts: [
+      catalystEventFixture({
+        catalyst_id: "evt-high",
+        symbol: "SPY",
+        headline: "Fed emergency statement",
+        summary: "High-impact scheduled risk",
+        confidence: "confirmed",
+        high_impact: true,
+      }),
+      catalystEventFixture({
+        catalyst_id: "evt-med",
+        symbol: "SPY",
+        headline: "Peer guidance cut",
+        summary: "Likely secondary catalyst",
+        confidence: "likely",
+        high_impact: false,
+      }),
+      catalystEventFixture({
+        catalyst_id: "evt-low",
+        symbol: "SPY",
+        headline: "Blog speculation",
+        summary: "Supporting only",
+        confidence: "supporting",
+        high_impact: false,
+      }),
+    ],
+  });
+
+  const mediumSymbol = symbolCatalystFixture({
+    symbol: "QQQ",
+    confidence: "likely",
+    attribution: "macro",
+    summary: "Likely macro-driven move",
+    meaningful_move: false,
+    promoted: false,
+    quiet: false,
+    move_percent: 1.1,
+    catalysts: [
+      catalystEventFixture({
+        catalyst_id: "evt-qqq",
+        symbol: "QQQ",
+        headline: "CPI preview chatter",
+        confidence: "likely",
+        high_impact: false,
+      }),
+    ],
+  });
+
+  const lowSymbol = symbolCatalystFixture({
+    symbol: "IWM",
+    confidence: "no_confirmed_catalyst_found",
+    summary: "Quiet tape",
+    quiet: true,
+    coverage: "offline",
+    cached: true,
+    freshness: {
+      as_of: "2026-07-11T12:00:00Z",
+      provider: "catalyst-service",
+      state: "stale",
+    },
+    catalysts: [],
+  });
+
+  await page.route("**/api/v1/catalysts**", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        captured_at: "2026-07-11T16:30:00Z",
+        results: [highSymbol, mediumSymbol, lowSymbol],
+        settings: {
+          stock_move_threshold_pct: 2,
+          etf_move_threshold_pct: 1,
+          news_cadence_seconds: 300,
+          benzinga: { enabled: false, status: "disabled" },
+          scheduled_window_hours: 72,
+        },
+        coverage: "incomplete",
+        coverage_notes: ["Benzinga offline"],
+        freshness: {
+          as_of: "2026-07-11T16:30:00Z",
+          provider: "catalyst-service",
+          state: "stale",
+        },
+      }),
+    }),
+  );
+
+  await page.route("**/api/v1/strategies/strat-browser", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        strategy: {
+          strategy_id: "strat-browser",
+          account_id: "public-account-id",
+          underlying: "SPY",
+          strategy_type: "Short Put",
+          expiration_date: "2026-08-21",
+          days_to_expiration: 21,
+          quantity: 1,
+          strikes: "$500",
+          unrealized_pnl: 40,
+          unrealized_pnl_percent: 10,
+          total_delta: -20,
+          total_theta: 4,
+          horizon: "tactical",
+          legs: [],
+        },
+        risk: {
+          max_profit: 250,
+          max_loss: 49750,
+          breakevens: [497.5],
+          distance_to_nearest_strike: 0,
+          underlying_price: 500,
+          current_pnl: 40,
+          defined_risk: false,
+          valuation_basis: "current_mark",
+          combined: {
+            delta: -20,
+            gamma: 0.1,
+            theta: 4,
+            vega: -8,
+            average_iv: 0.2,
+            nearest_dte: 21,
+          },
+          stress: [],
+        },
+        market: {
+          symbol: "SPY",
+          price: 500,
+          bid: 499.9,
+          ask: 500.1,
+          iv: 0.2,
+          iv_rank: 35,
+          iv_percentile: 40,
+          liquidity_rating: 4,
+          iv_environment: "normal",
+          spread_percent: 0.04,
+        },
+        chart: {
+          symbol: "SPY",
+          bars: [],
+          source: "massive-stocks",
+          notice: null,
+          prior_close: 498,
+          include_extended_hours: true,
+          event_markers: [],
+        },
+        catalyst: highSymbol,
+        thesis: null,
+        trade_plan: null,
+        audit: [],
+        rolls: [],
+        events: [],
+      }),
+    }),
+  );
+
+  const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";
+  await page.goto(`/?launch_token=${encodeURIComponent(launchToken)}`);
+  await expect(page.getByRole("heading", { name: "Held-symbol catalysts" })).toBeVisible();
+
+  // Coverage remains visible and separate from risk labels.
+  await expect(page.getByText(/Coverage incomplete/i)).toBeVisible();
+
+  const overviewGauges = page.locator(".catalyst-list .catalyst-risk-gauge");
+  await expect(overviewGauges).toHaveCount(3);
+
+  const highGauge = overviewGauges.nth(0);
+  await expect(highGauge).toHaveAttribute("aria-label", "Catalyst risk: High");
+  await expect(highGauge).toHaveAttribute("data-risk-level", "high");
+  await expect(highGauge).toHaveAttribute("data-risk-token", "danger");
+  await expect(highGauge).toHaveAttribute("data-risk-segments", "3");
+  await expect(highGauge).toHaveClass(/catalyst-risk-token-danger/);
+  await expect(highGauge.locator(".catalyst-risk-text")).toHaveText("High");
+  await expect(highGauge.locator(".catalyst-risk-seg.is-active")).toHaveCount(3);
+
+  const mediumGauge = overviewGauges.nth(1);
+  await expect(mediumGauge).toHaveAttribute("aria-label", "Catalyst risk: Medium");
+  await expect(mediumGauge).toHaveAttribute("data-risk-level", "medium");
+  await expect(mediumGauge).toHaveAttribute("data-risk-token", "warn");
+  await expect(mediumGauge).toHaveAttribute("data-risk-segments", "2");
+  await expect(mediumGauge).toHaveClass(/catalyst-risk-token-warn/);
+  await expect(mediumGauge.locator(".catalyst-risk-text")).toHaveText("Medium");
+  await expect(mediumGauge.locator(".catalyst-risk-seg.is-active")).toHaveCount(2);
+
+  const lowGauge = overviewGauges.nth(2);
+  await expect(lowGauge).toHaveAttribute("aria-label", "Catalyst risk: Low");
+  await expect(lowGauge).toHaveAttribute("data-risk-level", "low");
+  await expect(lowGauge).toHaveAttribute("data-risk-token", "good");
+  await expect(lowGauge).toHaveAttribute("data-risk-segments", "1");
+  await expect(lowGauge).toHaveClass(/catalyst-risk-token-good/);
+  await expect(lowGauge.locator(".catalyst-risk-text")).toHaveText("Low");
+  await expect(lowGauge.locator(".catalyst-risk-seg.is-active")).toHaveCount(1);
+
+  // Stale/offline fixture still shows Low risk (coverage does not rewrite risk).
+  await expect(page.getByText("Quiet tape")).toBeVisible();
+  await expect(page.locator(".catalyst-list li").filter({ hasText: "IWM" }).getByText("Stale cache")).toBeVisible();
+
+  // Confidence remains separately labeled beside risk.
+  await expect(page.locator(".pill.confidence-confirmed").first()).toBeVisible();
+  await expect(page.getByRole("img", { name: "Catalyst risk: High" }).first()).toBeVisible();
+
+  // Position detail: aggregate + event-level gauges.
+  await page.getByRole("button", { name: "Positions" }).click();
+  await page.getByRole("button", { name: "SPY" }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Catalysts" })).toBeVisible();
+
+  const detailSection = page.getByRole("dialog").locator("section").filter({
+    has: page.getByRole("heading", { name: "Catalysts" }),
+  });
+  const detailAggregate = detailSection.locator(".catalyst-row-head .catalyst-risk-gauge").first();
+  await expect(detailAggregate).toHaveAttribute("aria-label", "Catalyst risk: High");
+  await expect(detailAggregate).toHaveClass(/catalyst-risk-token-danger/);
+  await expect(detailAggregate.locator(".catalyst-risk-seg.is-active")).toHaveCount(3);
+
+  const eventGauges = detailSection.locator(".catalyst-event-head .catalyst-risk-gauge");
+  await expect(eventGauges).toHaveCount(3);
+  await expect(eventGauges.nth(0)).toHaveAttribute("aria-label", "Catalyst risk: High");
+  await expect(eventGauges.nth(0)).toHaveAttribute("data-risk-token", "danger");
+  await expect(eventGauges.nth(0).locator(".catalyst-risk-seg.is-active")).toHaveCount(3);
+  await expect(eventGauges.nth(1)).toHaveAttribute("aria-label", "Catalyst risk: Medium");
+  await expect(eventGauges.nth(1)).toHaveAttribute("data-risk-token", "warn");
+  await expect(eventGauges.nth(1).locator(".catalyst-risk-seg.is-active")).toHaveCount(2);
+  await expect(eventGauges.nth(2)).toHaveAttribute("aria-label", "Catalyst risk: Low");
+  await expect(eventGauges.nth(2)).toHaveAttribute("data-risk-token", "good");
+  await expect(eventGauges.nth(2).locator(".catalyst-risk-seg.is-active")).toHaveCount(1);
+
+  // Confidence pill still present and distinct from risk gauge.
+  await expect(detailSection.locator(".pill.confidence-confirmed")).toBeVisible();
+});
