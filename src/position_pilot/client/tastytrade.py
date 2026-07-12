@@ -9,18 +9,18 @@ from typing import Any, Optional
 import httpx
 from dotenv import load_dotenv
 
-from ..models.position import Account, Greeks, Position, PositionType
-from ..models.transaction import Transaction, TransactionType, Order, OrderStatus
 from ..cache import Cache
+from ..models.position import Account, Greeks, Position, PositionType
+from ..models.transaction import Order, OrderStatus, Transaction, TransactionType
 
 # Load .env file from project root
-from pathlib import Path
 project_root = Path(__file__).parent.parent.parent.parent
 load_dotenv(project_root / ".env")
 
 logger = logging.getLogger(__name__)
 
 TASTYTRADE_API_URL = "https://api.tastyworks.com"
+TASTYTRADE_ACCOUNT_STREAMER_URL = "wss://streamer.tastyworks.com"
 
 
 class TastytradeClient:
@@ -48,6 +48,26 @@ class TastytradeClient:
         """Clear all cached market data."""
         self._cache.clear()
         logger.info("Market data cache cleared")
+
+    def get_access_token(self) -> Optional[str]:
+        """Return a valid in-memory access token for the account streamer."""
+
+        return self._access_token if self._ensure_token() else None
+
+    def get_quote_streamer_credentials(self) -> Optional[dict[str, str]]:
+        """Fetch the 24-hour DXLink token and server URL."""
+
+        payload = self._get("/api-quote-tokens")
+        data = payload.get("data", {}) if payload else {}
+        token = data.get("token")
+        url = data.get("dxlink-url")
+        if not token or not url:
+            return None
+        return {"token": token, "url": url}
+
+    @property
+    def account_streamer_url(self) -> str:
+        return TASTYTRADE_ACCOUNT_STREAMER_URL
 
     def _ensure_token(self) -> bool:
         """Ensure we have a valid access token."""
@@ -143,9 +163,15 @@ class TastytradeClient:
 
     def get_positions(self, account_number: str) -> list[Position]:
         """Fetch all positions for an account."""
+        _, positions = self.get_positions_checked(account_number)
+        return positions
+
+    def get_positions_checked(self, account_number: str) -> tuple[bool, list[Position]]:
+        """Fetch positions while preserving empty-success versus provider failure."""
+
         data = self._get(f"/accounts/{account_number}/positions")
         if not data:
-            return []
+            return False, []
 
         positions = []
         for item in data.get("data", {}).get("items", []):
@@ -153,7 +179,7 @@ class TastytradeClient:
             if pos:
                 positions.append(pos)
 
-        return positions
+        return True, positions
 
     def _parse_position(self, item: dict) -> Optional[Position]:
         """Parse a position from API response."""
@@ -211,7 +237,9 @@ class TastytradeClient:
             avg_open = self._float(item.get("average-open-price")) or 0.0
             close = self._float(item.get("close-price")) or 0.0
             mark = self._float(item.get("mark-price"))
-            multiplier = int(float(item.get("multiplier", 100 if pos_type == PositionType.EQUITY_OPTION else 1)))
+            multiplier = int(
+                float(item.get("multiplier", 100 if pos_type == PositionType.EQUITY_OPTION else 1))
+            )
 
             # P/L calculations
             cost_basis = avg_open * abs(quantity) * multiplier
@@ -255,36 +283,51 @@ class TastytradeClient:
 
     def get_market_metrics(self, symbol: str, force_refresh: bool = False) -> Optional[dict]:
         """Fetch IV rank and other metrics for a symbol."""
-        cache_key = f"metrics:{symbol}"
+        batch = self.get_market_metrics_batch([symbol], force_refresh=force_refresh)
+        return batch.get(symbol)
 
-        # Check cache unless force refresh
-        if not force_refresh:
-            cached = self._cache.get(cache_key)
-            if cached is not None:
-                return cached
+    def get_market_metrics_batch(
+        self, symbols: list[str], force_refresh: bool = False
+    ) -> dict[str, dict]:
+        """Fetch market metrics for many symbols with a bounded provider call set."""
 
-        # Fetch from API
-        data = self._get("/market-metrics", params={"symbols": symbol})
-        if not data:
-            return None
-
-        items = data.get("data", {}).get("items", [])
-        if not items:
-            return None
-
-        m = items[0]
-        result = {
-            "iv_rank": self._float(m.get("implied-volatility-index-rank"), mult=100),
-            "iv_percentile": self._float(m.get("implied-volatility-percentile"), mult=100),
-            "implied_volatility": self._float(m.get("implied-volatility-index")),
-            "beta": self._float(m.get("beta")),
-            "liquidity_rating": m.get("liquidity-rating"),
-        }
-
-        # Store in cache
-        self._cache.set(cache_key, result)
-
-        return result
+        if not symbols:
+            return {}
+        results: dict[str, dict] = {}
+        to_fetch: list[str] = []
+        for symbol in symbols:
+            cache_key = f"metrics:{symbol}"
+            if not force_refresh:
+                cached = self._cache.get(cache_key)
+                if cached is not None:
+                    results[symbol] = cached
+                    continue
+            to_fetch.append(symbol)
+        if not to_fetch:
+            return results
+        # API accepts comma-separated symbols; chunk to keep URLs bounded.
+        chunk_size = 50
+        for offset in range(0, len(to_fetch), chunk_size):
+            chunk = to_fetch[offset : offset + chunk_size]
+            data = self._get("/market-metrics", params={"symbols": ",".join(chunk)})
+            if not data:
+                continue
+            for item in data.get("data", {}).get("items", []):
+                symbol = item.get("symbol") or item.get("underlying-symbol") or ""
+                if not symbol:
+                    continue
+                result = {
+                    "iv_rank": self._float(item.get("implied-volatility-index-rank"), mult=100),
+                    "iv_percentile": self._float(
+                        item.get("implied-volatility-percentile"), mult=100
+                    ),
+                    "implied_volatility": self._float(item.get("implied-volatility-index")),
+                    "beta": self._float(item.get("beta")),
+                    "liquidity_rating": item.get("liquidity-rating"),
+                }
+                results[symbol] = result
+                self._cache.set(f"metrics:{symbol}", result)
+        return results
 
     def get_quote(self, symbol: str, force_refresh: bool = False) -> Optional[dict]:
         """Get current quote for a symbol."""
@@ -392,7 +435,9 @@ class TastytradeClient:
 
         return position
 
-    def enrich_positions_greeks_batch(self, positions: list[Position], force_refresh: bool = False) -> list[Position]:
+    def enrich_positions_greeks_batch(
+        self, positions: list[Position], force_refresh: bool = False
+    ) -> list[Position]:
         """Fetch and attach Greeks to multiple option positions in a single API call.
 
         Much more efficient than calling enrich_position_greeks for each position.
@@ -408,7 +453,11 @@ class TastytradeClient:
 
         # Collect unique underlying symbols for pricing
         underlying_symbols = list(set(p.underlying_symbol for p in positions if p.is_option))
-        underlying_quotes = self.get_quotes_batch(underlying_symbols, force_refresh=force_refresh) if underlying_symbols else {}
+        underlying_quotes = (
+            self.get_quotes_batch(underlying_symbols, force_refresh=force_refresh)
+            if underlying_symbols
+            else {}
+        )
 
         # Update positions with quote data
         for i, pos in enumerate(positions):
@@ -427,7 +476,9 @@ class TastytradeClient:
                 # Add underlying price for extrinsic value calculation
                 if pos.underlying_symbol in underlying_quotes:
                     underlying_quote = underlying_quotes[pos.underlying_symbol]
-                    positions[i].underlying_price = underlying_quote.get("mark") or underlying_quote.get("last")
+                    positions[i].underlying_price = underlying_quote.get(
+                        "mark"
+                    ) or underlying_quote.get("last")
 
         return positions
 
@@ -437,7 +488,7 @@ class TastytradeClient:
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         limit: int = 250,
-        force_refresh: bool = False
+        force_refresh: bool = False,
     ) -> list[Transaction]:
         """Fetch transaction history for an account.
 
@@ -460,7 +511,9 @@ class TastytradeClient:
                 # Return all cached transactions (filtering by date in Python)
                 transactions = [Transaction(**t) for t in cached.get("transactions", [])]
                 if start_date or end_date:
-                    transactions = self._filter_transactions_by_date(transactions, start_date, end_date)
+                    transactions = self._filter_transactions_by_date(
+                        transactions, start_date, end_date
+                    )
                 return transactions
 
         # Fetch from API with pagination
@@ -499,7 +552,7 @@ class TastytradeClient:
         # Store in cache (store all transactions without date filtering)
         cache_data = {
             "transactions": [t.model_dump(mode="json", exclude_none=True) for t in transactions],
-            "cached_at": datetime.now().isoformat()
+            "cached_at": datetime.now().isoformat(),
         }
         self._cache.set(cache_key, cache_data)
 
@@ -510,7 +563,7 @@ class TastytradeClient:
         account_number: str,
         status: Optional[str] = None,
         start_date: Optional[datetime] = None,
-        limit: int = 100
+        limit: int = 100,
     ) -> list[Order]:
         """Fetch order history for an account.
 
@@ -547,7 +600,7 @@ class TastytradeClient:
         self,
         transactions: list[Transaction],
         start_date: Optional[datetime],
-        end_date: Optional[datetime]
+        end_date: Optional[datetime],
     ) -> list[Transaction]:
         """Filter transactions by date range."""
         filtered = transactions
@@ -619,7 +672,9 @@ class TastytradeClient:
                 commission=self._float(item.get("commission", item.get("fees"))),
                 order_id=str(item.get("order-id")) if item.get("order-id") else None,
                 account_number=account_number,
-                action=item.get("action")  # "Buy to Open", "Sell to Open", "Buy to Close", "Sell to Close"
+                action=item.get(
+                    "action"
+                ),  # "Buy to Open", "Sell to Open", "Buy to Close", "Sell to Close"
             )
         except Exception as e:
             logger.error(f"Error parsing transaction: {e}")
@@ -679,8 +734,10 @@ class TastytradeClient:
                 updated_at=updated_at,
                 filled_quantity=self._float(item.get("filled-quantity")),
                 average_fill_price=self._float(item.get("average-fill-price")),
-                commissions=self._float(item.get("-commissions", 0), mult=-1),  # Tastytrade returns negative
-                underlying_symbol=item.get("underlying-symbol")
+                commissions=self._float(
+                    item.get("-commissions", 0), mult=-1
+                ),  # Tastytrade returns negative
+                underlying_symbol=item.get("underlying-symbol"),
             )
         except Exception as e:
             logger.error(f"Error parsing order: {e}")

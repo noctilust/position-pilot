@@ -2,16 +2,17 @@
 
 from datetime import datetime, timedelta
 from typing import Optional
+
 import typer
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich.text import Text
 from rich import box
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
 from .client import get_client
 from .config import get_default_account, set_default_account
-from .models import Position
+from .domain.snapshots import PositionSnapshot, StrategySnapshot
 
 app = typer.Typer(
     name="pilot",
@@ -48,11 +49,17 @@ def format_pnl(value: float, percent: float | None = None) -> Text:
     return Text(text, style=color)
 
 
-def format_position_row(pos: Position) -> list:
+def format_position_row(pos: PositionSnapshot) -> list:
     """Format a position as a table row."""
     # Symbol display
-    if pos.is_option:
-        exp = pos.expiration_date.strftime("%m/%d") if pos.expiration_date else "?"
+    is_option = pos.position_type.value.endswith("Option")
+    is_short = pos.quantity_direction.value == "Short" or pos.quantity < 0
+    if is_option:
+        exp = (
+            datetime.fromisoformat(pos.expiration_date).strftime("%m/%d")
+            if pos.expiration_date
+            else "?"
+        )
         opt_type = "C" if pos.option_type == "C" else "P"
         strike = f"${pos.strike_price:.0f}" if pos.strike_price else "?"
         symbol = f"{pos.underlying_symbol} {exp} {strike}{opt_type}"
@@ -62,21 +69,20 @@ def format_position_row(pos: Position) -> list:
         dte = "-"
 
     # Quantity with direction
-    qty_color = "red" if pos.is_short else "green"
-    qty = Text(pos.display_quantity, style=qty_color)
+    qty_color = "red" if is_short else "green"
+    qty = Text(f"{'-' if is_short else '+'}{abs(pos.quantity)}", style=qty_color)
 
     # Price
-    price = pos.mark_price or pos.close_price
+    price = pos.mark_price
     price_str = f"${price:.2f}" if price else "-"
 
     # P/L
     pnl = format_pnl(pos.unrealized_pnl, pos.unrealized_pnl_percent)
 
     # Greeks (if option)
-    delta = f"{pos.greeks.delta:.2f}" if pos.greeks and pos.greeks.delta else "-"
-    if pos.greeks and pos.greeks.theta:
-        # Adjust theta for short positions (positive theta = gains from time decay)
-        adjusted_theta = -pos.greeks.theta if pos.is_short else pos.greeks.theta
+    delta = f"{pos.delta:.2f}" if pos.delta else "-"
+    if pos.theta:
+        adjusted_theta = -pos.theta if is_short else pos.theta
         theta = f"${adjusted_theta * pos.multiplier * abs(pos.quantity):.0f}"
     else:
         theta = "-"
@@ -84,24 +90,15 @@ def format_position_row(pos: Position) -> list:
     return [symbol, qty, dte, price_str, pnl, delta, theta]
 
 
-def format_strategy_row(strategy) -> list:
+def format_strategy_row(strategy: StrategySnapshot) -> list:
     """Format a strategy as a table row."""
-    from .analysis import StrategyGroup
-
-    # Strategy name with underlying and expiration
-    exp_str = ""
-    if strategy.expiration:
-        exp_str = strategy.expiration.strftime("%m/%d")
-    elif strategy.days_to_expiration is not None:
-        exp_str = f"{strategy.days_to_expiration}d"
-
-    name = f"{strategy.underlying} {strategy.strategy_type.value}"
+    name = f"{strategy.underlying} {strategy.strategy_type}"
 
     # Strikes
-    strikes = strategy.strikes_display
+    strikes = strategy.strikes
 
     # Quantity
-    qty = str(strategy.total_quantity)
+    qty = str(strategy.quantity)
 
     # DTE
     dte = f"{strategy.days_to_expiration}d" if strategy.days_to_expiration is not None else "-"
@@ -120,12 +117,14 @@ def format_strategy_row(strategy) -> list:
 
 @app.command()
 def positions(
-    account: str = typer.Option(None, "--account", "-a", help="Account number (uses default if not specified)"),
+    account: str = typer.Option(
+        None, "--account", "-a", help="Account number (uses default if not specified)"
+    ),
     enrich: bool = typer.Option(False, "--enrich", "-e", help="Fetch live Greeks (slower)"),
     group: bool = typer.Option(False, "--group", "-g", help="Group positions by strategy"),
 ):
-    """Show current positions."""
-    from .analysis import detect_strategies
+    """Show positions from the shared versioned portfolio service."""
+    from .domain.factory import get_database, get_portfolio_service
 
     client = get_client()
 
@@ -134,41 +133,25 @@ def positions(
         console.print("Set TASTYTRADE_CLIENT_SECRET and TASTYTRADE_REFRESH_TOKEN in .env")
         raise typer.Exit(1)
 
-    with console.status("Fetching accounts..."):
-        accts = client.get_accounts()
-
-    if not accts:
+    with console.status("Refreshing versioned portfolio snapshot..."):
+        snapshot = get_portfolio_service().refresh(enrich=enrich)
+    if not snapshot.accounts:
         console.print("[yellow]No accounts found[/yellow]")
         raise typer.Exit(0)
 
-    # Resolve account: CLI flag > config default > first account
-    account_num, source = resolve_account(account)
-
-    if account_num:
-        selected = next((a for a in accts if a.account_number == account_num), None)
-        if not selected:
-            console.print(f"[red]Account {account_num} not found[/red]")
-            raise typer.Exit(1)
-    else:
-        selected = accts[0]
-
-    # Fetch balances and positions
-    with console.status(f"Fetching positions for {selected.display_name}..."):
-        balances = client.get_account_balances(selected.account_number)
-        positions = client.get_positions(selected.account_number)
-
-        if enrich:
-            for i, pos in enumerate(positions):
-                if pos.is_option:
-                    console.status.update(f"Enriching {i+1}/{len(positions)}...")
-                    positions[i] = client.enrich_position_greeks(pos)
-
-    if balances:
-        selected.net_liquidating_value = balances.get("net_liquidating_value") or 0
-        selected.cash_balance = balances.get("cash_balance") or 0
-        selected.buying_power = balances.get("buying_power") or 0
-
-    selected.positions = positions
+    account_num, _ = resolve_account(account)
+    selected_id = get_database().account_id_for_broker_number(account_num) if account_num else None
+    selected = next(
+        (item for item in snapshot.accounts if item.account_id == selected_id),
+        snapshot.accounts[0] if selected_id is None else None,
+    )
+    if selected is None:
+        console.print("[red]Requested account not found[/red]")
+        raise typer.Exit(1)
+    positions = selected.positions
+    strategies = [
+        strategy for strategy in snapshot.strategies if strategy.account_id == selected.account_id
+    ]
 
     # Display account summary
     summary = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
@@ -180,7 +163,7 @@ def positions(
     summary.add_row("Buying Power", f"${selected.buying_power:,.2f}")
     summary.add_row("Positions", str(len(positions)))
 
-    console.print(Panel(summary, title=f"[bold]{selected.display_name}[/bold]", border_style="blue"))
+    console.print(Panel(summary, title=f"[bold]{selected.label}[/bold]", border_style="blue"))
 
     if not positions:
         console.print("[dim]No open positions[/dim]")
@@ -189,9 +172,6 @@ def positions(
     total_pnl = 0.0
 
     if group:
-        # Detect and display strategies
-        strategies = detect_strategies(positions)
-
         table = Table(title="Strategies", box=box.ROUNDED)
         table.add_column("Strategy", style="cyan")
         table.add_column("Strikes", style="dim")
@@ -222,7 +202,11 @@ def positions(
         # Sort: options first, then by underlying
         sorted_positions = sorted(
             positions,
-            key=lambda p: (not p.is_option, p.underlying_symbol, p.expiration_date or ""),
+            key=lambda p: (
+                not p.position_type.value.endswith("Option"),
+                p.underlying_symbol,
+                p.expiration_date or "",
+            ),
         )
 
         for pos in sorted_positions:
@@ -234,7 +218,7 @@ def positions(
 
     # Total P/L
     total_text = format_pnl(total_pnl)
-    console.print(f"\n[bold]Total Unrealized P/L:[/bold] ", end="")
+    console.print("\n[bold]Total Unrealized P/L:[/bold] ", end="")
     console.print(total_text)
 
 
@@ -321,7 +305,7 @@ def account_select():
         name = acc.nickname or acc.account_type
         console.print(f"  {i}. {acc.account_number} - {name}{marker}")
 
-    console.print(f"  0. Clear default\n")
+    console.print("  0. Clear default\n")
 
     choice = typer.prompt("Enter number", type=int)
 
@@ -386,7 +370,9 @@ def account_show():
             name = account.nickname or account.account_type
             console.print(f"Default account: [cyan]{default}[/cyan] ({name})")
         else:
-            console.print(f"Default account: [cyan]{default}[/cyan] [yellow](not found in API)[/yellow]")
+            console.print(
+                f"Default account: [cyan]{default}[/cyan] [yellow](not found in API)[/yellow]"
+            )
     else:
         console.print(f"Default account: [cyan]{default}[/cyan]")
 
@@ -436,105 +422,103 @@ def quote(symbol: str = typer.Argument(..., help="Symbol to quote")):
 
 
 @app.command()
-def dashboard():
-    """Launch interactive TUI dashboard."""
-    from .dashboard import run_dashboard
-    run_dashboard()
+def dashboard(
+    open_browser: bool = typer.Option(
+        True,
+        "--browser/--no-browser",
+        help="Open the local web dashboard in the default browser",
+    ),
+):
+    """Launch the local Position Pilot web dashboard (loopback only)."""
+    from .web.launcher import run_web_dashboard
+
+    run_web_dashboard(open_browser=open_browser)
 
 
 @app.command()
 def analyze(
-    account: str = typer.Option(None, "--account", "-a", help="Account number (uses default if not specified)"),
-    refresh: bool = typer.Option(False, "--refresh", "-r", help="Force refresh AI recommendations (bypass cache)"),
+    account: str = typer.Option(
+        None, "--account", "-a", help="Account number (uses default if not specified)"
+    ),
+    refresh: bool = typer.Option(
+        False, "--refresh", "-r", help="Force a live portfolio refresh before analysis"
+    ),
 ):
-    """Analyze portfolio health and metrics (AI recommendations are on-demand per position)."""
-    from .analysis import get_llm_analyzer, get_analyzer, RiskLevel, get_recommendation_cache
+    """Analyze portfolio health with deterministic risk metrics.
+
+    Codex recommendations live in the web dashboard. This command never places trades.
+    """
+    from .domain.factory import get_database, get_portfolio_service, get_risk_service
 
     client = get_client()
-    analyzer = get_llm_analyzer()  # Use LLM analyzer
-    market = get_analyzer()
-    cache = get_recommendation_cache()
 
     if not client.is_enabled:
         console.print("[red]Error:[/red] Tastytrade credentials not configured")
         raise typer.Exit(1)
 
-    with console.status("Fetching data..."):
-        accts = client.get_accounts()
-        if not accts:
-            console.print("[yellow]No accounts found[/yellow]")
-            raise typer.Exit(0)
+    portfolio_service = get_portfolio_service()
+    risk_service = get_risk_service()
 
-        # Resolve account: CLI flag > config default > first account
-        account_num, source = resolve_account(account)
-
-        if account_num:
-            selected = next((a for a in accts if a.account_number == account_num), None)
-            if not selected:
-                console.print(f"[red]Account {account_num} not found[/red]")
-                raise typer.Exit(1)
+    with console.status("Fetching portfolio..."):
+        if refresh or portfolio_service.latest() is None:
+            try:
+                snapshot = portfolio_service.refresh()
+            except Exception as error:
+                console.print(f"[red]Could not refresh portfolio:[/red] {error}")
+                raise typer.Exit(1) from error
         else:
-            selected = accts[0]
+            snapshot = portfolio_service.latest()
+            assert snapshot is not None
 
-        positions = client.get_positions(selected.account_number)
+        account_num, _source = resolve_account(account)
+        if account_num:
+            resolved = get_database().account_id_for_broker_number(account_num)
+            if resolved:
+                snapshot = snapshot.for_account(resolved)
+            else:
+                console.print(f"[yellow]Account {account_num} not found in snapshot scope[/yellow]")
 
-        # Enrich all options with Greeks
-        for i, pos in enumerate(positions):
-            if pos.is_option:
-                positions[i] = client.enrich_position_greeks(pos)
-
-    if not positions:
+    if not snapshot.strategies and not any(account.positions for account in snapshot.accounts):
         console.print("[dim]No open positions to analyze[/dim]")
         return
 
-    # Run analysis (metrics only)
-    analysis = analyzer.analyze_portfolio(positions)
+    portfolio_risk = risk_service.portfolio_risk(snapshot)
 
-    # Show cache info
-    cache_info = analysis.get("cache_info", {})
-    if cache_info:
-        total = cache_info.get("total", 0)
-        console.print(f"[dim]Cached AI Recommendations: {total} positions[/dim]")
-        console.print()
-
-    # Risk summary
-    risk_table = Table(show_header=False, box=box.SIMPLE)
-    risk_table.add_column("Risk Level", style="bold")
-    risk_table.add_column("Count", justify="right")
-
-    risk_colors = {
-        RiskLevel.CRITICAL: "red",
-        RiskLevel.HIGH: "yellow",
-        RiskLevel.MODERATE: "cyan",
-        RiskLevel.LOW: "green",
-    }
-
-    for level in RiskLevel:
-        count = analysis["risk_summary"].get(level, 0)
-        if count > 0:
-            color = risk_colors[level]
-            risk_table.add_row(f"[{color}]{level.value.title()}[/{color}]", str(count))
-
-    console.print(Panel(risk_table, title="Risk Summary", border_style="blue"))
-
-    # Portfolio metrics
     metrics_table = Table(show_header=False, box=box.SIMPLE)
     metrics_table.add_column("Metric", style="dim")
     metrics_table.add_column("Value", justify="right")
-
-    total_pnl = sum(p.unrealized_pnl for p in positions)
+    total_pnl = portfolio_risk.unrealized_pnl
     pnl_color = "green" if total_pnl >= 0 else "red"
     metrics_table.add_row("Total P/L", f"[{pnl_color}]${total_pnl:+,.2f}[/{pnl_color}]")
-
-    theta = analysis["total_theta"]
+    theta = portfolio_risk.total_theta
     theta_color = "green" if theta < 0 else "yellow"
     metrics_table.add_row("Daily Theta", f"[{theta_color}]${theta:+,.2f}[/{theta_color}]")
-
-    metrics_table.add_row("Net Delta", f"{analysis['total_delta']:+,.0f}")
-
+    metrics_table.add_row("Net Delta", f"{portfolio_risk.total_delta:+,.0f}")
+    metrics_table.add_row("Net Gamma", f"{portfolio_risk.total_gamma:+,.4f}")
+    metrics_table.add_row("Net Vega", f"{portfolio_risk.total_vega:+,.2f}")
+    metrics_table.add_row("NLV", f"${portfolio_risk.net_liquidating_value:,.2f}")
+    metrics_table.add_row("Strategies", str(portfolio_risk.strategy_count))
+    metrics_table.add_row("Legs", str(portfolio_risk.position_count))
+    metrics_table.add_row("Accounts", str(portfolio_risk.account_count))
     console.print(Panel(metrics_table, title="Portfolio Metrics", border_style="cyan"))
 
-    console.print("\n[dim]💡 Tip: Use the dashboard and press 'a' on a strategy row to generate AI recommendations[/dim]")
+    if portfolio_risk.concentration:
+        conc_table = Table(box=box.SIMPLE)
+        conc_table.add_column("Underlying")
+        conc_table.add_column("Share", justify="right")
+        conc_table.add_column("Net Δ", justify="right")
+        for slice_ in portfolio_risk.concentration[:8]:
+            conc_table.add_row(
+                slice_.underlying,
+                f"{slice_.share_of_portfolio:.1%}",
+                f"{slice_.net_delta:+.1f}",
+            )
+        console.print(Panel(conc_table, title="Concentration", border_style="blue"))
+
+    console.print(
+        "\n[dim]Decision support only — never places trades. "
+        "Codex recommendations: pilot dashboard → Positions.[/dim]"
+    )
 
 
 @app.command()
@@ -542,10 +526,11 @@ def market(
     symbols: list[str] = typer.Argument(None, help="Symbols to check (default: SPY QQQ IWM)"),
 ):
     """Check market conditions and IV environment."""
-    from .analysis import get_analyzer, IVEnvironment
+    from .domain.factory import get_market_service
+    from .domain.market import IVEnvironment
 
     client = get_client()
-    market_analyzer = get_analyzer()
+    market_service = get_market_service()
 
     if not client.is_enabled:
         console.print("[red]Error:[/red] Tastytrade credentials not configured")
@@ -573,7 +558,7 @@ def market(
     with console.status("Fetching market data..."):
         for symbol in symbols:
             symbol = symbol.upper()
-            snapshot = market_analyzer.get_snapshot(symbol)
+            snapshot = market_service.snapshot(symbol)
 
             if snapshot:
                 price = f"${snapshot.price:.2f}"
@@ -591,9 +576,14 @@ def market(
 
     # Strategy suggestions
     console.print("\n[bold]Strategy Guidance:[/bold]")
-    console.print("  [green]Low IV (< 30)[/green]: Favor buying premium (long calls/puts, debit spreads)")
+    console.print(
+        "  [green]Low IV (< 30)[/green]: Favor buying premium (long calls/puts, debit spreads)"
+    )
     console.print("  [yellow]Normal IV (30-50)[/yellow]: Neutral strategies or directional plays")
-    console.print("  [red]High IV (> 50)[/red]: Favor selling premium (short puts, credit spreads, iron condors)")
+    console.print(
+        "  [red]High IV (> 50)[/red]: Favor selling premium "
+        "(short puts, credit spreads, iron condors)"
+    )
 
 
 # Watchlist subcommand group
@@ -604,8 +594,8 @@ app.add_typer(watchlist_app, name="watchlist")
 @watchlist_app.command("show")
 def watchlist_show():
     """Show current watchlist."""
+    from .analysis import IVEnvironment, get_analyzer
     from .config import get_watchlist
-    from .analysis import get_analyzer, IVEnvironment
 
     watchlist = get_watchlist()
 
@@ -700,15 +690,20 @@ app.add_typer(rolls_app, name="rolls")
 @rolls_app.command("history")
 def rolls_history(
     symbol: str = typer.Argument(..., help="Underlying symbol (e.g., SPY)"),
-    strategy: Optional[str] = typer.Option(None, "--strategy", "-s", help="Filter by strategy type"),
-    days: int = typer.Option(365, "--days", "-d", help="Days of history to analyze (default: 1 year)"),
-    account: str = typer.Option(None, "--account", "-a", help="Account number (uses default if not specified)"),
+    strategy: Optional[str] = typer.Option(
+        None, "--strategy", "-s", help="Filter by strategy type"
+    ),
+    days: int = typer.Option(
+        365, "--days", "-d", help="Days of history to analyze (default: 1 year)"
+    ),
+    account: str = typer.Option(
+        None, "--account", "-a", help="Account number (uses default if not specified)"
+    ),
 ):
     """Show roll history for a symbol."""
-    from .client import get_client
-    from .analysis.roll_tracker import RollTracker
-    from .analysis.roll_history import get_roll_history
     from .analysis.roll_analytics import format_roll_summary
+    from .analysis.roll_tracker import RollTracker
+    from .client import get_client
     from .config import get_default_account
 
     client = get_client()
@@ -731,19 +726,20 @@ def rolls_history(
             console.print(f"[red]Account {account} not found[/red]")
             raise typer.Exit(1)
     else:
-        selected = accounts[0] if default_account is None else next(
-            (a for a in accounts if a.account_number == default_account), accounts[0]
+        selected = (
+            accounts[0]
+            if default_account is None
+            else next((a for a in accounts if a.account_number == default_account), accounts[0])
         )
 
     # Fetch transactions
     start_date = datetime.now() - timedelta(days=days)
 
-    with console.status(f"[dim]Fetching transactions since {start_date.strftime('%Y-%m-%d')}...[/dim]"):
+    with console.status(
+        f"[dim]Fetching transactions since {start_date.strftime('%Y-%m-%d')}...[/dim]"
+    ):
         transactions = client.get_transactions(
-            selected.account_number,
-            start_date=start_date,
-            limit=1000,
-            force_refresh=False
+            selected.account_number, start_date=start_date, limit=1000, force_refresh=False
         )
 
     if not transactions:
@@ -778,13 +774,16 @@ def rolls_history(
 @rolls_app.command("chain")
 def rolls_chain(
     symbol: str = typer.Argument(..., help="Underlying symbol (e.g., SPY)"),
-    days: int = typer.Option(365, "--days", "-d", help="Days of history to analyze (default: 1 year)"),
-    account: str = typer.Option(None, "--account", "-a", help="Account number (uses default if not specified)"),
+    days: int = typer.Option(
+        365, "--days", "-d", help="Days of history to analyze (default: 1 year)"
+    ),
+    account: str = typer.Option(
+        None, "--account", "-a", help="Account number (uses default if not specified)"
+    ),
 ):
     """Display option chain with roll activity heatmap."""
-    from .client import get_client
-    from .analysis.roll_tracker import RollTracker
     from .analysis.roll_history import get_roll_history
+    from .client import get_client
     from .config import get_default_account
 
     client = get_client()
@@ -807,8 +806,10 @@ def rolls_chain(
             console.print(f"[red]Account {account} not found[/red]")
             raise typer.Exit(1)
     else:
-        selected = accounts[0] if default_account is None else next(
-            (a for a in accounts if a.account_number == default_account), accounts[0]
+        selected = (
+            accounts[0]
+            if default_account is None
+            else next((a for a in accounts if a.account_number == default_account), accounts[0])
         )
 
     symbol_upper = symbol.upper()
@@ -848,7 +849,9 @@ def rolls_chain(
             heatmap_data[key] += 1
 
     # Display heatmap
-    console.print(f"\n[bold cyan]{symbol_upper} Option Chain - Roll Activity ({days} days)[/bold cyan]\n")
+    console.print(
+        f"\n[bold cyan]{symbol_upper} Option Chain - Roll Activity ({days} days)[/bold cyan]\n"
+    )
 
     # Group strikes
     strikes = sorted(set(k[0] for k in heatmap_data.keys()))
@@ -886,19 +889,25 @@ def rolls_chain(
         table.add_row(*row)
 
     console.print(table)
-    console.print("\n[dim]Legend: [yellow]1-2[/yellow] [red bold]3+[/red bold] rolls at that strike/DTE[/dim]")
+    console.print(
+        "\n[dim]Legend: [yellow]1-2[/yellow] [red bold]3+[/red bold] rolls at that strike/DTE[/dim]"
+    )
 
 
 @rolls_app.command("patterns")
 def rolls_patterns(
     symbol: str = typer.Argument(..., help="Underlying symbol (e.g., SPY)"),
-    days: int = typer.Option(365, "--days", "-d", help="Days of history to analyze (default: 1 year)"),
-    account: str = typer.Option(None, "--account", "-a", help="Account number (uses default if not specified)"),
+    days: int = typer.Option(
+        365, "--days", "-d", help="Days of history to analyze (default: 1 year)"
+    ),
+    account: str = typer.Option(
+        None, "--account", "-a", help="Account number (uses default if not specified)"
+    ),
 ):
     """Show learned rolling patterns and statistics."""
-    from .client import get_client
-    from .analysis.roll_tracker import RollTracker
     from .analysis.roll_analytics import analyze_patterns, format_patterns_summary
+    from .analysis.roll_tracker import RollTracker
+    from .client import get_client
     from .config import get_default_account
 
     client = get_client()
@@ -921,8 +930,10 @@ def rolls_patterns(
             console.print(f"[red]Account {account} not found[/red]")
             raise typer.Exit(1)
     else:
-        selected = accounts[0] if default_account is None else next(
-            (a for a in accounts if a.account_number == default_account), accounts[0]
+        selected = (
+            accounts[0]
+            if default_account is None
+            else next((a for a in accounts if a.account_number == default_account), accounts[0])
         )
 
     symbol_upper = symbol.upper()
@@ -930,12 +941,11 @@ def rolls_patterns(
     # Fetch transactions and detect rolls
     start_date = datetime.now() - timedelta(days=days)
 
-    with console.status(f"[dim]Fetching transactions since {start_date.strftime('%Y-%m-%d')}...[/dim]"):
+    with console.status(
+        f"[dim]Fetching transactions since {start_date.strftime('%Y-%m-%d')}...[/dim]"
+    ):
         transactions = client.get_transactions(
-            selected.account_number,
-            start_date=start_date,
-            limit=1000,
-            force_refresh=False
+            selected.account_number, start_date=start_date, limit=1000, force_refresh=False
         )
 
     if not transactions:
@@ -966,9 +976,15 @@ def rolls_patterns(
     # Actionable insights
     console.print("\n[bold yellow]💡 Key Insights:[/bold yellow]")
     if patterns.typical_roll_days:
-        console.print(f"  • You typically roll to {patterns.typical_roll_days[0]} or {patterns.typical_roll_days[1] if len(patterns.typical_roll_days) > 1 else ''} DTE")
+        console.print(
+            "  • You typically roll to "
+            f"{patterns.typical_roll_days[0]} or "
+            f"{patterns.typical_roll_days[1] if len(patterns.typical_roll_days) > 1 else ''} DTE"
+        )
     console.print(f"  • Average roll occurs at {patterns.avg_dte_at_roll:.1f} DTE")
-    console.print(f"  • Best DTE window: {patterns.best_dte_window[0]}-{patterns.best_dte_window[1]} days")
+    console.print(
+        f"  • Best DTE window: {patterns.best_dte_window[0]}-{patterns.best_dte_window[1]} days"
+    )
 
     if patterns.win_rate >= 0.7:
         console.print(f"  • [green]Strong win rate: {patterns.win_rate:.1%}[/green]")
@@ -980,18 +996,24 @@ def rolls_patterns(
 
 @rolls_app.command("fetch")
 def rolls_fetch(
-    days: int = typer.Option(365, "--days", "-d", help="Days of history to fetch (default: 1 year)"),
-    account: str = typer.Option(None, "--account", "-a", help="Account number (uses default if not specified)"),
-    force_refresh: bool = typer.Option(False, "--force", "-f", help="Force refresh from API (bypass cache)"),
+    days: int = typer.Option(
+        365, "--days", "-d", help="Days of history to fetch (default: 1 year)"
+    ),
+    account: str = typer.Option(
+        None, "--account", "-a", help="Account number (uses default if not specified)"
+    ),
+    force_refresh: bool = typer.Option(
+        False, "--force", "-f", help="Force refresh from API (bypass cache)"
+    ),
 ):
     """Fetch and store roll history from transactions.
 
     This command fetches your transaction history, detects roll operations,
     and stores them in the roll history cache for faster access later.
     """
-    from .client import get_client
-    from .analysis.roll_tracker import RollTracker
     from .analysis.roll_history import get_roll_history
+    from .analysis.roll_tracker import RollTracker
+    from .client import get_client
     from .config import get_default_account
 
     client = get_client()
@@ -1014,19 +1036,20 @@ def rolls_fetch(
             console.print(f"[red]Account {account} not found[/red]")
             raise typer.Exit(1)
     else:
-        selected = accounts[0] if default_account is None else next(
-            (a for a in accounts if a.account_number == default_account), accounts[0]
+        selected = (
+            accounts[0]
+            if default_account is None
+            else next((a for a in accounts if a.account_number == default_account), accounts[0])
         )
 
     # Fetch transactions
     start_date = datetime.now() - timedelta(days=days)
 
-    with console.status(f"[dim]Fetching transactions since {start_date.strftime('%Y-%m-%d')}...[/dim]"):
+    with console.status(
+        f"[dim]Fetching transactions since {start_date.strftime('%Y-%m-%d')}...[/dim]"
+    ):
         transactions = client.get_transactions(
-            selected.account_number,
-            start_date=start_date,
-            limit=1000,
-            force_refresh=force_refresh
+            selected.account_number, start_date=start_date, limit=1000, force_refresh=force_refresh
         )
 
     if not transactions:
@@ -1055,7 +1078,9 @@ def rolls_fetch(
         roll_history.add_chain(chain, selected.account_number)
         total_rolls += chain.roll_count
 
-    console.print(f"[green]✓[/green] Stored {total_rolls} rolls from {len(roll_chains)} roll chains")
+    console.print(
+        f"[green]✓[/green] Stored {total_rolls} rolls from {len(roll_chains)} roll chains"
+    )
 
     # Summary
     console.print("\n[bold]Roll History Summary:[/bold]")
@@ -1071,7 +1096,7 @@ def rolls_fetch(
             f"({chain.roll_count} rolls)"
         )
 
-    console.print(f"\n[dim]Roll history cached at: ~/.cache/position-pilot/roll_history.json[/dim]")
+    console.print("\n[dim]Roll history cached at: ~/.cache/position-pilot/roll_history.json[/dim]")
 
 
 if __name__ == "__main__":

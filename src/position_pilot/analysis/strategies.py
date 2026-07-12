@@ -1,9 +1,9 @@
 """Strategy detection and grouping for options positions."""
 
 from dataclasses import dataclass, field
+from datetime import date
 from enum import Enum
 from typing import Optional
-from datetime import date
 
 from ..models import Position, PositionType
 
@@ -117,12 +117,14 @@ class StrategyGroup:
 
     @property
     def total_delta(self) -> float:
-        """Net delta of the strategy."""
+        """Share-equivalent net delta of the strategy."""
         total = 0.0
         for pos in self.positions:
-            if pos.greeks and pos.greeks.delta:
-                multiplier = -1 if pos.is_short else 1
-                total += pos.greeks.delta * pos.quantity * multiplier
+            direction = -1 if pos.is_short else 1
+            if pos.position_type == PositionType.EQUITY:
+                total += direction * abs(pos.quantity)
+            elif pos.greeks and pos.greeks.delta is not None:
+                total += pos.greeks.delta * pos.multiplier * abs(pos.quantity) * direction
         return total
 
     @property
