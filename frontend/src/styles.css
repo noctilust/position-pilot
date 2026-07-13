@@ -1880,6 +1880,57 @@ button.strategy-open-action:focus-visible {
   background: var(--pt-text-dim);
 }
 
+.roll-pnl-indicator {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.15rem;
+  padding: 0.05rem 0.28rem;
+  border-radius: 0.25rem;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  color: var(--pt-text-soft);
+  background: color-mix(in oklch, var(--pt-rule) 70%, var(--pt-row-bg));
+  border: 1px solid color-mix(in oklch, var(--pt-rule) 90%, transparent);
+  cursor: help;
+}
+
+.roll-pnl-indicator-partial {
+  color: color-mix(in oklch, var(--pt-warn, #c48a1a) 90%, var(--pt-text-soft));
+  border-color: color-mix(in oklch, var(--pt-warn, #c48a1a) 45%, var(--pt-rule));
+}
+
+.roll-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.08rem 0.35rem;
+  border-radius: 0.3rem;
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  color: var(--pt-text-soft);
+  background: color-mix(in oklch, var(--pt-rule) 65%, var(--pt-row-bg));
+  border: 1px solid color-mix(in oklch, var(--pt-rule) 90%, transparent);
+  white-space: nowrap;
+}
+
+.roll-status-badge-partial {
+  color: color-mix(in oklch, var(--pt-warn, #c48a1a) 92%, var(--pt-text-soft));
+  border-color: color-mix(in oklch, var(--pt-warn, #c48a1a) 40%, var(--pt-rule));
+}
+
+.roll-status-badge-open {
+  color: color-mix(in oklch, var(--pt-good, #2f8f5b) 85%, var(--pt-text-soft));
+}
+
+.roll-status-sep {
+  opacity: 0.55;
+}
+
 .positions-combined-hint {
   margin-top: -0.15rem;
   color: var(--pt-text-soft);

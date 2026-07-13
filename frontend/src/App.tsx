@@ -77,9 +77,13 @@ import {
   getLegIdentitySegments,
   groupStrategiesBySymbol,
   isCombinedOptionStrategy,
+  legOpenPnl,
+  legOpenPnlPercent,
   normalizeUnderlying,
   presentSymbolsFromStrategies,
   pruneCollapsedSymbols,
+  strategyOpenPnl,
+  strategyOpenPnlPercent,
   symbolGroupPanelId,
 } from "./positionGroups";
 import type {
@@ -1374,16 +1378,22 @@ function LegContractIdentity({ leg }: { leg: PositionLeg }) {
 }
 
 /**
- * Open unrealized P/L: signed currency plus optional restrained percent bar.
- * Bar length is clamped visually; the displayed percent is not clamped.
+ * P/L Open: signed currency plus optional restrained percent bar.
+ * When rolls apply, a compact indicator exposes roll count and realized carry.
  * Color is not the only signal — signed text remains in the accessibility tree.
  */
 function UnrealizedPnlCell({
   value,
   percent,
+  rollCount = 0,
+  rollAdjustment = 0,
+  rollHistoryStatus = "none",
 }: {
   value: number;
   percent: number | null | undefined;
+  rollCount?: number;
+  rollAdjustment?: number;
+  rollHistoryStatus?: string;
 }) {
   const hasPercent = percent != null && Number.isFinite(percent);
   const barWidth = hasPercent ? clampPnlBarPercent(percent) : 0;
@@ -1398,14 +1408,35 @@ function UnrealizedPnlCell({
   const percentLabel = hasPercent
     ? `${percent > 0 ? "+" : ""}${percent.toFixed(1)}%`
     : null;
+  const showRoll =
+    (rollCount ?? 0) > 0 ||
+    rollHistoryStatus === "partial" ||
+    rollHistoryStatus === "complete";
+  const rollTitle =
+    rollHistoryStatus === "partial"
+      ? `Rolled ${rollCount || "?"}× — history incomplete; raw P/L shown`
+      : rollCount > 0
+        ? `Rolled ${rollCount}× · realized carry ${currency(rollAdjustment)}`
+        : undefined;
 
   return (
     <div className={`pnl-metric pnl-metric-${tone}`}>
       <div className="pnl-metric-value-row">
         <span className="pnl-metric-value tabular">{currency(value)}</span>
+        {showRoll ? (
+          <span
+            className={`roll-pnl-indicator${
+              rollHistoryStatus === "partial" ? " roll-pnl-indicator-partial" : ""
+            }`}
+            title={rollTitle}
+            aria-label={rollTitle}
+          >
+            {rollHistoryStatus === "partial" ? "R?" : `R${rollCount || ""}`}
+          </span>
+        ) : null}
         {hasPercent ? (
           <span className={`pnl-metric-percent tabular pnl-metric-percent-${percentTone}`}>
-            <span className="sr-only">Unrealized </span>
+            <span className="sr-only">P/L Open </span>
             {percentLabel}
           </span>
         ) : null}
@@ -1653,7 +1684,7 @@ function PositionsSection({
                       Θ
                     </th>
                     <th scope="col" className="positions-th-num positions-th-pnl">
-                      P/L
+                      P/L Open
                     </th>
                   </tr>
                 </thead>
@@ -1707,14 +1738,14 @@ function PositionsSection({
                           <td className="positions-td-num positions-td-pnl symbol-group-aggregate-pnl">
                             <span
                               className={`symbol-group-pnl tabular ${
-                                group.unrealizedPnl > 0
+                                group.openPnl > 0
                                   ? "symbol-group-pnl-positive"
-                                  : group.unrealizedPnl < 0
+                                  : group.openPnl < 0
                                     ? "symbol-group-pnl-negative"
                                     : "symbol-group-pnl-flat"
                               }`}
                             >
-                              {currency(group.unrealizedPnl)}
+                              {currency(group.openPnl)}
                             </span>
                           </td>
                         </tr>
@@ -1829,8 +1860,19 @@ function PositionsSection({
                                 </td>
                                 <td className="positions-td-num positions-td-pnl">
                                   <UnrealizedPnlCell
-                                    value={strategy.unrealized_pnl}
-                                    percent={strategy.unrealized_pnl_percent}
+                                    value={strategyOpenPnl(strategy)}
+                                    percent={strategyOpenPnlPercent(strategy)}
+                                    rollCount={strategy.roll_count ?? 0}
+                                    rollAdjustment={strategy.roll_adjustment ?? 0}
+                                    rollHistoryStatus={
+                                      (strategy.legs ?? []).some(
+                                        (leg) => leg.roll_history_status === "partial",
+                                      )
+                                        ? "partial"
+                                        : (strategy.roll_count ?? 0) > 0
+                                          ? "complete"
+                                          : "none"
+                                    }
                                   />
                                 </td>
                               </tr>
@@ -1877,8 +1919,13 @@ function PositionsSection({
                                         </td>
                                         <td className="positions-td-num positions-td-pnl">
                                           <UnrealizedPnlCell
-                                            value={leg.unrealized_pnl}
-                                            percent={leg.unrealized_pnl_percent}
+                                            value={legOpenPnl(leg)}
+                                            percent={legOpenPnlPercent(leg)}
+                                            rollCount={leg.roll_count ?? 0}
+                                            rollAdjustment={leg.roll_adjustment ?? 0}
+                                            rollHistoryStatus={
+                                              leg.roll_history_status ?? "none"
+                                            }
                                           />
                                         </td>
                                       </tr>
@@ -2196,31 +2243,65 @@ function RollsSection({
         </div>
         <div className="table-wrap" tabIndex={0} role="region" aria-label="Roll chains table">
           <table className="data-table dense">
-            <caption className="sr-only">Roll chains and credits</caption>
+            <caption className="sr-only">
+              Roll chains with realized carry, lifetime credit, completeness, and open status
+            </caption>
             <thead>
               <tr>
                 <th scope="col">Underlying</th>
                 <th scope="col">Strategy</th>
                 <th scope="col">Rolls</th>
-                <th scope="col">Chain credit</th>
+                <th scope="col">Realized carry</th>
+                <th scope="col">Lifetime credit</th>
+                <th scope="col">Status</th>
               </tr>
             </thead>
             <tbody>
-              {rolls.map((chain) => (
-                <tr key={chain.chain_id}>
-                  <td>{chain.underlying}</td>
-                  <td>{chain.strategy_type}</td>
-                  <td className="tabular">{chain.rolls.length}</td>
-                  <td className="tabular">
-                    {chain.chain_total_credit == null
-                      ? "—"
-                      : chain.chain_total_credit.toFixed(2)}
-                  </td>
-                </tr>
-              ))}
+              {rolls.map((chain) => {
+                const complete =
+                  chain.history_status === "complete" ||
+                  (chain.history_complete !== false &&
+                    chain.history_status !== "partial");
+                const open = chain.is_open === true;
+                const realized =
+                  chain.total_roll_pnl ??
+                  chain.rolls.reduce((sum, event) => sum + (event.roll_pnl || 0), 0);
+                const statusLabel = [
+                  complete ? "Complete" : "Partial",
+                  open ? "Open" : "Closed",
+                ].join(" · ");
+                return (
+                  <tr key={chain.chain_id}>
+                    <td>{chain.underlying}</td>
+                    <td>{chain.strategy_type}</td>
+                    <td className="tabular">{chain.roll_count ?? chain.rolls.length}</td>
+                    <td className="tabular">{currency(realized)}</td>
+                    <td className="tabular">
+                      {chain.chain_total_credit == null
+                        ? "—"
+                        : currency(chain.chain_total_credit)}
+                    </td>
+                    <td>
+                      <span
+                        className={`roll-status-badge${
+                          complete ? "" : " roll-status-badge-partial"
+                        }${open ? " roll-status-badge-open" : ""}`}
+                        aria-label={statusLabel}
+                        title={statusLabel}
+                      >
+                        {complete ? "OK" : "Partial"}
+                        <span className="roll-status-sep" aria-hidden="true">
+                          ·
+                        </span>
+                        {open ? "Open" : "Closed"}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
               {!rolls.length ? (
                 <tr>
-                  <td colSpan={4} className="muted">
+                  <td colSpan={6} className="muted">
                     No roll history stored for this account yet.
                   </td>
                 </tr>
@@ -3117,7 +3198,7 @@ function StrategyDetailDrawer({
                     <th scope="col">Qty</th>
                     <th scope="col">Mark</th>
                     <th scope="col">Δ</th>
-                    <th scope="col">P/L</th>
+                    <th scope="col">P/L Open</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -3130,7 +3211,7 @@ function StrategyDetailDrawer({
                       </td>
                       <td className="tabular">{leg.mark_price?.toFixed(2) ?? "—"}</td>
                       <td className="tabular">{leg.delta?.toFixed(3) ?? "—"}</td>
-                      <td className="tabular">{currency(leg.unrealized_pnl)}</td>
+                      <td className="tabular">{currency(legOpenPnl(leg))}</td>
                     </tr>
                   ))}
                 </tbody>

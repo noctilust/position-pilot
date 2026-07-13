@@ -60,6 +60,9 @@ class StrategyService:
         if saved_horizon:
             horizon = PositionHorizon(saved_horizon)
         combined = RiskService().combined_greeks(legs)
+        pnl_open = sum(leg.effective_pnl_open() for leg in legs)
+        roll_adjustment = sum(leg.roll_adjustment for leg in legs)
+        roll_count = sum(leg.roll_count for leg in legs)
         return StrategySnapshot(
             strategy_id=strategy_id,
             account_id=account_id,
@@ -71,6 +74,10 @@ class StrategyService:
             strikes=group.strikes_display,
             unrealized_pnl=group.unrealized_pnl,
             unrealized_pnl_percent=group.unrealized_pnl_percent,
+            pnl_open=pnl_open,
+            pnl_open_percent=group.unrealized_pnl_percent,
+            roll_adjustment=roll_adjustment,
+            roll_count=roll_count,
             total_delta=combined.delta or 0,
             total_theta=combined.theta or 0,
             horizon=horizon,

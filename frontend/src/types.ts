@@ -335,8 +335,21 @@ export type PositionLeg = {
   days_to_expiration: number | null;
   mark_price: number | null;
   market_value: number;
+  cost_basis?: number;
+  /** Broker raw current-contract unrealized P/L. */
   unrealized_pnl: number;
   unrealized_pnl_percent: number | null;
+  /** Tastytrade-compatible P/L Open (raw + realized roll carry when complete). */
+  pnl_open?: number | null;
+  pnl_open_percent?: number | null;
+  /** Denominator for P/L Open % (unrolled cost or lifetime credit). */
+  pnl_open_basis?: number | null;
+  roll_adjustment?: number;
+  roll_count?: number;
+  roll_chain_id?: string | null;
+  /** none | complete | partial */
+  roll_history_status?: string;
+  lifetime_net_credit?: number | null;
   delta: number | null;
   gamma: number | null;
   theta: number | null;
@@ -357,6 +370,11 @@ export type Strategy = {
   strikes: string;
   unrealized_pnl: number;
   unrealized_pnl_percent: number | null;
+  pnl_open?: number | null;
+  pnl_open_percent?: number | null;
+  pnl_open_basis?: number | null;
+  roll_adjustment?: number;
+  roll_count?: number;
   total_delta: number;
   total_theta: number;
   horizon: string;
@@ -474,6 +492,15 @@ export type RollChain = {
   original_open_credit: number | null;
   chain_total_credit: number | null;
   original_open_date?: string | null;
+  history_complete?: boolean;
+  is_open?: boolean;
+  terminal_symbol?: string | null;
+  root_symbol?: string | null;
+  /** broker | legacy — only broker adjusts live P/L. */
+  source?: string;
+  total_roll_pnl?: number;
+  roll_count?: number;
+  history_status?: string;
   rolls: RollEvent[];
 };
 

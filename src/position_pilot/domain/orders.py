@@ -21,6 +21,8 @@ class OrderSource(Protocol):
         *,
         start_date=None,
         end_date=None,
+        limit: int = 250,
+        force_refresh: bool = False,
     ) -> list[Transaction]: ...
 
 
@@ -100,9 +102,7 @@ class OrderService:
                     quantity=order.quantity,
                     order_type=order.order_type,
                     status=(
-                        order.status.value
-                        if hasattr(order.status, "value")
-                        else str(order.status)
+                        order.status.value if hasattr(order.status, "value") else str(order.status)
                     ),
                     created_at=order.created_at,
                     updated_at=order.updated_at,

@@ -90,11 +90,15 @@ class TastytradePortfolioSource:
         *,
         start_date=None,
         end_date=None,
+        limit: int = 250,
+        force_refresh: bool = False,
     ) -> list[Transaction]:
         return self.client.get_transactions(
             account_number,
             start_date=start_date,
             end_date=end_date,
+            limit=limit,
+            force_refresh=force_refresh,
         )
 
 
@@ -126,6 +130,7 @@ def get_portfolio_service() -> PortfolioService:
         database=get_database(),
         source=TastytradePortfolioSource(),
         field_router=get_field_router(),
+        roll_service=get_roll_service(),
     )
 
 
@@ -155,6 +160,7 @@ def get_roll_service() -> RollService:
     service = RollService(
         get_database(),
         legacy_history_path=Path.home() / ".cache" / "position-pilot" / "roll_history.json",
+        transaction_source=TastytradePortfolioSource(),
     )
     service.migrate_legacy_cache()
     return service

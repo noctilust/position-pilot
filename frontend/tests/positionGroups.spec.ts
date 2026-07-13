@@ -20,11 +20,13 @@ import {
   isCombinedOptionStrategy,
   isEquityLeg,
   isOptionLeg,
+  legOpenPnl,
   normalizeUnderlying,
   presentSymbolsFromStrategies,
   pruneCollapsedSymbols,
   sanitizeSymbolDomId,
   sortStrategiesForSymbolGroup,
+  strategyOpenPnl,
   symbolGroupPanelId,
   UNKNOWN_UNDERLYING_SYMBOL,
 } from "../src/positionGroups";
@@ -253,6 +255,7 @@ test.describe("groupStrategiesBySymbol", () => {
     expect(spy?.totalCount).toBe(2);
     expect(spy?.strategies.map((s) => s.strategy_id)).toEqual(["2", "3"]);
     expect(spy?.unrealizedPnl).toBe(50);
+    expect(spy?.openPnl).toBe(50);
   });
 
   test("blank underlyings collapse into a single UNKNOWN group", () => {
@@ -291,6 +294,63 @@ test.describe("groupStrategiesBySymbol", () => {
     expect(groups[0]?.optionsCount).toBe(1);
     expect(groups[0]?.totalCount).toBe(2);
     expect(groups[0]?.unrealizedPnl).toBe(140);
+    expect(groups[0]?.openPnl).toBe(140);
+  });
+
+  test("symbol openPnl uses roll-adjusted pnl_open once (no leg double-count)", () => {
+    const groups = groupStrategiesBySymbol([
+      strategy({
+        strategy_id: "strangle",
+        underlying: "MU",
+        strategy_type: "Short Strangle",
+        unrealized_pnl: 584,
+        pnl_open: 945,
+        roll_adjustment: 361,
+        roll_count: 1,
+        legs: [
+          optionLeg({
+            symbol: "MU    250221P00800000",
+            strike_price: 800,
+            option_type: "P",
+            unrealized_pnl: -212,
+            pnl_open: -212,
+          }),
+          optionLeg({
+            symbol: "MU    250221C01400000",
+            strike_price: 1400,
+            option_type: "C",
+            unrealized_pnl: 796,
+            pnl_open: 1157,
+            roll_adjustment: 361,
+            roll_count: 1,
+          }),
+        ],
+      }),
+      strategy({
+        strategy_id: "put730",
+        underlying: "MU",
+        strategy_type: "Short Put",
+        unrealized_pnl: 450,
+        pnl_open: 549,
+        roll_adjustment: 99,
+        roll_count: 1,
+        legs: [
+          optionLeg({
+            symbol: "MU    250221P00730000",
+            strike_price: 730,
+            option_type: "P",
+            unrealized_pnl: 450,
+            pnl_open: 549,
+            roll_adjustment: 99,
+            roll_count: 1,
+          }),
+        ],
+      }),
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.openPnl).toBe(945 + 549);
+    expect(strategyOpenPnl(groups[0]!.strategies[0]!)).toBe(945);
+    expect(legOpenPnl(groups[0]!.strategies[0]!.legs[1]!)).toBe(1157);
   });
 
   test("shares precede options even when options arrive first", () => {

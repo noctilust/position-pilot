@@ -72,8 +72,22 @@ class PositionSnapshot(BaseModel):
     days_to_expiration: int | None = None
     mark_price: float | None = None
     market_value: float = 0
+    # Broker raw current-contract cost basis (absolute used as unrolled P/L Open basis).
+    cost_basis: float = 0
+    # Broker raw current-contract unrealized P/L (never overwritten by roll carry).
     unrealized_pnl: float = 0
     unrealized_pnl_percent: float | None = None
+    # Tastytrade-compatible P/L Open = unrealized_pnl + roll_adjustment when history is complete.
+    pnl_open: float | None = None
+    pnl_open_percent: float | None = None
+    # Denominator for pnl_open_percent (unrolled: |cost_basis|; rolled: |lifetime|).
+    pnl_open_basis: float | None = None
+    roll_adjustment: float = 0
+    roll_count: int = 0
+    roll_chain_id: str | None = None
+    # none | complete | partial
+    roll_history_status: str = "none"
+    lifetime_net_credit: float | None = None
     delta: float | None = None
     gamma: float | None = None
     theta: float | None = None
@@ -82,6 +96,12 @@ class PositionSnapshot(BaseModel):
     multiplier: int = 1
     horizon: PositionHorizon = PositionHorizon.UNCLASSIFIED
     provenance: dict[str, FieldProvenance] = Field(default_factory=dict)
+
+    def effective_pnl_open(self) -> float:
+        """Roll-adjusted P/L Open, falling back to raw unrealized."""
+        if self.pnl_open is not None:
+            return self.pnl_open
+        return self.unrealized_pnl
 
 
 class AccountSnapshot(BaseModel):
@@ -111,13 +131,29 @@ class StrategySnapshot(BaseModel):
     days_to_expiration: int | None = None
     quantity: int
     strikes: str
+    # Sum of raw broker unrealized P/L on current legs.
     unrealized_pnl: float
     unrealized_pnl_percent: float | None = None
+    # Sum of roll-adjusted pnl_open on current legs (each leg once).
+    pnl_open: float | None = None
+    pnl_open_percent: float | None = None
+    # Sum of each current leg's pnl_open_basis once.
+    pnl_open_basis: float | None = None
+    roll_adjustment: float = 0
+    roll_count: int = 0
     total_delta: float = 0
     total_theta: float = 0
     horizon: PositionHorizon
     legs: list[PositionSnapshot]
     provenance: dict[str, FieldProvenance] = Field(default_factory=dict)
+
+    def effective_pnl_open(self) -> float:
+        """Roll-adjusted strategy P/L Open (sum of current legs once)."""
+        if self.pnl_open is not None:
+            return self.pnl_open
+        if self.legs:
+            return sum(leg.effective_pnl_open() for leg in self.legs)
+        return self.unrealized_pnl
 
 
 class PortfolioTotals(BaseModel):

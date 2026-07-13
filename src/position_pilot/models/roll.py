@@ -1,6 +1,6 @@
 """Data models for roll tracking."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Optional
 
@@ -159,7 +159,7 @@ class RollEvent:
 
 
 class RollChain(BaseModel):
-    """Complete history of a rolled position."""
+    """Complete history of a rolled option-leg lineage."""
 
     underlying: str
     strategy_type: str
@@ -167,6 +167,15 @@ class RollChain(BaseModel):
     rolls: list[RollEvent] = Field(default_factory=list)
     original_open_date: Optional[datetime] = None
     original_open_credit: Optional[float] = None  # Net credit from original STO order
+    # True when the original opening fill is known and realized carry is provable.
+    history_complete: bool = True
+    # True when the terminal successor exactly matches a current open position.
+    is_open: bool = False
+    terminal_symbol: Optional[str] = None
+    # First closed symbol in the lineage (stable root identity).
+    root_symbol: Optional[str] = None
+    # Provenance: broker-synced chains may adjust P/L; legacy is display-only.
+    source: str = "legacy"
 
     @property
     def roll_count(self) -> int:
@@ -186,8 +195,15 @@ class RollChain(BaseModel):
 
     @property
     def total_roll_pnl(self) -> float:
-        """Cumulative P/L from all rolls."""
+        """Cumulative realized P/L from closed predecessors in this lineage."""
         return sum(roll.roll_pnl for roll in self.rolls)
+
+    @property
+    def roll_adjustment(self) -> float:
+        """Realized carry applied to an open terminal only when history is complete."""
+        if not self.history_complete or not self.is_open:
+            return 0.0
+        return self.total_roll_pnl
 
     @property
     def total_commission(self) -> float:
@@ -203,6 +219,14 @@ class RollChain(BaseModel):
     def pl_open(self) -> float:
         """P/L from original position open through all rolls (without current position)."""
         return self.net_pnl
+
+    def resolved_terminal_symbol(self) -> Optional[str]:
+        """Terminal successor symbol for the lineage."""
+        if self.terminal_symbol:
+            return self.terminal_symbol
+        if self.rolls:
+            return self.rolls[-1].new_symbol
+        return None
 
     def get_strike_history(self) -> list[float]:
         """List of strikes rolled through (old to new)."""
@@ -234,8 +258,15 @@ class RollChain(BaseModel):
             "underlying": self.underlying,
             "strategy_type": self.strategy_type,
             "account_number": self.account_number,
-            "original_open_date": self.original_open_date.isoformat() if self.original_open_date else None,
+            "original_open_date": (
+                self.original_open_date.isoformat() if self.original_open_date else None
+            ),
             "original_open_credit": self.original_open_credit,
+            "history_complete": self.history_complete,
+            "is_open": self.is_open,
+            "terminal_symbol": self.terminal_symbol,
+            "root_symbol": self.root_symbol or (self.rolls[0].old_symbol if self.rolls else None),
+            "source": self.source,
             "rolls": [roll.to_dict() for roll in self.rolls],
         }
 
@@ -243,10 +274,16 @@ class RollChain(BaseModel):
     def from_dict(cls, data: dict) -> "RollChain":
         """Create from dictionary."""
         rolls = [RollEvent.from_dict(r) for r in data.get("rolls", [])]
+        terminal = data.get("terminal_symbol")
+        if terminal is None and rolls:
+            terminal = rolls[-1].new_symbol
+        root = data.get("root_symbol")
+        if root is None and rolls:
+            root = rolls[0].old_symbol
         return cls(
             underlying=data["underlying"],
             strategy_type=data["strategy_type"],
-            account_number=data["account_number"],
+            account_number=data.get("account_number", ""),
             rolls=rolls,
             original_open_date=(
                 datetime.fromisoformat(data["original_open_date"])
@@ -254,4 +291,10 @@ class RollChain(BaseModel):
                 else None
             ),
             original_open_credit=data.get("original_open_credit"),
+            history_complete=bool(data.get("history_complete", True)),
+            is_open=bool(data.get("is_open", False)),
+            terminal_symbol=terminal,
+            root_symbol=root,
+            # Missing source is non-authoritative legacy (safe default).
+            source=str(data.get("source") or "legacy"),
         )

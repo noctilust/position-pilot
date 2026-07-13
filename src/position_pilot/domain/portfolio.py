@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Protocol
@@ -11,6 +12,7 @@ from ..models import Account, Greeks, Position
 from ..persistence.sqlite import PositionPilotDatabase
 from ..providers.router import FieldRouter
 from .accounts import AccountService
+from .rolls import RollService
 from .snapshots import (
     AccountSnapshot,
     DataFreshness,
@@ -23,6 +25,8 @@ from .snapshots import (
     StrategySnapshot,
 )
 from .strategies import StrategyService
+
+logger = logging.getLogger(__name__)
 
 
 class PortfolioSource(Protocol):
@@ -47,11 +51,13 @@ class PortfolioService:
         source: PortfolioSource,
         field_router: FieldRouter | None = None,
         clock: Callable[[], datetime] | None = None,
+        roll_service: RollService | None = None,
     ) -> None:
         self.database = database
         self.source = source
         self.field_router = field_router
         self.clock = clock or (lambda: datetime.now(UTC))
+        self.roll_service = roll_service
         self.accounts = AccountService(database)
         self.strategy_detector = StrategyService(database)
         self._current_snapshot: PortfolioSnapshot | None = None
@@ -151,6 +157,12 @@ class PortfolioService:
         broker_accounts = self.source.get_accounts()
         if not broker_accounts:
             raise ConnectionError("Broker returned no account data")
+        # unavailable ranks above partial/stale; never downgrade unavailable.
+        roll_panel_state = FreshnessState.FRESH
+        roll_panel_provider = "position-pilot"
+        # Track newest roll sync timestamp separately; fall back to captured_at only
+        # when no sync timestamp is available (do not initialize to captured_at).
+        newest_roll_sync: datetime | None = None
         for broker_account in broker_accounts:
             balances = self.source.get_account_balances(broker_account.account_number) or {}
             positions = self.source.get_positions(broker_account.account_number)
@@ -165,32 +177,69 @@ class PortfolioService:
                 captured_at,
                 position_provenance,
             )
-            accounts.append(account)
-            strategies.extend(
-                self.strategy_detector.snapshots(
-                    account.account_id,
-                    positions,
-                    captured_at,
-                    position_provenance,
-                )
+            account_strategies = self.strategy_detector.snapshots(
+                account.account_id,
+                positions,
+                captured_at,
+                position_provenance,
             )
+
+            # Automatic roll ledger sync (TTL-bounded, non-fatal).
+            if self.roll_service is not None:
+                try:
+                    sync_result = self.roll_service.sync_account_transactions(
+                        account.account_id,
+                        broker_account.account_number,
+                        positions,
+                    )
+                    if sync_result.synced_at is not None and (
+                        newest_roll_sync is None or sync_result.synced_at > newest_roll_sync
+                    ):
+                        newest_roll_sync = sync_result.synced_at
+                    if sync_result.status == "unavailable":
+                        roll_panel_state = FreshnessState.UNAVAILABLE
+                    elif sync_result.status == "partial":
+                        if roll_panel_state is not FreshnessState.UNAVAILABLE:
+                            roll_panel_state = FreshnessState.STALE
+                    adjusted_positions, account_strategies = (
+                        self.roll_service.apply_roll_adjustments(
+                            account.account_id,
+                            account.positions,
+                            account_strategies,
+                        )
+                    )
+                    account = account.model_copy(update={"positions": adjusted_positions})
+                except Exception as exc:  # noqa: BLE001 — positions must stay available
+                    logger.warning("Roll adjustment failed for %s: %s", account.account_id, exc)
+                    roll_panel_state = FreshnessState.UNAVAILABLE
+
+            accounts.append(account)
+            strategies.extend(account_strategies)
 
         totals = PortfolioTotals(
             net_liquidating_value=sum(account.net_liquidating_value for account in accounts),
             cash_balance=sum(account.cash_balance for account in accounts),
             buying_power=sum(account.buying_power for account in accounts),
+            # Keep broker raw unrealized semantics for risk/account totals.
             unrealized_pnl=sum(
                 position.unrealized_pnl for account in accounts for position in account.positions
             ),
         )
+        roll_as_of = newest_roll_sync if newest_roll_sync is not None else captured_at
+        freshness_by_panel = {
+            "portfolio": DataFreshness(as_of=captured_at, provider="tastytrade"),
+            "rolls": DataFreshness(
+                as_of=roll_as_of,
+                provider=roll_panel_provider,
+                state=roll_panel_state,
+            ),
+        }
         return PortfolioSnapshot(
             snapshot_id=str(uuid4()),
             captured_at=captured_at,
             state=SnapshotState.LIVE,
             freshness=DataFreshness(as_of=captured_at, provider="tastytrade"),
-            freshness_by_panel={
-                "portfolio": DataFreshness(as_of=captured_at, provider="tastytrade")
-            },
+            freshness_by_panel=freshness_by_panel,
             accounts=accounts,
             strategies=strategies,
             totals=totals,

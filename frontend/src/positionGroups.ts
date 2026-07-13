@@ -23,8 +23,45 @@ export type SymbolStrategyGroup = {
   stockCount: number;
   optionsCount: number;
   totalCount: number;
+  /** Raw broker unrealized sum (legacy; prefer openPnl for display). */
   unrealizedPnl: number;
+  /** Roll-adjusted P/L Open from current strategy legs once (no double-count). */
+  openPnl: number;
 };
+
+/**
+ * Display P/L Open for a strategy: prefer server pnl_open, else raw unrealized.
+ * Do not re-sum legs here — strategy rows already represent the current-leg total once.
+ */
+export function strategyOpenPnl(strategy: Strategy): number {
+  if (strategy.pnl_open != null && Number.isFinite(strategy.pnl_open)) {
+    return strategy.pnl_open;
+  }
+  return strategy.unrealized_pnl ?? 0;
+}
+
+/** Display P/L Open for a single leg. */
+export function legOpenPnl(leg: PositionLeg): number {
+  if (leg.pnl_open != null && Number.isFinite(leg.pnl_open)) {
+    return leg.pnl_open;
+  }
+  return leg.unrealized_pnl ?? 0;
+}
+
+/** Display percent for P/L Open when available. */
+export function strategyOpenPnlPercent(strategy: Strategy): number | null {
+  if (strategy.pnl_open_percent != null && Number.isFinite(strategy.pnl_open_percent)) {
+    return strategy.pnl_open_percent;
+  }
+  return strategy.unrealized_pnl_percent ?? null;
+}
+
+export function legOpenPnlPercent(leg: PositionLeg): number | null {
+  if (leg.pnl_open_percent != null && Number.isFinite(leg.pnl_open_percent)) {
+    return leg.pnl_open_percent;
+  }
+  return leg.unrealized_pnl_percent ?? null;
+}
 
 /** Stock-only strategy type names used when legs are absent. */
 const STOCK_STRATEGY_TYPES = new Set(["long stock", "short stock", "stock"]);
@@ -228,13 +265,16 @@ export function groupStrategiesBySymbol(
     let stockCount = 0;
     let optionsCount = 0;
     let unrealizedPnl = 0;
+    let openPnl = 0;
     for (const row of rows) {
       if (classifyStrategy(row) === "stock") {
         stockCount += 1;
       } else {
         optionsCount += 1;
       }
+      // Current strategy rows once — never strategy plus legs.
       unrealizedPnl += row.unrealized_pnl ?? 0;
+      openPnl += strategyOpenPnl(row);
     }
     return {
       symbol,
@@ -243,6 +283,7 @@ export function groupStrategiesBySymbol(
       optionsCount,
       totalCount: rows.length,
       unrealizedPnl,
+      openPnl,
     };
   });
 }

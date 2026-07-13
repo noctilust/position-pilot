@@ -3241,3 +3241,185 @@ test("catalyst risk gauges render accessible labels and semantic classes on Over
   // Confidence pill still present and distinct from risk gauge.
   await expect(detailSection.locator(".pill.confidence-confirmed")).toBeVisible();
 });
+
+test("positions show roll-adjusted P/L Open and compact roll indicator", async ({ page }) => {
+  await mockDashboardApis(page);
+  // Override portfolio after the shared mock; leave /portfolio/risk to shared handler.
+  await page.route("**/api/v1/portfolio**", async (route) => {
+    if (route.request().url().includes("/portfolio/risk")) {
+      return route.fallback();
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        schema_version: 1,
+        snapshot_id: "snap-roll-adjusted",
+        captured_at: "2026-07-13T16:30:00Z",
+        state: "live",
+        freshness: {
+          as_of: "2026-07-13T16:30:00Z",
+          provider: "tastytrade",
+          state: "fresh",
+        },
+        accounts: [
+          {
+            account_id: "public-account-id",
+            label: "Individual 1",
+            account_type: "Individual",
+            net_liquidating_value: 25000,
+            cash_balance: 5000,
+            buying_power: 10000,
+            pnl_today: 0,
+            positions: [],
+          },
+        ],
+        strategies: [
+          {
+            strategy_id: "mu-strangle",
+            account_id: "public-account-id",
+            underlying: "MU",
+            strategy_type: "Short Strangle",
+            expiration_date: "2025-02-21",
+            days_to_expiration: 30,
+            quantity: 1,
+            strikes: "$800/$1400",
+            unrealized_pnl: 584,
+            unrealized_pnl_percent: 12,
+            pnl_open: 945,
+            pnl_open_percent: 18,
+            roll_adjustment: 361,
+            roll_count: 1,
+            total_delta: -0.1,
+            total_theta: 20,
+            horizon: "tactical",
+            legs: [
+              {
+                symbol: "MU 250221P00800000",
+                underlying_symbol: "MU",
+                quantity: 1,
+                quantity_direction: "Short",
+                position_type: "Equity Option",
+                strike_price: 800,
+                option_type: "P",
+                expiration_date: "2025-02-21",
+                days_to_expiration: 30,
+                mark_price: 4.62,
+                market_value: -462,
+                unrealized_pnl: -212,
+                unrealized_pnl_percent: null,
+                pnl_open: -212,
+                roll_adjustment: 0,
+                roll_count: 0,
+                roll_history_status: "none",
+                delta: -0.2,
+                gamma: 0.01,
+                theta: 10,
+                vega: -0.1,
+                implied_volatility: 0.4,
+                multiplier: 100,
+                horizon: "tactical",
+              },
+              {
+                symbol: "MU 250221C01400000",
+                underlying_symbol: "MU",
+                quantity: 1,
+                quantity_direction: "Short",
+                position_type: "Equity Option",
+                strike_price: 1400,
+                option_type: "C",
+                expiration_date: "2025-02-21",
+                days_to_expiration: 30,
+                mark_price: 8.05,
+                market_value: -805,
+                unrealized_pnl: 796,
+                unrealized_pnl_percent: null,
+                pnl_open: 1157,
+                pnl_open_percent: 25,
+                roll_adjustment: 361,
+                roll_count: 1,
+                roll_history_status: "complete",
+                roll_chain_id: "call-chain",
+                delta: 0.1,
+                gamma: 0.01,
+                theta: 10,
+                vega: -0.1,
+                implied_volatility: 0.4,
+                multiplier: 100,
+                horizon: "tactical",
+              },
+            ],
+          },
+        ],
+        totals: {
+          net_liquidating_value: 25000,
+          cash_balance: 5000,
+          buying_power: 10000,
+          unrealized_pnl: 584,
+        },
+        selected_account_id: "public-account-id",
+        notice: null,
+      }),
+    });
+  });
+
+  const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";
+  await page.goto(`/?launch_token=${encodeURIComponent(launchToken)}`);
+  await expect(page.getByRole("button", { name: "Positions" })).toBeVisible();
+  await page.getByRole("button", { name: "Positions" }).click();
+  await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
+
+  const muHeader = page.locator("tr[data-level='0']").filter({ hasText: "MU" });
+  await expect(muHeader.locator(".symbol-group-pnl")).toContainText("$945");
+
+  const strangleRow = page
+    .locator("tr[data-level='1'].combined-strategy-row")
+    .filter({ hasText: "Short Strangle" });
+  await expect(strangleRow.locator(".pnl-metric")).toContainText("$945.00");
+  await expect(strangleRow.locator(".roll-pnl-indicator")).toContainText("R1");
+  await expect(strangleRow.locator(".roll-pnl-indicator")).toHaveAttribute(
+    "aria-label",
+    /realized carry/,
+  );
+
+  const callLeg = page.locator("tr[data-level='2']").filter({ hasText: "1400" });
+  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,157.00");
+  await expect(callLeg.locator(".roll-pnl-indicator")).toContainText("R1");
+
+  // Hierarchy hooks remain intact with roll-adjusted display.
+  await expect(page.locator("tr[data-level='0']")).toHaveCount(1);
+  await expect(page.locator("tr[data-level='1']")).toHaveCount(1);
+  await expect(page.locator("tr[data-level='2']:visible")).toHaveCount(2);
+});
+
+
+test("Roll chains table shows realized carry, lifetime credit, and status badges", async ({
+  page,
+}) => {
+  await mockDashboardApis(page);
+  const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";
+  await page.goto(`/?launch_token=${encodeURIComponent(launchToken)}`);
+  await page.getByRole("button", { name: "Roll analytics" }).click();
+  await expect(page.getByRole("heading", { name: "Roll chains" })).toBeVisible();
+
+  const table = page.getByRole("region", { name: "Roll chains table" });
+  await expect(table.getByRole("columnheader", { name: "Realized carry" })).toBeVisible();
+  await expect(table.getByRole("columnheader", { name: "Lifetime credit" })).toBeVisible();
+  await expect(table.getByRole("columnheader", { name: "Status" })).toBeVisible();
+
+  const firstRow = table.locator("tbody tr").first();
+  await expect(firstRow.locator(".roll-status-badge")).toBeVisible();
+  await expect(firstRow.locator(".roll-status-badge")).toHaveAttribute(
+    "aria-label",
+    /Complete|Partial/,
+  );
+});
+
+test("Positions column header is P/L Open", async ({ page }) => {
+  await mockDashboardApis(page);
+  const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";
+  await page.goto(`/?launch_token=${encodeURIComponent(launchToken)}`);
+  await page.getByRole("button", { name: "Positions" }).click();
+  await expect(
+    page.locator("th.positions-th-pnl"),
+  ).toHaveText(/P\/L Open/);
+});
