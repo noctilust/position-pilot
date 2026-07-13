@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from ..persistence.sqlite import PositionPilotDatabase
 from .account import AccountStreamEvent
-from .dxlink import MarketStreamEvent
+from .dxlink import MarketStreamEvent, browser_event_symbol
 
 
 class LiveEvent(BaseModel):
@@ -34,12 +34,17 @@ class LiveStateHub:
         self.subscribers.discard(queue)
 
     async def publish_market(self, event: MarketStreamEvent) -> None:
+        # Index by feed symbol and stable browser match key for local lookups.
         self.latest_market.setdefault(event.symbol, {})[event.event_type] = event.values
+        match_symbol = browser_event_symbol(event.symbol)
+        if match_symbol != event.symbol:
+            self.latest_market.setdefault(match_symbol, {})[event.event_type] = event.values
         await self.publish(
             LiveEvent(
                 event_type=f"market.{event.event_type}",
                 payload={
-                    "symbol": event.symbol,
+                    # OCC-normalized (or equity) so Positions can match legs without REST.
+                    "symbol": match_symbol,
                     "values": event.values,
                 },
                 received_at=datetime.now(UTC),

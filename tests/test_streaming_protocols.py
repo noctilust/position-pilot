@@ -10,7 +10,12 @@ from position_pilot.streaming.clients import (
     _periodic_send,
     _receive,
 )
-from position_pilot.streaming.dxlink import DxLinkProtocol, to_dxlink_symbol
+from position_pilot.streaming.dxlink import (
+    DxLinkProtocol,
+    browser_event_symbol,
+    from_dxlink_symbol,
+    to_dxlink_symbol,
+)
 
 
 def test_dxlink_protocol_builds_official_handshake_and_decodes_compact_feed() -> None:
@@ -62,6 +67,38 @@ def test_dxlink_subscription_normalizes_broker_occ_option_symbols() -> None:
     subscription = DxLinkProtocol.subscription(["SPY", "SPY   260821P00500000"])
     subscribed_symbols = {item["symbol"] for item in subscription["add"]}
     assert subscribed_symbols == {"SPY", ".SPY260821P500"}
+
+
+def test_dxlink_from_symbol_round_trips_options_and_equities() -> None:
+    assert from_dxlink_symbol("SPY") == "SPY"
+    assert from_dxlink_symbol("spy") == "SPY"
+    assert from_dxlink_symbol(".SPY260821P500") == "SPY   260821P00500000"
+    assert from_dxlink_symbol(".MU260731C1400") == "MU    260731C01400000"
+    assert from_dxlink_symbol(".BRK.B260821C450.5") == "BRK.B 260821C00450500"
+
+    # Round-trip representative OCC symbols (including decimal strike).
+    samples = [
+        "SPY   260821P00500000",
+        "MU    260731C01400000",
+        "BRK.B 260821C00450500",
+        "SPY",
+    ]
+    for sample in samples:
+        assert from_dxlink_symbol(to_dxlink_symbol(sample)) == (
+            sample if " " in sample or sample == "SPY" else sample
+        )
+        # Equity and options round-trip to the same DXLink form.
+        assert to_dxlink_symbol(from_dxlink_symbol(to_dxlink_symbol(sample))) == to_dxlink_symbol(
+            sample
+        )
+
+
+def test_browser_event_symbol_is_stable_match_key() -> None:
+    # Feed notation and padded OCC collapse to the same browser match key.
+    assert browser_event_symbol(".MU260731C1400") == "MU 260731C01400000"
+    assert browser_event_symbol("MU    260731C01400000") == "MU 260731C01400000"
+    assert browser_event_symbol("MU 260731C01400000") == "MU 260731C01400000"
+    assert browser_event_symbol("spy") == "SPY"
 
 
 def test_account_streamer_protocol_connects_then_accepts_full_notifications() -> None:

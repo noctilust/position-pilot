@@ -258,43 +258,35 @@ class PortfolioService:
             field_provenance: dict[str, FieldProvenance] = {}
             if position.is_option and position.mark_price is None:
                 mark = self.field_router.resolve("option.mark", position.symbol)
-                if mark is not None and isinstance(mark.value, (int, float)):
-                    mark_price = float(mark.value)
-                    market_value = mark_price * abs(position.quantity) * position.multiplier
-                    unrealized_pnl = (
-                        position.cost_basis - market_value
-                        if position.is_short
-                        else market_value - position.cost_basis
-                    )
-                    unrealized_pnl_percent = (
-                        (unrealized_pnl / abs(position.cost_basis)) * 100
-                        if position.cost_basis
-                        else None
-                    )
-                    updates.update(
-                        {
-                            "mark_price": mark_price,
-                            "market_value": market_value,
-                            "unrealized_pnl": unrealized_pnl,
-                            "unrealized_pnl_percent": unrealized_pnl_percent,
-                        }
-                    )
-                    field_provenance.update(
-                        {
-                            field: FieldProvenance(
-                                provider=mark.provider,
-                                observed_at=mark.observed_at,
-                                field=field,
-                                fallback_reason=mark.fallback_reason,
-                            )
-                            for field in (
-                                "mark_price",
-                                "market_value",
-                                "unrealized_pnl",
-                                "unrealized_pnl_percent",
-                            )
-                        }
-                    )
+                if mark is not None:
+                    # Same mark→P/L accounting as enrichment (no duplicated formula).
+                    working = position.model_copy()
+                    if working.apply_mark_price(mark.value):
+                        updates.update(
+                            {
+                                "mark_price": working.mark_price,
+                                "market_value": working.market_value,
+                                "unrealized_pnl": working.unrealized_pnl,
+                                "unrealized_pnl_percent": working.unrealized_pnl_percent,
+                            }
+                        )
+                        # Provenance only for fields actually rewritten by a valid mark.
+                        field_provenance.update(
+                            {
+                                field: FieldProvenance(
+                                    provider=mark.provider,
+                                    observed_at=mark.observed_at,
+                                    field=field,
+                                    fallback_reason=mark.fallback_reason,
+                                )
+                                for field in (
+                                    "mark_price",
+                                    "market_value",
+                                    "unrealized_pnl",
+                                    "unrealized_pnl_percent",
+                                )
+                            }
+                        )
             missing_greeks = position.greeks is None or any(
                 getattr(position.greeks, field) is None
                 for field in ("delta", "gamma", "theta", "vega", "implied_volatility")

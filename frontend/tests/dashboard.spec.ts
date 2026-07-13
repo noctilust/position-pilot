@@ -1,6 +1,258 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
+/**
+ * Controllable EventSource test double installed before app boot.
+ * Keeps the SSE pipe open (no short-body closure) so production onerror
+ * semantics stay strict while tests inject Quote / error / reopen.
+ */
+async function installControllableEventSource(page: Page) {
+  await page.addInitScript(() => {
+    type Handler = ((ev: Event) => void) | null;
+    type MessageHandler = ((ev: MessageEvent) => void) | null;
+
+    class ControllableEventSource {
+      static instances: ControllableEventSource[] = [];
+      url: string;
+      withCredentials = false;
+      readyState = 0;
+      onopen: Handler = null;
+      onerror: Handler = null;
+      onmessage: MessageHandler = null;
+      readonly CONNECTING = 0;
+      readonly OPEN = 1;
+      readonly CLOSED = 2;
+      private listeners = new Map<string, Set<(ev: Event) => void>>();
+
+      constructor(url: string | URL) {
+        this.url = String(url);
+        ControllableEventSource.instances.push(this);
+        const w = window as unknown as {
+          __sseInstances: ControllableEventSource[];
+          __sseEmit: (payload: unknown) => void;
+          __sseError: () => void;
+          __sseReopen: () => void;
+        };
+        w.__sseInstances = ControllableEventSource.instances;
+        w.__sseEmit = (payload: unknown) => {
+          const data =
+            typeof payload === "string" ? payload : JSON.stringify(payload);
+          for (const inst of ControllableEventSource.instances) {
+            if (inst.readyState === inst.CLOSED) continue;
+            const ev = new MessageEvent("message", { data });
+            inst.onmessage?.(ev);
+            inst._dispatch("message", ev);
+          }
+        };
+        w.__sseError = () => {
+          for (const inst of ControllableEventSource.instances) {
+            // Transport failed; leave closed so no accidental further messages.
+            inst.readyState = inst.CLOSED;
+            const ev = new Event("error");
+            inst.onerror?.(ev);
+            inst._dispatch("error", ev);
+          }
+        };
+        w.__sseReopen = () => {
+          for (const inst of ControllableEventSource.instances) {
+            inst.readyState = inst.OPEN;
+            const ev = new Event("open");
+            inst.onopen?.(ev);
+            inst._dispatch("open", ev);
+          }
+        };
+        queueMicrotask(() => {
+          this.readyState = this.OPEN;
+          const ev = new Event("open");
+          this.onopen?.(ev);
+          this._dispatch("open", ev);
+        });
+      }
+
+      addEventListener(type: string, listener: (ev: Event) => void) {
+        if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+        this.listeners.get(type)!.add(listener);
+      }
+
+      removeEventListener(type: string, listener: (ev: Event) => void) {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      _dispatch(type: string, ev: Event) {
+        this.listeners.get(type)?.forEach((fn) => fn(ev));
+      }
+
+      close() {
+        this.readyState = this.CLOSED;
+      }
+    }
+
+    Object.defineProperty(ControllableEventSource, "CONNECTING", { value: 0 });
+    Object.defineProperty(ControllableEventSource, "OPEN", { value: 1 });
+    Object.defineProperty(ControllableEventSource, "CLOSED", { value: 2 });
+    (window as unknown as { EventSource: typeof ControllableEventSource }).EventSource =
+      ControllableEventSource;
+  });
+}
+
+async function sseEmit(page: Page, payload: unknown) {
+  await page.evaluate((data) => {
+    (window as unknown as { __sseEmit: (p: unknown) => void }).__sseEmit(data);
+  }, payload);
+}
+
+async function sseError(page: Page) {
+  await page.evaluate(() => {
+    (window as unknown as { __sseError: () => void }).__sseError();
+  });
+}
+
+async function sseReopen(page: Page) {
+  await page.evaluate(() => {
+    (window as unknown as { __sseReopen: () => void }).__sseReopen();
+  });
+}
+
+/** Shared MU strangle fixture for live P/L browser tests. */
+function muLivePortfolioBody(snapshotId: string, overrides?: {
+  callPnlOpen?: number;
+  callMark?: number;
+  callRaw?: number;
+  strategyPnlOpen?: number;
+}) {
+  const callMark = overrides?.callMark ?? 4.05;
+  const callRaw = overrides?.callRaw ?? 1196;
+  const callPnlOpen = overrides?.callPnlOpen ?? 1557;
+  const strategyPnlOpen = overrides?.strategyPnlOpen ?? 1345;
+  return {
+    schema_version: 1,
+    snapshot_id: snapshotId,
+    captured_at: "2026-07-13T16:30:00Z",
+    state: "live",
+    freshness: {
+      as_of: "2026-07-13T16:30:00Z",
+      provider: "tastytrade",
+      state: "fresh",
+    },
+    accounts: [
+      {
+        account_id: "public-account-id",
+        label: "Individual 1",
+        account_type: "Individual",
+        net_liquidating_value: 25000,
+        cash_balance: 5000,
+        buying_power: 10000,
+        pnl_today: 0,
+        positions: [],
+      },
+    ],
+    strategies: [
+      {
+        strategy_id: "mu-strangle-live",
+        account_id: "public-account-id",
+        underlying: "MU",
+        strategy_type: "Short Strangle",
+        expiration_date: "2026-07-31",
+        days_to_expiration: 18,
+        quantity: 1,
+        strikes: "$800/$1400",
+        unrealized_pnl: -212 + callRaw,
+        unrealized_pnl_percent: 12,
+        pnl_open: strategyPnlOpen,
+        pnl_open_percent: 18,
+        roll_adjustment: 361,
+        roll_count: 1,
+        total_delta: -0.1,
+        total_theta: 20,
+        horizon: "tactical",
+        legs: [
+          {
+            symbol: "MU    260731P00800000",
+            underlying_symbol: "MU",
+            quantity: 1,
+            quantity_direction: "Short",
+            position_type: "Equity Option",
+            strike_price: 800,
+            option_type: "P",
+            expiration_date: "2026-07-31",
+            days_to_expiration: 18,
+            mark_price: 4.62,
+            market_value: 462,
+            cost_basis: 250,
+            unrealized_pnl: -212,
+            unrealized_pnl_percent: null,
+            pnl_open: -212,
+            pnl_open_basis: 250,
+            roll_adjustment: 0,
+            roll_count: 0,
+            roll_history_status: "none",
+            delta: -0.2,
+            gamma: 0.01,
+            theta: 10,
+            vega: -0.1,
+            implied_volatility: 0.4,
+            multiplier: 100,
+            horizon: "tactical",
+          },
+          {
+            symbol: "MU    260731C01400000",
+            underlying_symbol: "MU",
+            quantity: 1,
+            quantity_direction: "Short",
+            position_type: "Equity Option",
+            strike_price: 1400,
+            option_type: "C",
+            expiration_date: "2026-07-31",
+            days_to_expiration: 18,
+            mark_price: callMark,
+            market_value: callMark * 100,
+            cost_basis: 1601,
+            unrealized_pnl: callRaw,
+            unrealized_pnl_percent: null,
+            pnl_open: callPnlOpen,
+            pnl_open_percent: 25,
+            pnl_open_basis: 1962,
+            roll_adjustment: 361,
+            roll_count: 1,
+            roll_history_status: "complete",
+            roll_chain_id: "call-chain",
+            delta: 0.1,
+            gamma: 0.01,
+            theta: 10,
+            vega: -0.1,
+            implied_volatility: 0.4,
+            multiplier: 100,
+            horizon: "tactical",
+          },
+        ],
+      },
+    ],
+    totals: {
+      net_liquidating_value: 25000,
+      cash_balance: 5000,
+      buying_power: 10000,
+      unrealized_pnl: -212 + callRaw,
+    },
+    selected_account_id: "public-account-id",
+    notice: null,
+  };
+}
+
+const LIVE_CALL_QUOTE = {
+  event_type: "market.Quote",
+  payload: {
+    symbol: ".MU260731C1400",
+    values: {
+      eventType: "Quote",
+      eventSymbol: ".MU260731C1400",
+      bidPrice: 3.7,
+      askPrice: 3.75,
+      bidSize: 10,
+      askSize: 12,
+    },
+  },
+};
+
 async function mockDashboardApis(page: Page) {
   await page.route("**/api/v1/session/exchange", (route) =>
     route.fulfill({ status: 204 }),
@@ -3562,4 +3814,264 @@ test("Positions column header is P/L Open", async ({ page }) => {
   await expect(
     page.locator("th.positions-th-pnl"),
   ).toHaveText(/P\/L Open/);
+});
+
+/**
+ * Live Positions P/L from DXLink SSE Quote — child, combined, and symbol-group
+ * rows update together; unrolled sibling stays fixed; no portfolio REST refresh.
+ * Uses a controllable EventSource so the stream stays open (production onerror
+ * remains strict and is not weakened for short mock bodies).
+ */
+test("live market Quote SSE updates Positions P/L overlay without REST refresh", async ({
+  page,
+}) => {
+  await installControllableEventSource(page);
+  await mockDashboardApis(page);
+
+  let portfolioHits = 0;
+  await page.route("**/api/v1/portfolio**", async (route) => {
+    if (route.request().url().includes("/portfolio/risk")) {
+      return route.fallback();
+    }
+    portfolioHits += 1;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(muLivePortfolioBody("snap-live-pnl")),
+    });
+  });
+
+  await page.route("**/api/v1/streaming/status", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        market: { state: "live", error: null },
+        account: { state: "live", error: null },
+      }),
+    }),
+  );
+
+  const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";
+  await page.goto(`/?launch_token=${encodeURIComponent(launchToken)}`);
+  await expect(page.getByRole("button", { name: "Positions" })).toBeVisible();
+  // Wait for live stream status (onopen → status recheck).
+  await expect(page.locator(".local-clock.live")).toBeVisible({ timeout: 10_000 });
+  await page.getByRole("button", { name: "Positions" }).click();
+  await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
+
+  // Snapshot baseline before tick.
+  const callLeg = page.locator("tr[data-level='2']").filter({ hasText: "1400" });
+  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,557.00");
+
+  await sseEmit(page, LIVE_CALL_QUOTE);
+
+  // Live mark 3.725 → short raw 1601-372.5=1228.5 + carry 361 = 1589.5
+  // Combined: -212 + 1589.5 = 1377.5; put sibling stays -212.
+  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,589.50", {
+    timeout: 10_000,
+  });
+  const putLeg = page.locator("tr[data-level='2']").filter({ hasText: "800" });
+  await expect(putLeg.locator(".pnl-metric")).toContainText("-$212.00");
+
+  const strangleRow = page
+    .locator("tr[data-level='1'].combined-strategy-row")
+    .filter({ hasText: "Short Strangle" });
+  await expect(strangleRow.locator(".pnl-metric")).toContainText("$1,377.50");
+
+  const muHeader = page.locator("tr[data-level='0']").filter({ hasText: "MU" });
+  await expect(muHeader.locator(".symbol-group-pnl")).toContainText("$1,377.50");
+
+  // After live overlay settles, further SSE ticks must not trigger portfolio REST.
+  const hitsAfterLive = portfolioHits;
+  await sseEmit(page, LIVE_CALL_QUOTE);
+  await page.waitForTimeout(400);
+  expect(portfolioHits).toBe(hitsAfterLive);
+});
+
+test("SSE transport error immediately restores snapshot Positions P/L", async ({
+  page,
+}) => {
+  await installControllableEventSource(page);
+  await mockDashboardApis(page);
+
+  await page.route("**/api/v1/portfolio**", async (route) => {
+    if (route.request().url().includes("/portfolio/risk")) {
+      return route.fallback();
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(muLivePortfolioBody("snap-sse-error")),
+    });
+  });
+
+  // Backend market stream still reports live — transport failure must not wait
+  // on this and must still disable the overlay.
+  await page.route("**/api/v1/streaming/status", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        market: { state: "live", error: null },
+        account: { state: "live", error: null },
+      }),
+    }),
+  );
+
+  const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";
+  await page.goto(`/?launch_token=${encodeURIComponent(launchToken)}`);
+  await expect(page.locator(".local-clock.live")).toBeVisible({ timeout: 10_000 });
+  await page.getByRole("button", { name: "Positions" }).click();
+
+  const callLeg = page.locator("tr[data-level='2']").filter({ hasText: "1400" });
+  const putLeg = page.locator("tr[data-level='2']").filter({ hasText: "800" });
+  const strangleRow = page
+    .locator("tr[data-level='1'].combined-strategy-row")
+    .filter({ hasText: "Short Strangle" });
+  const muHeader = page.locator("tr[data-level='0']").filter({ hasText: "MU" });
+
+  await sseEmit(page, LIVE_CALL_QUOTE);
+  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,589.50", {
+    timeout: 10_000,
+  });
+  await expect(strangleRow.locator(".pnl-metric")).toContainText("$1,377.50");
+  await expect(muHeader.locator(".symbol-group-pnl")).toContainText("$1,377.50");
+
+  // Simulate browser SSE pipe failure while hub status remains "live".
+  await sseError(page);
+
+  await expect(page.locator(".local-clock.degraded")).toBeVisible({ timeout: 5_000 });
+  // Authoritative snapshot values restored for child, parent, and symbol total.
+  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,557.00");
+  await expect(putLeg.locator(".pnl-metric")).toContainText("-$212.00");
+  await expect(strangleRow.locator(".pnl-metric")).toContainText("$1,345.00");
+  await expect(muHeader.locator(".symbol-group-pnl")).toContainText("$1,345");
+
+  // Reopen + status live without a new quote must still show snapshot (marks cleared).
+  await sseReopen(page);
+  await expect(page.locator(".local-clock.live")).toBeVisible({ timeout: 5_000 });
+  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,557.00");
+  await expect(strangleRow.locator(".pnl-metric")).toContainText("$1,345.00");
+  await expect(muHeader.locator(".symbol-group-pnl")).toContainText("$1,345");
+  await expect(callLeg.locator(".pnl-metric")).not.toContainText("$1,589.50");
+
+  // A *new* quote repopulates marks and restores the live overlay.
+  await sseEmit(page, LIVE_CALL_QUOTE);
+  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,589.50", {
+    timeout: 10_000,
+  });
+  await expect(strangleRow.locator(".pnl-metric")).toContainText("$1,377.50");
+  await expect(muHeader.locator(".symbol-group-pnl")).toContainText("$1,377.50");
+});
+
+test("degraded streaming keeps snapshot Positions P/L despite market Quote SSE", async ({
+  page,
+}) => {
+  await installControllableEventSource(page);
+  await mockDashboardApis(page);
+
+  await page.route("**/api/v1/portfolio**", async (route) => {
+    if (route.request().url().includes("/portfolio/risk")) {
+      return route.fallback();
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(muLivePortfolioBody("snap-live-degraded")),
+    });
+  });
+
+  await page.route("**/api/v1/streaming/status", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        market: { state: "degraded", error: "stale" },
+        account: { state: "degraded", error: "stale" },
+      }),
+    }),
+  );
+
+  const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";
+  await page.goto(`/?launch_token=${encodeURIComponent(launchToken)}`);
+  await page.getByRole("button", { name: "Positions" }).click();
+  await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
+
+  await sseEmit(page, LIVE_CALL_QUOTE);
+  await page.waitForTimeout(300);
+
+  // Snapshot values remain — live tick must not blank or override when degraded.
+  const callLeg = page.locator("tr[data-level='2']").filter({ hasText: "1400" });
+  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,557.00");
+  const putLeg = page.locator("tr[data-level='2']").filter({ hasText: "800" });
+  await expect(putLeg.locator(".pnl-metric")).toContainText("-$212.00");
+  const muHeader = page.locator("tr[data-level='0']").filter({ hasText: "MU" });
+  await expect(muHeader.locator(".symbol-group-pnl")).toContainText("$1,345");
+});
+
+/**
+ * A newer REST snapshot (changed snapshot_id) must retire prior live marks so
+ * authoritative snapshot B is shown rather than a mark received under snapshot A.
+ */
+test("new REST snapshot_id retires prior live marks", async ({ page }) => {
+  await installControllableEventSource(page);
+  await mockDashboardApis(page);
+
+  let snapshotId = "snap-A";
+  await page.route("**/api/v1/portfolio**", async (route) => {
+    if (route.request().url().includes("/portfolio/risk")) {
+      return route.fallback();
+    }
+    const body =
+      snapshotId === "snap-A"
+        ? muLivePortfolioBody("snap-A")
+        : muLivePortfolioBody("snap-B", {
+            // Distinct authoritative mark/P&L that old live overlay would contradict.
+            callMark: 2.0,
+            callRaw: 1401,
+            callPnlOpen: 1762,
+            strategyPnlOpen: 1550, // -212 + 1762
+          });
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+  });
+
+  await page.route("**/api/v1/streaming/status", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        market: { state: "live", error: null },
+        account: { state: "live", error: null },
+      }),
+    }),
+  );
+
+  const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";
+  await page.goto(`/?launch_token=${encodeURIComponent(launchToken)}`);
+  await expect(page.locator(".local-clock.live")).toBeVisible({ timeout: 10_000 });
+  await page.getByRole("button", { name: "Positions" }).click();
+
+  const callLeg = page.locator("tr[data-level='2']").filter({ hasText: "1400" });
+  const strangleRow = page
+    .locator("tr[data-level='1'].combined-strategy-row")
+    .filter({ hasText: "Short Strangle" });
+  const muHeader = page.locator("tr[data-level='0']").filter({ hasText: "MU" });
+
+  // Mark under snapshot A → live overlay 1589.50.
+  await sseEmit(page, LIVE_CALL_QUOTE);
+  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,589.50", {
+    timeout: 10_000,
+  });
+
+  // Authoritative snapshot B arrives (e.g. portfolio.reconciled) without a new tick.
+  snapshotId = "snap-B";
+  await sseEmit(page, {
+    event_type: "portfolio.reconciled",
+    payload: { reconcile: true },
+  });
+
+  // Snapshot B displayed — not the pre-B live mark (1589.50).
+  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,762.00", {
+    timeout: 10_000,
+  });
+  await expect(strangleRow.locator(".pnl-metric")).toContainText("$1,550.00");
+  await expect(muHeader.locator(".symbol-group-pnl")).toContainText("$1,550");
+  await expect(callLeg.locator(".pnl-metric")).not.toContainText("$1,589.50");
 });

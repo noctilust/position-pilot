@@ -10,7 +10,7 @@ import httpx
 from dotenv import load_dotenv
 
 from ..cache import Cache
-from ..models.position import Account, Greeks, Position, PositionType
+from ..models.position import Account, Greeks, Position, PositionType, is_valid_mark_price
 from ..models.transaction import Order, OrderStatus, Transaction, TransactionType
 
 # Load .env file from project root
@@ -430,8 +430,10 @@ class TastytradeClient:
                 vega=quote.get("vega"),
                 implied_volatility=quote.get("implied_volatility"),
             )
-            if quote.get("mark"):
-                position.mark_price = quote["mark"]
+            mark = quote.get("mark")
+            # Zero is valid; reject missing / NaN / inf / negative without corruption.
+            if is_valid_mark_price(mark):
+                position.apply_mark_price(float(mark))
 
         return position
 
@@ -470,8 +472,10 @@ class TastytradeClient:
                     vega=quote.get("vega"),
                     implied_volatility=quote.get("implied_volatility"),
                 )
-                if quote.get("mark"):
-                    positions[i].mark_price = quote["mark"]
+                mark = quote.get("mark")
+                if is_valid_mark_price(mark):
+                    # Recompute market value / raw P/L whenever enrichment moves the mark.
+                    positions[i].apply_mark_price(float(mark))
 
                 # Add underlying price for extrinsic value calculation
                 if pos.underlying_symbol in underlying_quotes:

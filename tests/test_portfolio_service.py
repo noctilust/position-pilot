@@ -193,3 +193,81 @@ def test_missing_option_fields_use_routed_fallback_with_provenance(tmp_path) -> 
     assert position.provenance["mark_price"].fallback_reason == ("tastytrade returned no value")
     assert position.provenance["delta"].provider == "tastytrade"
     assert snapshot.strategies[0].legs[0].provenance["theta"].provider == "massive-options"
+
+
+def test_invalid_fallback_mark_does_not_record_mark_provenance(tmp_path) -> None:
+    """Rejected fallback marks must not claim provenance for unchanged fields."""
+    observed_at = datetime(2026, 7, 11, 16, 29, tzinfo=UTC)
+
+    class OptionSource(FakePortfolioSource):
+        def get_accounts(self) -> list[Account]:
+            return [Account(account_number="5WT12345", account_type="Individual")]
+
+        def get_positions(self, account_number: str) -> list[Position]:
+            return [
+                Position(
+                    symbol="SPY   260821C00550000",
+                    underlying_symbol="SPY",
+                    quantity=1,
+                    position_type=PositionType.EQUITY_OPTION,
+                    average_open_price=3.0,
+                    cost_basis=300.0,
+                    mark_price=None,
+                    market_value=0.0,
+                    unrealized_pnl=0.0,
+                    greeks=Greeks(delta=0.4, theta=-0.05, gamma=0.01, vega=0.1),
+                    multiplier=100,
+                )
+            ]
+
+    class EmptyProvider:
+        name = "tastytrade"
+
+        def fetch(self, field: str, symbol: str):
+            return None
+
+        def health(self) -> ProviderHealth:
+            return ProviderHealth(provider=self.name, state=ProviderState.UNAVAILABLE)
+
+    class InvalidMarkProvider(EmptyProvider):
+        name = "massive-options"
+
+        def fetch(self, field: str, symbol: str) -> ProviderValue | None:
+            if field != "option.mark":
+                return None
+            return ProviderValue(
+                field=field,
+                value=float("nan"),
+                provider=self.name,
+                observed_at=observed_at,
+            )
+
+    providers = [EmptyProvider(), InvalidMarkProvider()]
+    router = FieldRouter(
+        providers={provider.name: provider for provider in providers},
+        routes={
+            "option.mark": ["tastytrade", "massive-options"],
+            "option.greeks": ["tastytrade", "massive-options"],
+        },
+    )
+    service = PortfolioService(
+        database=PositionPilotDatabase(tmp_path / "position-pilot.sqlite3"),
+        source=OptionSource(),
+        field_router=router,
+    )
+
+    snapshot = service.refresh()
+    position = snapshot.accounts[0].positions[0]
+
+    # Accounting stays at broker/parse values; invalid NaN mark is not applied.
+    assert position.mark_price is None
+    assert position.market_value == 0.0
+    assert position.unrealized_pnl == 0.0
+    # No fallback provenance for mark accounting (provider would be massive-options).
+    assert "mark_price" not in position.provenance
+    assert "unrealized_pnl_percent" not in position.provenance
+    for field in ("market_value", "unrealized_pnl"):
+        prov = position.provenance.get(field)
+        if prov is not None:
+            assert prov.provider != "massive-options"
+            assert prov.fallback_reason is None

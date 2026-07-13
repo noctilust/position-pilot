@@ -1,11 +1,20 @@
 """Data models for positions and accounts."""
 
 from datetime import date, datetime
-from decimal import Decimal
 from enum import Enum
-from typing import Optional
+from math import isfinite
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
+
+
+def is_valid_mark_price(mark: Any) -> bool:
+    """True when mark is a usable market price: finite and >= 0 (zero is valid)."""
+    if isinstance(mark, bool):
+        return False
+    if isinstance(mark, (int, float)):
+        return isfinite(mark) and mark >= 0
+    return False
 
 
 class PositionType(str, Enum):
@@ -71,6 +80,31 @@ class Position(BaseModel):
     def is_short(self) -> bool:
         return self.quantity_direction == "Short" or self.quantity < 0
 
+    def apply_mark_price(self, mark: float) -> bool:
+        """Set mark and recompute market value plus raw unrealized P/L fields.
+
+        Shared by single-position and batch enrichment so mark updates cannot
+        leave market_value / unrealized_pnl stale relative to cost basis.
+
+        Returns True when the mark was applied. Invalid marks (missing, NaN,
+        infinity, negative) leave the model unchanged and return False.
+        Zero is a valid mark and recomputes accounting.
+        """
+        if not is_valid_mark_price(mark):
+            return False
+        price = float(mark)
+        self.mark_price = price
+        self.market_value = price * abs(self.quantity) * self.multiplier
+        if self.is_short:
+            self.unrealized_pnl = self.cost_basis - self.market_value
+        else:
+            self.unrealized_pnl = self.market_value - self.cost_basis
+        if self.cost_basis != 0:
+            self.unrealized_pnl_percent = (self.unrealized_pnl / abs(self.cost_basis)) * 100
+        else:
+            self.unrealized_pnl_percent = None
+        return True
+
     @property
     def display_quantity(self) -> str:
         """Display quantity with direction."""
@@ -98,7 +132,12 @@ class Position(BaseModel):
     @property
     def extrinsic_value(self) -> Optional[float]:
         """Calculate extrinsic (time) value of option."""
-        if not self.is_option or not self.mark_price or not self.strike_price or not self.underlying_price:
+        if (
+            not self.is_option
+            or not self.mark_price
+            or not self.strike_price
+            or not self.underlying_price
+        ):
             return None
 
         intrinsic = self.intrinsic_value or 0

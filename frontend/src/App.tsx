@@ -68,6 +68,15 @@ import {
   type RollLedgerEvent,
 } from "./rollLedger";
 import {
+  applyMarketEventToMarks,
+  heldMatchKeysFromStrategies,
+  overlayLivePnlOnStrategies,
+  pruneLiveMarks,
+  retireLiveMarksIfSnapshotChanged,
+  type LiveMarkMap,
+  type LiveMarkState,
+} from "./livePnl";
+import {
   clampPnlBarPercent,
   countStrategiesByCategory,
   filterStrategiesByCategory,
@@ -181,6 +190,12 @@ function App() {
     "connecting",
   );
   const [liveMarketTick, setLiveMarketTick] = useState<LiveMarketTick | null>(null);
+  /** In-memory DXLink marks for Positions P/L overlay (not persisted). */
+  const [liveMarks, setLiveMarks] = useState<LiveMarkMap>(() => new Map());
+  const liveMarksRef = useRef<LiveMarkMap>(new Map());
+  const liveMarksFlushRaf = useRef<number | null>(null);
+  /** Last authoritative snapshot_id for which live marks may apply. */
+  const liveMarksSnapshotIdRef = useRef<string | null>(null);
   const portfolioRequest = useRef(0);
   const rollsRequest = useRef(0);
   const detailRequest = useRef(0);
@@ -406,8 +421,21 @@ function App() {
     const refreshStatus = () => {
       void fetchStreamingState().then(setLiveState);
     };
+    // Successful (re)open may re-enable overlay via hub status; marks stay empty
+    // until a *new* tick arrives (error path clears the map).
     events.onopen = refreshStatus;
-    events.onerror = () => setLiveState("degraded");
+    // Transport failure must make the overlay unusable immediately and retire
+    // retained marks. A later 30s status poll may report hub "live" while the
+    // browser EventSource is still dead — stale marks must not reappear.
+    events.onerror = () => {
+      setLiveState("degraded");
+      if (liveMarksFlushRaf.current != null) {
+        window.cancelAnimationFrame(liveMarksFlushRaf.current);
+        liveMarksFlushRaf.current = null;
+      }
+      liveMarksRef.current = new Map();
+      setLiveMarks(new Map());
+    };
     events.onmessage = (message) => {
       const event = JSON.parse(message.data) as {
         event_type: string;
@@ -424,14 +452,57 @@ function App() {
           symbol: event.payload.symbol,
           price: typeof rawPrice === "number" ? rawPrice : null,
         });
+        // Positions P/L overlay from stream ticks only — no broker REST.
+        const changed = applyMarketEventToMarks(
+          liveMarksRef.current,
+          event.event_type,
+          event.payload.symbol,
+          values,
+        );
+        if (changed && liveMarksFlushRaf.current == null) {
+          liveMarksFlushRaf.current = window.requestAnimationFrame(() => {
+            liveMarksFlushRaf.current = null;
+            setLiveMarks(new Map(liveMarksRef.current));
+          });
+        }
       }
     };
     const statusTimer = window.setInterval(refreshStatus, 30_000);
     return () => {
       events.close();
       window.clearInterval(statusTimer);
+      if (liveMarksFlushRaf.current != null) {
+        window.cancelAnimationFrame(liveMarksFlushRaf.current);
+        liveMarksFlushRaf.current = null;
+      }
     };
   }, [loadCatalysts, loadPortfolio, selectedAccountId, state.kind]);
+
+  // Retire marks on new authoritative snapshot_id; prune closed legs otherwise.
+  useEffect(() => {
+    if (portfolio.kind !== "ready") return;
+    const snapshotId = portfolio.snapshot.snapshot_id;
+    const retired = retireLiveMarksIfSnapshotChanged(
+      liveMarksRef.current,
+      liveMarksSnapshotIdRef.current,
+      snapshotId,
+    );
+    liveMarksSnapshotIdRef.current = snapshotId;
+    if (!retired) {
+      const held = heldMatchKeysFromStrategies(portfolio.snapshot.strategies ?? []);
+      pruneLiveMarks(liveMarksRef.current, held);
+    }
+    setLiveMarks((prev) => {
+      if (
+        !retired &&
+        prev.size === liveMarksRef.current.size &&
+        [...prev.keys()].every((key) => liveMarksRef.current.has(key))
+      ) {
+        return prev;
+      }
+      return new Map(liveMarksRef.current);
+    });
+  }, [portfolio]);
 
   const openStrategy = async (strategyId: string) => {
     const request = ++detailRequest.current;
@@ -516,6 +587,8 @@ function App() {
           {activeSection === "Positions" ? (
             <PositionsSection
               snapshot={snapshot}
+              liveMarks={liveMarks}
+              liveState={liveState}
               onSelectStrategy={(id) => void openStrategy(id)}
               orders={orders}
               catalysts={catalysts}
@@ -1484,6 +1557,8 @@ function SingleLegStrategyIdentity({ strategy }: { strategy: Strategy }) {
 
 function PositionsSection({
   snapshot,
+  liveMarks,
+  liveState,
   onSelectStrategy,
   orders,
   catalysts,
@@ -1492,6 +1567,8 @@ function PositionsSection({
   onOpenRollAnalytics,
 }: {
   snapshot: PortfolioSnapshot | null;
+  liveMarks: ReadonlyMap<string, LiveMarkState>;
+  liveState: "connecting" | "live" | "degraded" | "disabled";
   onSelectStrategy: (id: string) => void;
   orders: OrderRow[];
   catalysts: CatalystScanSnapshot | null;
@@ -1499,7 +1576,14 @@ function PositionsSection({
   rollsLoading: boolean;
   onOpenRollAnalytics: () => void;
 }) {
-  const strategies = snapshot?.strategies ?? [];
+  const snapshotStrategies = snapshot?.strategies ?? [];
+  // Live ticks are display-only while streaming is healthy; degraded falls back.
+  const streamUsable = liveState === "live";
+  const strategies = useMemo(
+    () =>
+      overlayLivePnlOnStrategies(snapshotStrategies, liveMarks, { streamUsable }),
+    [snapshotStrategies, liveMarks, streamUsable],
+  );
   const [orderPage, setOrderPage] = useState(0);
   const [showStock, setShowStock] = useState(true);
   const [showOptions, setShowOptions] = useState(true);

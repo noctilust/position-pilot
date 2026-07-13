@@ -39,6 +39,8 @@ EVENT_FIELDS = {
     ],
 }
 OCC_SYMBOL = re.compile(r"^([A-Z0-9.]+)\s+(\d{6})([CP])(\d{8})$")
+# DXLink option: .<root><YYMMDD><C|P><strike> with optional decimal strike.
+DXLINK_OPTION = re.compile(r"^\.([A-Z0-9.]+?)(\d{6})([CP])(\d+(?:\.\d+)?)$")
 
 
 def to_dxlink_symbol(symbol: str) -> str:
@@ -54,6 +56,39 @@ def to_dxlink_symbol(symbol: str) -> str:
     strike = int(encoded_strike) / 1000
     strike_text = f"{strike:.3f}".rstrip("0").rstrip(".")
     return f".{root}{expiration}{option_type}{strike_text}"
+
+
+def from_dxlink_symbol(symbol: str) -> str:
+    """Convert DXLink option notation to broker OCC, or pass through equities.
+
+    Examples:
+    - ``.MU260731C1400`` → ``MU    260731C01400000`` (6-char root field)
+    - ``.BRK.B260821C450.5`` → ``BRK.B 260821C00450500``
+    - ``SPY`` → ``SPY``
+    """
+
+    normalized = symbol.strip().upper()
+    if not normalized.startswith("."):
+        return normalized
+    match = DXLINK_OPTION.fullmatch(normalized)
+    if match is None:
+        return normalized
+    root, expiration, option_type, strike_text = match.groups()
+    encoded_strike = int(round(float(strike_text) * 1000))
+    root_field = f"{root:<6}"
+    return f"{root_field}{expiration}{option_type}{encoded_strike:08d}"
+
+
+def browser_event_symbol(symbol: str) -> str:
+    """Stable browser-facing match key for market SSE events.
+
+    Options are converted DXLink → OCC then whitespace-normalized so portfolio
+    legs (padded or single-spaced OCC) match stream ticks without private ids.
+    Equities pass through uppercased.
+    """
+
+    converted = from_dxlink_symbol(symbol)
+    return " ".join(converted.split()).upper()
 
 
 class MarketStreamEvent(BaseModel):
