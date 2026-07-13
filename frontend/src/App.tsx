@@ -1336,9 +1336,50 @@ function formatPremiumEffect(value: number): { text: string; kind: "credit" | "d
 const POSITIONS_TABLE_COL_COUNT = 8;
 
 /**
+ * Compact roll badge (R1 / R?) with realized-carry tooltip.
+ * Rendered after the fixed-width option contract strip — never inside P/L cells
+ * or on combined strategy / equity identity rows.
+ */
+function RollPnlIndicator({
+  rollCount = 0,
+  rollAdjustment = 0,
+  rollHistoryStatus = "none",
+}: {
+  rollCount?: number;
+  rollAdjustment?: number;
+  rollHistoryStatus?: string;
+}) {
+  const showRoll =
+    (rollCount ?? 0) > 0 ||
+    rollHistoryStatus === "partial" ||
+    rollHistoryStatus === "complete";
+  if (!showRoll) return null;
+
+  const rollTitle =
+    rollHistoryStatus === "partial"
+      ? `Rolled ${rollCount || "?"}× — history incomplete; raw P/L shown`
+      : rollCount > 0
+        ? `Rolled ${rollCount}× · realized carry ${currency(rollAdjustment)}`
+        : undefined;
+
+  return (
+    <span
+      className={`roll-pnl-indicator${
+        rollHistoryStatus === "partial" ? " roll-pnl-indicator-partial" : ""
+      }`}
+      title={rollTitle}
+      aria-label={rollTitle}
+    >
+      {rollHistoryStatus === "partial" ? "R?" : `R${rollCount || ""}`}
+    </span>
+  );
+}
+
+/**
  * Compact fixed-track contract grid for a leg in the main positions table first cell.
  * Tracks: qty | exp | dte | strike | C/P (equity spans label across non-qty tracks).
  * Visual segments use graphite bands; full phrase is exposed only via sr-only.
+ * Option legs may trail a roll badge as a sibling after the fixed-width strip.
  */
 function LegContractIdentity({ leg }: { leg: PositionLeg }) {
   const identity = getLegIdentitySegments(leg);
@@ -1357,43 +1398,45 @@ function LegContractIdentity({ leg }: { leg: PositionLeg }) {
   }
 
   // Always render every option track so column positions stay fixed across legs.
+  // Roll badge is a sibling after the fixed-width strip (never inside the grid).
   return (
-    <span className="contract-identity contract-identity-option" title={contractTitle}>
-      <span className="sr-only">{identity.accessibleLabel}</span>
-      <span className="contract-strip contract-grid" aria-hidden="true">
-        <span className="contract-seg contract-qty">{identity.signedQuantity}</span>
-        <span className="contract-seg contract-exp">
-          {identity.expiration ?? ""}
-        </span>
-        <span className="contract-seg contract-dte">{identity.dte ?? ""}</span>
-        <span className="contract-seg contract-strike">
-          {identity.strike ?? ""}
-        </span>
-        <span className="contract-seg contract-type">
-          {identity.optionType ?? ""}
+    <span className="leg-contract-identity-row">
+      <span className="contract-identity contract-identity-option" title={contractTitle}>
+        <span className="sr-only">{identity.accessibleLabel}</span>
+        <span className="contract-strip contract-grid" aria-hidden="true">
+          <span className="contract-seg contract-qty">{identity.signedQuantity}</span>
+          <span className="contract-seg contract-exp">
+            {identity.expiration ?? ""}
+          </span>
+          <span className="contract-seg contract-dte">{identity.dte ?? ""}</span>
+          <span className="contract-seg contract-strike">
+            {identity.strike ?? ""}
+          </span>
+          <span className="contract-seg contract-type">
+            {identity.optionType ?? ""}
+          </span>
         </span>
       </span>
+      <RollPnlIndicator
+        rollCount={leg.roll_count ?? 0}
+        rollAdjustment={leg.roll_adjustment ?? 0}
+        rollHistoryStatus={leg.roll_history_status ?? "none"}
+      />
     </span>
   );
 }
 
 /**
  * P/L Open: signed currency plus optional restrained percent bar.
- * When rolls apply, a compact indicator exposes roll count and realized carry.
  * Color is not the only signal — signed text remains in the accessibility tree.
+ * Roll badges live on the option contract identity, not in this cell.
  */
 function UnrealizedPnlCell({
   value,
   percent,
-  rollCount = 0,
-  rollAdjustment = 0,
-  rollHistoryStatus = "none",
 }: {
   value: number;
   percent: number | null | undefined;
-  rollCount?: number;
-  rollAdjustment?: number;
-  rollHistoryStatus?: string;
 }) {
   const hasPercent = percent != null && Number.isFinite(percent);
   const barWidth = hasPercent ? clampPnlBarPercent(percent) : 0;
@@ -1408,32 +1451,11 @@ function UnrealizedPnlCell({
   const percentLabel = hasPercent
     ? `${percent > 0 ? "+" : ""}${percent.toFixed(1)}%`
     : null;
-  const showRoll =
-    (rollCount ?? 0) > 0 ||
-    rollHistoryStatus === "partial" ||
-    rollHistoryStatus === "complete";
-  const rollTitle =
-    rollHistoryStatus === "partial"
-      ? `Rolled ${rollCount || "?"}× — history incomplete; raw P/L shown`
-      : rollCount > 0
-        ? `Rolled ${rollCount}× · realized carry ${currency(rollAdjustment)}`
-        : undefined;
 
   return (
     <div className={`pnl-metric pnl-metric-${tone}`}>
       <div className="pnl-metric-value-row">
         <span className="pnl-metric-value tabular">{currency(value)}</span>
-        {showRoll ? (
-          <span
-            className={`roll-pnl-indicator${
-              rollHistoryStatus === "partial" ? " roll-pnl-indicator-partial" : ""
-            }`}
-            title={rollTitle}
-            aria-label={rollTitle}
-          >
-            {rollHistoryStatus === "partial" ? "R?" : `R${rollCount || ""}`}
-          </span>
-        ) : null}
         {hasPercent ? (
           <span className={`pnl-metric-percent tabular pnl-metric-percent-${percentTone}`}>
             <span className="sr-only">P/L Open </span>
@@ -1862,17 +1884,6 @@ function PositionsSection({
                                   <UnrealizedPnlCell
                                     value={strategyOpenPnl(strategy)}
                                     percent={strategyOpenPnlPercent(strategy)}
-                                    rollCount={strategy.roll_count ?? 0}
-                                    rollAdjustment={strategy.roll_adjustment ?? 0}
-                                    rollHistoryStatus={
-                                      (strategy.legs ?? []).some(
-                                        (leg) => leg.roll_history_status === "partial",
-                                      )
-                                        ? "partial"
-                                        : (strategy.roll_count ?? 0) > 0
-                                          ? "complete"
-                                          : "none"
-                                    }
                                   />
                                 </td>
                               </tr>
@@ -1921,11 +1932,6 @@ function PositionsSection({
                                           <UnrealizedPnlCell
                                             value={legOpenPnl(leg)}
                                             percent={legOpenPnlPercent(leg)}
-                                            rollCount={leg.roll_count ?? 0}
-                                            rollAdjustment={leg.roll_adjustment ?? 0}
-                                            rollHistoryStatus={
-                                              leg.roll_history_status ?? "none"
-                                            }
                                           />
                                         </td>
                                       </tr>

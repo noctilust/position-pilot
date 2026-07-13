@@ -3367,7 +3367,9 @@ test("catalyst risk gauges render accessible labels and semantic classes on Over
   await expect(detailSection.locator(".pill.confidence-confirmed")).toBeVisible();
 });
 
-test("positions show roll-adjusted P/L Open and compact roll indicator", async ({ page }) => {
+test("positions show roll-adjusted P/L Open with roll badge on option contract identity", async ({
+  page,
+}) => {
   await mockDashboardApis(page);
   // Override portfolio after the shared mock; leave /portfolio/risk to shared handler.
   await page.route("**/api/v1/portfolio**", async (route) => {
@@ -3496,19 +3498,32 @@ test("positions show roll-adjusted P/L Open and compact roll indicator", async (
   const muHeader = page.locator("tr[data-level='0']").filter({ hasText: "MU" });
   await expect(muHeader.locator(".symbol-group-pnl")).toContainText("$945");
 
+  // Combined strategy row: roll-adjusted P/L values stay, but never a roll badge.
   const strangleRow = page
     .locator("tr[data-level='1'].combined-strategy-row")
     .filter({ hasText: "Short Strangle" });
   await expect(strangleRow.locator(".pnl-metric")).toContainText("$945.00");
-  await expect(strangleRow.locator(".roll-pnl-indicator")).toContainText("R1");
-  await expect(strangleRow.locator(".roll-pnl-indicator")).toHaveAttribute(
+  await expect(strangleRow.locator(".roll-pnl-indicator")).toHaveCount(0);
+
+  // Rolled 1400C child: exactly one R1 immediately after the contract strip.
+  const callLeg = page.locator("tr[data-level='2']").filter({ hasText: "1400" });
+  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,157.00");
+  await expect(callLeg.locator(".positions-td-pnl .roll-pnl-indicator")).toHaveCount(0);
+  await expect(callLeg.locator(".roll-pnl-indicator")).toHaveCount(1);
+  await expect(callLeg.locator(".roll-pnl-indicator")).toContainText("R1");
+  await expect(callLeg.locator(".roll-pnl-indicator")).toHaveAttribute(
     "aria-label",
     /realized carry/,
   );
+  // Badge is a sibling after .contract-identity (not nested inside the fixed strip).
+  await expect(
+    callLeg.locator(".leg-contract-identity-row > .contract-identity + .roll-pnl-indicator"),
+  ).toHaveCount(1);
+  await expect(callLeg.locator(".contract-identity .roll-pnl-indicator")).toHaveCount(0);
 
-  const callLeg = page.locator("tr[data-level='2']").filter({ hasText: "1400" });
-  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,157.00");
-  await expect(callLeg.locator(".roll-pnl-indicator")).toContainText("R1");
+  // Unrolled 800P child: no roll badge.
+  const putLeg = page.locator("tr[data-level='2']").filter({ hasText: "800" });
+  await expect(putLeg.locator(".roll-pnl-indicator")).toHaveCount(0);
 
   // Hierarchy hooks remain intact with roll-adjusted display.
   await expect(page.locator("tr[data-level='0']")).toHaveCount(1);

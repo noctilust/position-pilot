@@ -1707,7 +1707,16 @@ button.strategy-open-action:focus-visible {
  * Fixed-track instrument grid (tastytrade-like): qty | exp | dte | strike | C/P.
  * Same overall width for equity and option legs so downstream columns stay aligned.
  * Cells never wrap; long strikes use tabular nums + ellipsis rather than reflow.
+ * Option roll badges sit in .leg-contract-identity-row as siblings after the strip.
  */
+.leg-contract-identity-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
 .contract-identity {
   display: inline-flex;
   align-items: center;
