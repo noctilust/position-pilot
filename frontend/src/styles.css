@@ -2907,6 +2907,12 @@ button.drawer-backdrop:focus-visible {
     font-size: 1.25rem;
   }
 
+  /* Match brand lockup horizontal inset so tab backgrounds share the same outer edges. */
+  .navigation-rail nav {
+    padding-left: var(--space-4);
+    padding-right: var(--space-4);
+  }
+
   .nav-item {
     grid-template-columns: 1.15rem 1fr;
     justify-items: start;

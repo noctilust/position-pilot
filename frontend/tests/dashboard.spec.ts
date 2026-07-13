@@ -2263,6 +2263,32 @@ test("responsive layouts remain usable at narrow and large widths", async ({ pag
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("complementary", { name: "Primary navigation" })).toBeVisible();
   await expect(page.getByRole("status").filter({ hasText: /read-only/i })).toBeVisible();
+  // Phone bottom nav: six equal columns still span the available rail width.
+  const phoneNavGeometry = await page.evaluate(() => {
+    const rail = document.querySelector(".navigation-rail");
+    const items = Array.from(document.querySelectorAll(".nav-item"));
+    if (!rail || items.length !== 6) return { ok: false as const };
+    const railRect = rail.getBoundingClientRect();
+    const itemRects = items.map((el) => el.getBoundingClientRect());
+    const first = itemRects[0]!;
+    const last = itemRects[itemRects.length - 1]!;
+    return {
+      ok: true as const,
+      itemCount: items.length,
+      leftInset: first.left - railRect.left,
+      rightInset: railRect.right - last.right,
+      spansRail: first.left - railRect.left <= 8 && railRect.right - last.right <= 8,
+      equalWidth: itemRects.every(
+        (r) => Math.abs(r.width - first.width) <= 2,
+      ),
+    };
+  });
+  expect(phoneNavGeometry.ok).toBe(true);
+  if (phoneNavGeometry.ok) {
+    expect(phoneNavGeometry.itemCount).toBe(6);
+    expect(phoneNavGeometry.spansRail).toBe(true);
+    expect(phoneNavGeometry.equalWidth).toBe(true);
+  }
   await page.getByRole("button", { name: "Positions" }).click();
   await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
   // Phone simplified layout: editing controls for watchlist are absent.
@@ -2301,6 +2327,53 @@ test("responsive layouts remain usable at narrow and large widths", async ({ pag
   await expect(page.getByRole("button", { name: "Save catalyst settings" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Create backup" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Apply retention" })).toBeVisible();
+
+  // Wide rail: tab outer edges align with brand lockup content inset (not rail edge).
+  const railGeometry = await page.evaluate(() => {
+    const rail = document.querySelector(".navigation-rail");
+    const brand = document.querySelector(".brand-lockup");
+    const brandContent = brand?.querySelector("span");
+    const items = Array.from(document.querySelectorAll<HTMLElement>(".nav-item"));
+    const active = document.querySelector<HTMLElement>(".nav-item.active");
+    if (!rail || !brand || !brandContent || items.length !== 6 || !active) {
+      return { ok: false as const, reason: "missing rail elements" };
+    }
+
+    const railRect = rail.getBoundingClientRect();
+    const brandContentLeft = brandContent.getBoundingClientRect().left;
+    const itemRects = items.map((el) => el.getBoundingClientRect());
+    const lefts = itemRects.map((r) => r.left);
+    const rights = itemRects.map((r) => r.right);
+    const leftGaps = lefts.map((left) => left - railRect.left);
+    const rightGaps = rights.map((right) => railRect.right - right);
+    const beforeLeft = getComputedStyle(active, "::before").left;
+
+    return {
+      ok: true as const,
+      brandContentLeft,
+      lefts,
+      rights,
+      leftGaps,
+      rightGaps,
+      beforeLeft,
+      itemCount: items.length,
+    };
+  });
+  expect(railGeometry.ok).toBe(true);
+  if (railGeometry.ok) {
+    expect(railGeometry.itemCount).toBe(6);
+    const sharedLeft = railGeometry.lefts[0]!;
+    const sharedRight = railGeometry.rights[0]!;
+    for (let i = 0; i < railGeometry.lefts.length; i += 1) {
+      expect(Math.abs(railGeometry.lefts[i]! - sharedLeft)).toBeLessThanOrEqual(1);
+      expect(Math.abs(railGeometry.rights[i]! - sharedRight)).toBeLessThanOrEqual(1);
+      expect(Math.abs(railGeometry.lefts[i]! - railGeometry.brandContentLeft)).toBeLessThanOrEqual(1);
+      expect(Math.abs(railGeometry.leftGaps[i]! - railGeometry.rightGaps[i]!)).toBeLessThanOrEqual(1);
+    }
+    // Active indicator flush with the inset tab box (not the rail edge).
+    expect(railGeometry.beforeLeft).toBe("0px");
+  }
+
   const wideAxe = await new AxeBuilder({ page }).analyze();
   expect(wideAxe.violations).toEqual([]);
 });
