@@ -4,13 +4,23 @@ import {
   classifyStrategy,
   countStrategiesByCategory,
   filterStrategiesByCategory,
+  formatLegCountLabel,
+  formatLegInstrument,
+  formatLegSideQuantity,
+  formatLegStrike,
   formatSymbolGroupSplit,
   groupStrategiesBySymbol,
+  isCombinedOptionStrategy,
   isEquityLeg,
+  isOptionLeg,
   normalizeUnderlying,
+  presentStrategyIdsFromStrategies,
   presentSymbolsFromStrategies,
   pruneCollapsedSymbols,
+  pruneExpandedStrategyIds,
+  sanitizeStrategyDomId,
   sanitizeSymbolDomId,
+  strategyLegsPanelId,
   symbolGroupPanelId,
   UNKNOWN_UNDERLYING_SYMBOL,
 } from "../src/positionGroups";
@@ -333,5 +343,124 @@ test.describe("collapse state pruning", () => {
         { underlying: "spy" },
       ]),
     ).toEqual(["QQQ", "SPY"]);
+  });
+});
+
+test.describe("isCombinedOptionStrategy", () => {
+  test("four-leg Iron Condor qualifies as combined", () => {
+    const ic = strategy({
+      strategy_id: "ic",
+      strategy_type: "Iron Condor",
+      legs: [
+        optionLeg({ strike_price: 470, option_type: "P", quantity_direction: "Long" }),
+        optionLeg({ strike_price: 475, option_type: "P", quantity_direction: "Short" }),
+        optionLeg({ strike_price: 505, option_type: "C", quantity_direction: "Short" }),
+        optionLeg({ strike_price: 510, option_type: "C", quantity_direction: "Long" }),
+      ],
+    });
+    expect(isCombinedOptionStrategy(ic)).toBe(true);
+    expect(classifyStrategy(ic)).toBe("options");
+    expect(formatLegCountLabel(ic.legs.length)).toBe("4 legs");
+  });
+
+  test("mixed Covered Call qualifies and keeps Options classification", () => {
+    const cc = strategy({
+      strategy_id: "cc",
+      strategy_type: "Covered Call",
+      legs: [leg({ quantity: 100 }), optionLeg({ quantity_direction: "Short", option_type: "C" })],
+    });
+    expect(isCombinedOptionStrategy(cc)).toBe(true);
+    expect(classifyStrategy(cc)).toBe("options");
+    expect(formatLegCountLabel(cc.legs.length)).toBe("2 legs");
+  });
+
+  test("single-leg stock and single-leg option do not qualify", () => {
+    expect(
+      isCombinedOptionStrategy(
+        strategy({
+          strategy_id: "stock",
+          strategy_type: "Long Stock",
+          legs: [leg()],
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isCombinedOptionStrategy(
+        strategy({
+          strategy_id: "put",
+          strategy_type: "Short Put",
+          legs: [optionLeg()],
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isCombinedOptionStrategy(
+        strategy({ strategy_id: "empty", strategy_type: "Iron Condor", legs: [] }),
+      ),
+    ).toBe(false);
+  });
+
+  test("multi-leg pure stock does not qualify as combined option strategy", () => {
+    expect(
+      isCombinedOptionStrategy(
+        strategy({
+          strategy_id: "two-stock",
+          strategy_type: "Long Stock",
+          legs: [leg({ symbol: "SPY" }), leg({ symbol: "SPY", quantity: 50 })],
+        }),
+      ),
+    ).toBe(false);
+  });
+});
+
+test.describe("leg presentation helpers", () => {
+  test("formatLegInstrument distinguishes Equity, Call, Put", () => {
+    expect(formatLegInstrument(leg())).toBe("Equity");
+    expect(formatLegInstrument(optionLeg({ option_type: "C" }))).toBe("Call");
+    expect(formatLegInstrument(optionLeg({ option_type: "P" }))).toBe("Put");
+    expect(formatLegInstrument(optionLeg({ option_type: "call" }))).toBe("Call");
+  });
+
+  test("formatLegSideQuantity and formatLegStrike", () => {
+    expect(formatLegSideQuantity(leg({ quantity: 100, quantity_direction: "Long" }))).toBe(
+      "Long 100",
+    );
+    expect(
+      formatLegSideQuantity(optionLeg({ quantity: 1, quantity_direction: "Short" })),
+    ).toBe("Short 1");
+    expect(formatLegStrike(optionLeg({ strike_price: 500 }))).toBe("$500");
+    expect(formatLegStrike(leg())).toBeNull();
+  });
+
+  test("isOptionLeg complements isEquityLeg", () => {
+    expect(isOptionLeg(leg())).toBe(false);
+    expect(isOptionLeg(optionLeg())).toBe(true);
+    expect(isOptionLeg(leg({ option_type: "P" }))).toBe(true);
+  });
+});
+
+test.describe("strategy leg panel ids and expand pruning", () => {
+  test("sanitizeStrategyDomId encodes fragile characters uniquely", () => {
+    expect(sanitizeStrategyDomId("strat-qqq")).toBe("strat-qqq");
+    expect(strategyLegsPanelId("strat-qqq")).toBe("strategy-legs-panel-strat-qqq");
+    expect(sanitizeStrategyDomId("acct:SPY:ic")).toBe("acct_3a_SPY_3a_ic");
+    expect(sanitizeStrategyDomId("a/b")).not.toBe(sanitizeStrategyDomId("a_b"));
+    expect(sanitizeStrategyDomId("")).toBe("unknown-strategy");
+  });
+
+  test("pruneExpandedStrategyIds drops strategies that disappear", () => {
+    const expanded = new Set(["strat-a", "strat-b", "strat-gone"]);
+    const next = pruneExpandedStrategyIds(expanded, ["strat-a", "strat-c"]);
+    expect([...next].sort()).toEqual(["strat-a"]);
+  });
+
+  test("presentStrategyIdsFromStrategies is sorted and unique", () => {
+    expect(
+      presentStrategyIdsFromStrategies([
+        { strategy_id: "z" },
+        { strategy_id: "a" },
+        { strategy_id: "z" },
+      ]),
+    ).toEqual(["a", "z"]);
   });
 });

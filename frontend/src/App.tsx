@@ -70,11 +70,19 @@ import {
 import {
   countStrategiesByCategory,
   filterStrategiesByCategory,
+  formatLegCountLabel,
+  formatLegInstrument,
+  formatLegSideQuantity,
+  formatLegStrike,
   formatSymbolGroupSplit,
   groupStrategiesBySymbol,
+  isCombinedOptionStrategy,
   normalizeUnderlying,
+  presentStrategyIdsFromStrategies,
   presentSymbolsFromStrategies,
   pruneCollapsedSymbols,
+  pruneExpandedStrategyIds,
+  strategyLegsPanelId,
   symbolGroupPanelId,
 } from "./positionGroups";
 import type {
@@ -89,6 +97,7 @@ import type {
   PortfolioAccount,
   PortfolioRisk,
   PortfolioSnapshot,
+  PositionLeg,
   RecommendationRecord,
   RecommendationSettings,
   RollChain,
@@ -1323,6 +1332,64 @@ function formatPremiumEffect(value: number): { text: string; kind: "credit" | "d
   return { text: currency(0), kind: "flat" };
 }
 
+/** Dense nested ledger of backend-detected strategy legs (audit trail). */
+function StrategyLegsLedger({ legs }: { legs: PositionLeg[] }) {
+  return (
+    <table className="data-table dense strategy-legs-table">
+      <caption className="sr-only">Individual legs for this detected strategy</caption>
+      <thead>
+        <tr>
+          <th scope="col">Side</th>
+          <th scope="col">Type</th>
+          <th scope="col">Strike</th>
+          <th scope="col">Exp</th>
+          <th scope="col">DTE</th>
+          <th scope="col">Mark</th>
+          <th scope="col">Δ</th>
+          <th scope="col">Θ</th>
+          <th scope="col">P/L</th>
+        </tr>
+      </thead>
+      <tbody>
+        {legs.map((leg, index) => {
+          const instrument = formatLegInstrument(leg);
+          const strike = formatLegStrike(leg);
+          const expLabel = formatExpiration(leg.expiration_date);
+          const contractTitle = leg.symbol?.trim() || undefined;
+          return (
+            <tr key={`${leg.symbol}-${index}`}>
+              <th scope="row">
+                <span className="strategy-leg-side" title={contractTitle}>
+                  {formatLegSideQuantity(leg)}
+                </span>
+                {contractTitle ? (
+                  <span className="strategy-leg-contract muted" title={contractTitle}>
+                    {contractTitle}
+                  </span>
+                ) : null}
+              </th>
+              <td>{instrument}</td>
+              <td className="tabular">{strike ?? "—"}</td>
+              <td className="tabular">{expLabel ?? "—"}</td>
+              <td className="tabular">{leg.days_to_expiration ?? "—"}</td>
+              <td className="tabular">
+                {leg.mark_price == null ? "—" : currency(leg.mark_price)}
+              </td>
+              <td className="tabular">
+                {leg.delta == null ? "—" : signed(leg.delta, 2)}
+              </td>
+              <td className="tabular">
+                {leg.theta == null ? "—" : signed(leg.theta, 2)}
+              </td>
+              <td className="tabular">{currency(leg.unrealized_pnl)}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
 function PositionsSection({
   snapshot,
   onSelectStrategy,
@@ -1346,6 +1413,8 @@ function PositionsSection({
   const [showOptions, setShowOptions] = useState(true);
   /** Symbols the user has collapsed; default is expanded (absent from set). */
   const [collapsedSymbols, setCollapsedSymbols] = useState<Set<string>>(() => new Set());
+  /** Combined multi-leg strategies the user has expanded; default is collapsed. */
+  const [expandedStrategyIds, setExpandedStrategyIds] = useState<Set<string>>(() => new Set());
 
   const catalystBySymbol = useMemo(() => {
     const map = new Map<string, SymbolCatalystResult>();
@@ -1376,6 +1445,14 @@ function PositionsSection({
     () => presentSymbolsFromStrategies(strategies).join("|"),
     [strategies],
   );
+  const presentStrategyIdKey = useMemo(
+    () => presentStrategyIdsFromStrategies(strategies).join("|"),
+    [strategies],
+  );
+  const hasCombinedStrategies = useMemo(
+    () => strategies.some(isCombinedOptionStrategy),
+    [strategies],
+  );
 
   // Preserve collapse choices across filters/refreshes; prune symbols that leave the book.
   useEffect(() => {
@@ -1388,6 +1465,18 @@ function PositionsSection({
       return next;
     });
   }, [presentSymbolKey]);
+
+  // Nested leg disclosure is per strategy_id; prune when strategies leave the book.
+  useEffect(() => {
+    const present = presentStrategyIdKey ? presentStrategyIdKey.split("|") : [];
+    setExpandedStrategyIds((prev) => {
+      const next = pruneExpandedStrategyIds(prev, present);
+      if (next.size === prev.size && [...next].every((id) => prev.has(id))) {
+        return prev;
+      }
+      return next;
+    });
+  }, [presentStrategyIdKey]);
 
   useEffect(() => {
     setOrderPage(0);
@@ -1427,6 +1516,18 @@ function PositionsSection({
     });
   }
 
+  function toggleStrategyLegsExpanded(strategyId: string) {
+    setExpandedStrategyIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(strategyId)) {
+        next.delete(strategyId);
+      } else {
+        next.add(strategyId);
+      }
+      return next;
+    });
+  }
+
   return (
     <div className="positions-workspace">
       <div className="positions-workspace-main">
@@ -1441,6 +1542,12 @@ function PositionsSection({
           <p className="microcopy" role="status" aria-live="polite">
             {statusCopy}
           </p>
+          {hasCombinedStrategies ? (
+            <p className="microcopy positions-combined-hint">
+              Multi-leg rows are Position Pilot detected strategies. Expand a combined row to
+              audit its individual option and stock legs.
+            </p>
+          ) : null}
 
           {strategies.length > 0 ? (
             <div className="position-category-toggles" role="group" aria-label="Position categories">
@@ -1564,71 +1671,142 @@ function PositionsSection({
                               const catalyst =
                                 catalystBySymbol.get(strategy.underlying) ??
                                 catalystBySymbol.get(group.symbol);
+                              const combined = isCombinedOptionStrategy(strategy);
+                              const legsExpanded =
+                                combined && expandedStrategyIds.has(strategy.strategy_id);
+                              const legsPanelId = strategyLegsPanelId(strategy.strategy_id);
+                              const legCount = strategy.legs?.length ?? 0;
+                              const rowClass =
+                                catalyst?.quiet === false
+                                  ? "row-promoted symbol-group-row"
+                                  : "symbol-group-row";
                               return (
-                                <tr
-                                  key={strategy.strategy_id}
-                                  className={
-                                    catalyst?.quiet === false
-                                      ? "row-promoted symbol-group-row"
-                                      : "symbol-group-row"
-                                  }
-                                >
-                                  <th scope="row">
-                                    <button
-                                      type="button"
-                                      className="linkish"
-                                      aria-label={`Open ${group.symbol} ${strategy.strategy_type}`}
-                                      onClick={() =>
-                                        onSelectStrategy(strategy.strategy_id)
-                                      }
+                                <Fragment key={strategy.strategy_id}>
+                                  <tr
+                                    className={
+                                      combined
+                                        ? `${rowClass} combined-strategy-row`
+                                        : rowClass
+                                    }
+                                  >
+                                    <th scope="row">
+                                      {combined ? (
+                                        <div className="strategy-label-stack">
+                                          <button
+                                            type="button"
+                                            className="strategy-legs-toggle"
+                                            aria-expanded={legsExpanded}
+                                            aria-controls={legsPanelId}
+                                            aria-label={`${legsExpanded ? "Collapse" : "Expand"} legs for ${group.symbol} ${strategy.strategy_type}`}
+                                            onClick={() =>
+                                              toggleStrategyLegsExpanded(strategy.strategy_id)
+                                            }
+                                          >
+                                            <span
+                                              className="strategy-legs-chevron"
+                                              aria-hidden="true"
+                                            >
+                                              {legsExpanded ? "▾" : "▸"}
+                                            </span>
+                                            <span className="strategy-legs-name">
+                                              {strategy.strategy_type}
+                                            </span>
+                                            <span className="strategy-leg-count tabular">
+                                              {formatLegCountLabel(legCount)}
+                                            </span>
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="linkish strategy-analysis-action"
+                                            aria-label={`Open analysis for ${group.symbol} ${strategy.strategy_type}`}
+                                            onClick={() =>
+                                              onSelectStrategy(strategy.strategy_id)
+                                            }
+                                          >
+                                            Open analysis
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <>
+                                          <button
+                                            type="button"
+                                            className="linkish"
+                                            aria-label={`Open ${group.symbol} ${strategy.strategy_type}`}
+                                            onClick={() =>
+                                              onSelectStrategy(strategy.strategy_id)
+                                            }
+                                          >
+                                            {strategy.strategy_type}
+                                          </button>
+                                          <span className="sr-only">
+                                            {" "}
+                                            under {group.symbol}
+                                          </span>
+                                        </>
+                                      )}
+                                    </th>
+                                    <td>
+                                      <span className={`chip horizon-${strategy.horizon}`}>
+                                        {strategy.horizon}
+                                      </span>
+                                    </td>
+                                    <td className="tabular">
+                                      {strategy.days_to_expiration ?? "—"}
+                                    </td>
+                                    <td className="tabular">
+                                      {strategy.strikes || "—"}
+                                    </td>
+                                    <td>
+                                      <span
+                                        className={`catalyst-inline ${
+                                          catalyst
+                                            ? catalyst.quiet
+                                              ? "quiet"
+                                              : "promoted"
+                                            : "quiet"
+                                        }`}
+                                        title={
+                                          catalyst?.summary ??
+                                          "No confirmed catalyst found"
+                                        }
+                                      >
+                                        {catalyst
+                                          ? formatConfidence(catalyst.confidence)
+                                          : "No confirmed catalyst found"}
+                                      </span>
+                                    </td>
+                                    <td className="tabular">
+                                      {signed(strategy.total_delta, 2)}
+                                    </td>
+                                    <td className="tabular">
+                                      {signed(strategy.total_theta, 0)}
+                                    </td>
+                                    <td className="tabular">
+                                      {currency(strategy.unrealized_pnl)}
+                                    </td>
+                                  </tr>
+                                  {combined ? (
+                                    <tr
+                                      className="strategy-legs-detail-row"
+                                      hidden={!legsExpanded}
                                     >
-                                      {strategy.strategy_type}
-                                    </button>
-                                    <span className="sr-only">
-                                      {" "}
-                                      under {group.symbol}
-                                    </span>
-                                  </th>
-                                  <td>
-                                    <span className={`chip horizon-${strategy.horizon}`}>
-                                      {strategy.horizon}
-                                    </span>
-                                  </td>
-                                  <td className="tabular">
-                                    {strategy.days_to_expiration ?? "—"}
-                                  </td>
-                                  <td className="tabular">
-                                    {strategy.strikes || "—"}
-                                  </td>
-                                  <td>
-                                    <span
-                                      className={`catalyst-inline ${
-                                        catalyst
-                                          ? catalyst.quiet
-                                            ? "quiet"
-                                            : "promoted"
-                                          : "quiet"
-                                      }`}
-                                      title={
-                                        catalyst?.summary ??
-                                        "No confirmed catalyst found"
-                                      }
-                                    >
-                                      {catalyst
-                                        ? formatConfidence(catalyst.confidence)
-                                        : "No confirmed catalyst found"}
-                                    </span>
-                                  </td>
-                                  <td className="tabular">
-                                    {signed(strategy.total_delta, 2)}
-                                  </td>
-                                  <td className="tabular">
-                                    {signed(strategy.total_theta, 0)}
-                                  </td>
-                                  <td className="tabular">
-                                    {currency(strategy.unrealized_pnl)}
-                                  </td>
-                                </tr>
+                                      <td colSpan={8}>
+                                        <div
+                                          id={legsPanelId}
+                                          className="strategy-legs-panel strategy-legs-scroll"
+                                          role="region"
+                                          aria-label={`Legs for ${group.symbol} ${strategy.strategy_type}`}
+                                          tabIndex={legsExpanded ? 0 : -1}
+                                          hidden={!legsExpanded}
+                                        >
+                                          {legsExpanded ? (
+                                            <StrategyLegsLedger legs={strategy.legs ?? []} />
+                                          ) : null}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  ) : null}
+                                </Fragment>
                               );
                             })
                           : null}

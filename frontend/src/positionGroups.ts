@@ -241,3 +241,144 @@ export function presentSymbolsFromStrategies(
   }
   return [...set].sort((a, b) => a.localeCompare(b));
 }
+
+type OptionLegFields = EquityLegFields;
+
+/**
+ * True when a leg is an option instrument (or has option fields).
+ * Complements isEquityLeg for mixed Covered Call / Collar detection.
+ */
+export function isOptionLeg(leg: OptionLegFields): boolean {
+  const positionType = (leg.position_type ?? "").trim().toLowerCase();
+  if (positionType.includes("option")) {
+    return true;
+  }
+  if (leg.option_type) {
+    return true;
+  }
+  if (leg.strike_price != null || leg.expiration_date) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * A multi-leg option structure detected by Position Pilot (backend StrategyService).
+ *
+ * Qualifies when classified as Options, has more than one leg, and includes at least
+ * one option leg. Mixed stock+option structures (Covered Call, Collar, Protective Put)
+ * qualify; pure single-leg stock/options do not. Does not invent combinations — only
+ * makes backend-detected multi-leg strategies explicit for progressive disclosure.
+ */
+export function isCombinedOptionStrategy(
+  strategy: Pick<Strategy, "strategy_type" | "legs">,
+): boolean {
+  const legs = strategy.legs ?? [];
+  if (legs.length <= 1) {
+    return false;
+  }
+  if (classifyStrategy(strategy) !== "options") {
+    return false;
+  }
+  return legs.some(isOptionLeg);
+}
+
+/** Compact indicator, e.g. "4 legs" / "1 leg". */
+export function formatLegCountLabel(legCount: number): string {
+  return legCount === 1 ? "1 leg" : `${legCount} legs`;
+}
+
+/**
+ * Human-readable instrument label for a leg ledger row.
+ * Equity for stock legs; Call / Put for options; fallback to position_type.
+ */
+export function formatLegInstrument(leg: EquityLegFields): string {
+  if (isEquityLeg(leg)) {
+    return "Equity";
+  }
+  const opt = (leg.option_type ?? "").trim().toUpperCase();
+  if (opt === "C" || opt === "CALL") {
+    return "Call";
+  }
+  if (opt === "P" || opt === "PUT") {
+    return "Put";
+  }
+  const positionType = (leg.position_type ?? "").trim();
+  return positionType || "Option";
+}
+
+/**
+ * Side + quantity for a leg, e.g. "Long 1" / "Short 100".
+ * Uses quantity_direction when present; otherwise infers from signed quantity.
+ */
+export function formatLegSideQuantity(
+  leg: Pick<PositionLeg, "quantity" | "quantity_direction">,
+): string {
+  const qty = Math.abs(leg.quantity);
+  const direction = (leg.quantity_direction ?? "").trim();
+  if (direction === "Long" || direction === "Short") {
+    return `${direction} ${qty}`;
+  }
+  if (leg.quantity < 0) {
+    return `Short ${qty}`;
+  }
+  return `Long ${qty}`;
+}
+
+/** Strike display when applicable; null for equity / missing strike. */
+export function formatLegStrike(leg: Pick<PositionLeg, "strike_price">): string | null {
+  if (leg.strike_price == null || Number.isNaN(leg.strike_price)) {
+    return null;
+  }
+  return `$${leg.strike_price}`;
+}
+
+/**
+ * Deterministic HTML id fragment for a strategy_id.
+ * Same encoding rules as sanitizeSymbolDomId so ids stay collision-free.
+ */
+export function sanitizeStrategyDomId(strategyId: string): string {
+  const key = (strategyId ?? "").trim();
+  if (!key) {
+    return "unknown-strategy";
+  }
+  let out = "";
+  for (const ch of key) {
+    if (/[A-Za-z0-9-]/.test(ch)) {
+      out += ch;
+    } else {
+      out += `_${ch.codePointAt(0)!.toString(16)}_`;
+    }
+  }
+  return out || "unknown-strategy";
+}
+
+/** Full disclosure panel id for a strategy's leg ledger (`aria-controls` target). */
+export function strategyLegsPanelId(strategyId: string): string {
+  return `strategy-legs-panel-${sanitizeStrategyDomId(strategyId)}`;
+}
+
+/**
+ * Prune expanded strategy ids to those still present in the portfolio.
+ * Unknown ids are dropped; known expanded ids are kept across filter/refresh.
+ */
+export function pruneExpandedStrategyIds(
+  expanded: ReadonlySet<string>,
+  presentStrategyIds: readonly string[],
+): Set<string> {
+  const present = new Set(presentStrategyIds);
+  const next = new Set<string>();
+  for (const id of expanded) {
+    if (present.has(id)) {
+      next.add(id);
+    }
+  }
+  return next;
+}
+
+/** Stable sorted list of strategy_ids currently in the book (unfiltered). */
+export function presentStrategyIdsFromStrategies(
+  strategies: readonly Pick<Strategy, "strategy_id">[],
+): string[] {
+  return [...new Set(strategies.map((s) => s.strategy_id))].sort((a, b) => a.localeCompare(b));
+}

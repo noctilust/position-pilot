@@ -1240,6 +1240,140 @@ textarea:focus-visible,
   display: none;
 }
 
+.strategy-label-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.strategy-legs-toggle {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem 0.45rem;
+  margin: 0;
+  padding: 0.1rem 0.15rem;
+  border: 0;
+  border-radius: 0.2rem;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  min-height: 1.75rem;
+  max-width: 100%;
+}
+
+.strategy-legs-toggle:hover {
+  background: color-mix(in oklch, var(--accent) 8%, transparent);
+}
+
+.strategy-legs-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.strategy-legs-chevron {
+  display: inline-block;
+  width: 0.75rem;
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+.strategy-legs-name {
+  font-weight: 600;
+}
+
+.strategy-leg-count {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  letter-spacing: 0.01em;
+}
+
+.strategy-analysis-action {
+  font-size: 0.72rem;
+  padding: 0.05rem 0;
+}
+
+.strategy-legs-detail-row > td {
+  padding: 0 0.35rem 0.45rem 1.35rem;
+  border-bottom-color: var(--line);
+  background: color-mix(in oklch, var(--surface) 94%, var(--line));
+  vertical-align: top;
+}
+
+.strategy-legs-detail-row[hidden],
+.strategy-legs-panel[hidden] {
+  display: none;
+}
+
+.strategy-legs-panel {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.strategy-legs-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  min-width: 0;
+  -webkit-overflow-scrolling: touch;
+}
+
+.strategy-legs-scroll:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.strategy-legs-table {
+  width: 100%;
+  min-width: 28rem;
+  margin: 0;
+  font-size: 0.76rem;
+}
+
+.strategy-legs-table th,
+.strategy-legs-table td {
+  padding: 0.22rem 0.4rem;
+  white-space: nowrap;
+}
+
+.strategy-legs-table th[scope="row"] {
+  font-weight: 500;
+  padding-left: 0.35rem;
+}
+
+.strategy-leg-side {
+  display: block;
+  font-weight: 600;
+}
+
+.strategy-leg-contract {
+  display: block;
+  font-size: 0.68rem;
+  font-family: var(--font-mono);
+  font-weight: 400;
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.positions-combined-hint {
+  margin-top: -0.15rem;
+  color: var(--text-soft);
+}
+
+.combined-strategy-row th[scope="row"] {
+  vertical-align: top;
+}
+
 .roll-ledger-rail {
   position: sticky;
   top: calc(var(--header-h) + var(--space-2));
