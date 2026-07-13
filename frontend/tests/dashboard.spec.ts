@@ -1489,6 +1489,224 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   await expect(spyPutIdentity.locator(".contract-type")).toHaveText("P");
   await expect(spyPutIdentity.locator(".contract-strike")).toHaveText("$500");
 
+  // Dark theme palette: neutral charcoal bands + magenta dots + Tastytrade-like P/L.
+  // Prefer computed styles / CSS tokens over brittle screenshot snapshots.
+  await expect
+    .poll(async () =>
+      page.evaluate(() => document.documentElement.getAttribute("data-theme")),
+    )
+    .not.toBe("light");
+  // Clear disclosure focus so strategy-row sampling is not magenta-tinted by :focus-within.
+  await page.evaluate(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement) active.blur();
+  });
+  const darkPalette = await page.evaluate(() => {
+    type Oklch = { l: number; c: number; h: number };
+    const parseOklch = (value: string): Oklch | null => {
+      const m = value.match(
+        /oklch\(\s*([\d.]+)\s*%?\s+([\d.]+)\s+(-?[\d.]+)/i,
+      );
+      if (!m) return null;
+      let l = Number(m[1]);
+      // Browsers may serialize as 0–1 or 0–100%.
+      if (l <= 1) l *= 100;
+      return { l, c: Number(m[2]), h: Number(m[3]) };
+    };
+    const parseTokenOklch = (value: string): Oklch | null => parseOklch(value);
+
+    const table = document.querySelector<HTMLElement>("table.positions-by-symbol");
+    const header = document.querySelector<HTMLElement>("table.positions-by-symbol thead th");
+    const symbolCell = document.querySelector<HTMLElement>(
+      "tr[data-level='0'] th, tr[data-level='0'] td",
+    );
+    // Prefer a strategy row that is not focus-within (disclosure blur above).
+    const strategyCell = document.querySelector<HTMLElement>(
+      "tr[data-level='1']:not(:focus-within) th[scope='row']",
+    ) ?? document.querySelector<HTMLElement>("tr[data-level='1'] th[scope='row']");
+    const legCell = document.querySelector<HTMLElement>(
+      "tr[data-level='2']:not([hidden]) th[scope='row']",
+    );
+    const contractStrip = document.querySelector<HTMLElement>(
+      "tr[data-level='2']:not([hidden]) .contract-strip",
+    );
+    const dot = document.querySelector<HTMLElement>(
+      "tr[data-level='0'] .position-hierarchy-dot",
+    );
+    const hierarchyDot = document.querySelector<HTMLElement>(
+      "tr[data-level='1'] .position-hierarchy-dot",
+    );
+    const positivePnl = document.querySelector<HTMLElement>(
+      ".symbol-group-pnl-positive, .pnl-metric-positive .pnl-metric-value",
+    );
+    const negativePnl = document.querySelector<HTMLElement>(
+      ".symbol-group-pnl-negative, .pnl-metric-negative .pnl-metric-value",
+    );
+    if (
+      !table ||
+      !header ||
+      !symbolCell ||
+      !strategyCell ||
+      !legCell ||
+      !contractStrip ||
+      !dot ||
+      !hierarchyDot ||
+      !positivePnl ||
+      !negativePnl
+    ) {
+      return { ok: false as const, reason: "missing-nodes" };
+    }
+
+    const cs = getComputedStyle(table);
+    const tokens = {
+      headerBg: cs.getPropertyValue("--pt-header-bg").trim(),
+      rowBg: cs.getPropertyValue("--pt-row-bg").trim(),
+      rowAlt: cs.getPropertyValue("--pt-row-alt").trim(),
+      legBg: cs.getPropertyValue("--pt-leg-bg").trim(),
+      segBg: cs.getPropertyValue("--pt-seg-bg").trim(),
+      segRule: cs.getPropertyValue("--pt-seg-rule").trim(),
+      text: cs.getPropertyValue("--pt-text").trim(),
+      textSoft: cs.getPropertyValue("--pt-text-soft").trim(),
+      dot: cs.getPropertyValue("--pt-dot").trim(),
+      good: cs.getPropertyValue("--pt-good").trim(),
+      danger: cs.getPropertyValue("--pt-danger").trim(),
+      focus: cs.getPropertyValue("--pt-focus").trim(),
+    };
+
+    const headerBg = parseOklch(getComputedStyle(header).backgroundColor);
+    const symbolBg = parseOklch(getComputedStyle(symbolCell).backgroundColor);
+    const strategyBg = parseOklch(getComputedStyle(strategyCell).backgroundColor);
+    const legBg = parseOklch(getComputedStyle(legCell).backgroundColor);
+    const stripBg = parseOklch(getComputedStyle(contractStrip).backgroundColor);
+    const stripBorder = parseOklch(getComputedStyle(contractStrip).borderTopColor);
+    const dotBg = parseOklch(getComputedStyle(dot).backgroundColor);
+    const hierarchyDotBg = parseOklch(getComputedStyle(hierarchyDot).backgroundColor);
+    const posColor = parseOklch(getComputedStyle(positivePnl).color);
+    const negColor = parseOklch(getComputedStyle(negativePnl).color);
+    const primaryText = parseOklch(getComputedStyle(table).color);
+
+    const tokenRow = parseTokenOklch(tokens.rowBg);
+    const tokenHeader = parseTokenOklch(tokens.headerBg);
+    const tokenDot = parseTokenOklch(tokens.dot);
+    const tokenGood = parseTokenOklch(tokens.good);
+    const tokenDanger = parseTokenOklch(tokens.danger);
+    const tokenSeg = parseTokenOklch(tokens.segBg);
+    const tokenSegRule = parseTokenOklch(tokens.segRule);
+
+    if (
+      !headerBg ||
+      !symbolBg ||
+      !strategyBg ||
+      !legBg ||
+      !stripBg ||
+      !stripBorder ||
+      !dotBg ||
+      !hierarchyDotBg ||
+      !posColor ||
+      !negColor ||
+      !primaryText ||
+      !tokenRow ||
+      !tokenHeader ||
+      !tokenDot ||
+      !tokenGood ||
+      !tokenDanger ||
+      !tokenSeg ||
+      !tokenSegRule
+    ) {
+      return {
+        ok: false as const,
+        reason: "parse-oklch",
+        raw: {
+          headerBg: getComputedStyle(header).backgroundColor,
+          strategyBg: getComputedStyle(strategyCell).backgroundColor,
+          tokens,
+        },
+      };
+    }
+
+    return {
+      ok: true as const,
+      tokens,
+      headerBg,
+      symbolBg,
+      strategyBg,
+      legBg,
+      stripBg,
+      stripBorder,
+      dotBg,
+      hierarchyDotBg,
+      posColor,
+      negColor,
+      primaryText,
+      tokenRow,
+      tokenHeader,
+      tokenDot,
+      tokenGood,
+      tokenDanger,
+      tokenSeg,
+      tokenSegRule,
+    };
+  });
+
+  expect(darkPalette, JSON.stringify(darkPalette)).toMatchObject({ ok: true });
+  if (darkPalette.ok) {
+    // Scoped tokens present as oklch charcoal / semantic values.
+    expect(darkPalette.tokens.headerBg).toMatch(/oklch\(/i);
+    expect(darkPalette.tokens.rowBg).toMatch(/oklch\(/i);
+    expect(darkPalette.tokens.legBg).toMatch(/oklch\(/i);
+    expect(darkPalette.tokens.segBg).toMatch(/oklch\(/i);
+    expect(darkPalette.tokens.text).toMatch(/oklch\(/i);
+    expect(darkPalette.tokens.textSoft).toMatch(/oklch\(/i);
+    expect(darkPalette.tokens.dot).toMatch(/oklch\(/i);
+    expect(darkPalette.tokens.good).toMatch(/oklch\(/i);
+    expect(darkPalette.tokens.danger).toMatch(/oklch\(/i);
+    expect(darkPalette.tokens.focus).toBeTruthy();
+
+    // Near-zero chroma charcoal (no olive/brown hue bias).
+    for (const band of [
+      darkPalette.headerBg,
+      darkPalette.symbolBg,
+      darkPalette.strategyBg,
+      darkPalette.legBg,
+      darkPalette.stripBg,
+      darkPalette.tokenRow,
+      darkPalette.tokenHeader,
+      darkPalette.tokenSeg,
+    ]) {
+      expect(band.c).toBeLessThan(0.02);
+      expect(band.l).toBeLessThan(40);
+    }
+
+    // Distinct hierarchy bands + lighter contract strip than strategy base.
+    expect(darkPalette.legBg.l).toBeGreaterThan(darkPalette.tokenRow.l - 0.5);
+    expect(darkPalette.stripBg.l).toBeGreaterThan(darkPalette.strategyBg.l);
+    expect(darkPalette.stripBorder.l).toBeGreaterThan(darkPalette.stripBg.l);
+    expect(darkPalette.tokenSegRule.l).toBeGreaterThan(darkPalette.tokenSeg.l);
+
+    // Primary labels remain light and readable on charcoal.
+    expect(darkPalette.primaryText.l).toBeGreaterThan(90);
+    expect(darkPalette.primaryText.c).toBeLessThan(0.03);
+
+    // Magenta markers (high chroma, magenta-ish hue near 0/350–20).
+    expect(darkPalette.dotBg.c).toBeGreaterThan(0.15);
+    expect(darkPalette.hierarchyDotBg.c).toBeGreaterThan(0.15);
+    const magentaHue = (h: number) => h <= 30 || h >= 330;
+    expect(magentaHue(darkPalette.dotBg.h)).toBeTruthy();
+    expect(magentaHue(darkPalette.hierarchyDotBg.h)).toBeTruthy();
+    expect(darkPalette.tokenDot.c).toBeGreaterThan(0.15);
+
+    // Positive green (~150) vs negative coral-red (~20) — visibly distinct.
+    expect(darkPalette.posColor.c).toBeGreaterThan(0.08);
+    expect(darkPalette.negColor.c).toBeGreaterThan(0.08);
+    expect(darkPalette.posColor.h).toBeGreaterThan(120);
+    expect(darkPalette.posColor.h).toBeLessThan(180);
+    expect(darkPalette.negColor.h).toBeGreaterThan(0);
+    expect(darkPalette.negColor.h).toBeLessThan(45);
+    expect(Math.abs(darkPalette.posColor.h - darkPalette.negColor.h)).toBeGreaterThan(80);
+    expect(darkPalette.tokenGood.h).toBeGreaterThan(120);
+    expect(darkPalette.tokenDanger.h).toBeLessThan(45);
+  }
+
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(accessibility.violations).toEqual([]);
 

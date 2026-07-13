@@ -1098,7 +1098,7 @@ textarea:focus-visible,
 }
 
 .position-category-toggle:has(input:focus-visible) {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--pt-focus, var(--accent));
   outline-offset: 2px;
 }
 
@@ -1112,7 +1112,7 @@ textarea:focus-visible,
   width: 0.9rem;
   height: 0.9rem;
   margin: 0;
-  accent-color: var(--accent);
+  accent-color: var(--pt-dot, var(--accent));
   flex-shrink: 0;
 }
 
@@ -1160,21 +1160,59 @@ textarea:focus-visible,
   padding: 0.3rem 0.65rem;
 }
 
+/*
+ * Positions / roll-workspace palette (scoped).
+ * Dark theme: neutral charcoal (near-zero chroma) matching Tastytrade brokerage grid.
+ * Hex anchors: header #242424, base #1b1b1b, alt #222–#272, legs #252525,
+ * rules #383838/#4a4a4a, text #f2f1ec/#b8b8b4, magenta #e52f72,
+ * P/L #56b97a / #ff6269, contract strip #333333 / #474747.
+ */
+.positions-workspace,
+.positions-by-symbol {
+  --pt-header-bg: oklch(26% 0 0);
+  --pt-row-bg: oklch(22.2% 0 0);
+  --pt-row-alt: oklch(26% 0 0);
+  --pt-symbol-bg: oklch(26% 0 0);
+  --pt-leg-bg: oklch(26.4% 0 0);
+  --pt-rule: oklch(34.1% 0 0);
+  --pt-rule-strong: oklch(40.9% 0 0);
+  --pt-dot: oklch(61.2% 0.218 5);
+  --pt-focus: var(--pt-dot);
+  --pt-seg-bg: oklch(32.1% 0 0);
+  --pt-seg-rule: oklch(39.8% 0 0);
+  --pt-seg-text: oklch(86% 0.004 100);
+  --pt-text: oklch(95.8% 0.0067 97);
+  --pt-text-soft: oklch(78.1% 0.0056 107);
+  --pt-text-dim: oklch(68% 0.004 100);
+  --pt-good: oklch(71% 0.132 153);
+  --pt-danger: oklch(70% 0.191 21);
+}
+
+:root[data-theme="light"] .positions-workspace,
+:root[data-theme="light"] .positions-by-symbol {
+  /* Readable light fallback — neutral, not Tastytrade-dark mimicry */
+  --pt-header-bg: oklch(93% 0.004 100);
+  --pt-row-bg: oklch(99% 0.002 100);
+  --pt-row-alt: oklch(96.5% 0.003 100);
+  --pt-symbol-bg: oklch(92.5% 0.004 100);
+  --pt-leg-bg: oklch(97% 0.002 100);
+  --pt-rule: oklch(88% 0.004 100);
+  --pt-rule-strong: oklch(78% 0.008 100);
+  --pt-dot: oklch(48% 0.21 5);
+  --pt-focus: var(--pt-dot);
+  --pt-seg-bg: oklch(94% 0.003 100);
+  --pt-seg-rule: oklch(82% 0.006 100);
+  --pt-seg-text: oklch(28% 0.008 100);
+  --pt-text: oklch(20% 0.008 100);
+  --pt-text-soft: oklch(36% 0.008 100);
+  --pt-text-dim: oklch(48% 0.006 100);
+  /* Darker P/L tones so light theme meets WCAG on pale row bands */
+  --pt-good: oklch(40% 0.11 155);
+  --pt-danger: oklch(45% 0.15 28);
+}
+
 /* —— Positions brokerage grid (scoped tokens; Tastytrade-inspired hierarchy) —— */
 .positions-by-symbol {
-  --pt-header-bg: oklch(17% 0.01 86);
-  --pt-row-bg: oklch(16.5% 0.01 86);
-  --pt-row-alt: oklch(18% 0.011 86);
-  --pt-symbol-bg: oklch(20% 0.012 86);
-  --pt-leg-bg: oklch(15.2% 0.009 86);
-  --pt-rule: oklch(28% 0.012 86);
-  --pt-rule-strong: oklch(36% 0.014 86);
-  --pt-dot: oklch(62% 0.24 350);
-  --pt-seg-bg: oklch(24% 0.01 86);
-  --pt-seg-rule: oklch(32% 0.012 86);
-  --pt-seg-text: oklch(82% 0.014 88);
-  --pt-good: var(--good);
-  --pt-danger: var(--danger);
   /*
    * Visual hierarchy steps measured against rendered content (not cell padding alone).
    * Level-1 starts ~1rem+ right of the level-0 symbol label after chevron/dot/gaps;
@@ -1191,35 +1229,28 @@ textarea:focus-visible,
   border-collapse: collapse;
   font-variant-numeric: tabular-nums;
   background: var(--pt-row-bg);
-  color: var(--text);
+  color: var(--pt-text);
 }
 
-:root[data-theme="light"] .positions-by-symbol {
-  --pt-header-bg: oklch(93% 0.01 88);
-  --pt-row-bg: oklch(99% 0.004 88);
-  --pt-row-alt: oklch(96.5% 0.008 88);
-  --pt-symbol-bg: oklch(92% 0.012 88);
-  --pt-leg-bg: oklch(97% 0.006 88);
-  --pt-rule: oklch(88% 0.012 88);
-  --pt-rule-strong: oklch(78% 0.018 88);
-  --pt-dot: oklch(48% 0.21 350);
-  --pt-seg-bg: oklch(94% 0.008 88);
-  --pt-seg-rule: oklch(82% 0.012 88);
-  --pt-seg-text: oklch(28% 0.02 80);
-  /* Darker P/L tones so light theme meets WCAG on pale row bands */
-  --pt-good: oklch(40% 0.11 155);
-  --pt-danger: oklch(45% 0.15 28);
+/* Dark table: restrained graphite horizon chips (no blue/orange noise). */
+.positions-by-symbol .horizon-tactical,
+.positions-by-symbol .horizon-strategic {
+  color: var(--pt-text-soft);
+  border-color: color-mix(in oklch, var(--pt-rule-strong) 90%, transparent);
+  background: color-mix(in oklch, var(--pt-seg-bg) 55%, transparent);
 }
 
-/* Horizon chips: keep readable on light row bands without orange-link look. */
+/* Light table: keep chips readable with soft semantic distinction, not accent links. */
 :root[data-theme="light"] .positions-by-symbol .horizon-tactical {
-  color: oklch(38% 0.12 54);
-  border-color: color-mix(in oklch, oklch(38% 0.12 54) 45%, var(--pt-rule));
+  color: oklch(38% 0.08 55);
+  border-color: color-mix(in oklch, oklch(38% 0.08 55) 35%, var(--pt-rule));
+  background: color-mix(in oklch, var(--pt-seg-bg) 70%, transparent);
 }
 
 :root[data-theme="light"] .positions-by-symbol .horizon-strategic {
-  color: oklch(38% 0.08 246);
-  border-color: color-mix(in oklch, oklch(38% 0.08 246) 45%, var(--pt-rule));
+  color: oklch(38% 0.06 246);
+  border-color: color-mix(in oklch, oklch(38% 0.06 246) 35%, var(--pt-rule));
+  background: color-mix(in oklch, var(--pt-seg-bg) 70%, transparent);
 }
 
 /* Column width system via colgroup classes */
@@ -1274,11 +1305,12 @@ textarea:focus-visible,
   -webkit-overflow-scrolling: touch;
 }
 
-.positions-by-symbol thead th {
-  /* Static: sticky headers + wide min-width tables can expand document scrollWidth. */
+table.positions-by-symbol thead th {
+  /* Static: sticky headers + wide min-width tables can expand document scrollWidth.
+   * Specificity must beat later .data-table thead th chrome. */
   position: static;
   background: var(--pt-header-bg);
-  color: var(--text-dim);
+  color: var(--pt-text-dim);
   border-bottom: 1px solid var(--pt-rule-strong);
   font-size: 0.62rem;
   letter-spacing: 0.07em;
@@ -1312,28 +1344,52 @@ textarea:focus-visible,
   min-width: 0;
 }
 
-.positions-by-symbol tbody tr.position-row-level-1 th,
-.positions-by-symbol tbody tr.position-row-level-1 td {
+table.positions-by-symbol tbody tr.position-row-level-1 th,
+table.positions-by-symbol tbody tr.position-row-level-1 td {
   background: var(--pt-row-bg);
 }
 
-.positions-by-symbol tbody tr.position-row-level-1:nth-child(even) th,
-.positions-by-symbol tbody tr.position-row-level-1:nth-child(even) td {
+table.positions-by-symbol tbody tr.position-row-level-1:nth-child(even) th,
+table.positions-by-symbol tbody tr.position-row-level-1:nth-child(even) td {
   background: var(--pt-row-alt);
 }
 
-.positions-by-symbol tbody tr.position-row-level-1:hover th,
-.positions-by-symbol tbody tr.position-row-level-1:hover td,
-.positions-by-symbol tbody tr.position-row-level-2:hover th,
-.positions-by-symbol tbody tr.position-row-level-2:hover td {
+table.positions-by-symbol tbody tr.position-row-level-1:hover th,
+table.positions-by-symbol tbody tr.position-row-level-1:hover td,
+table.positions-by-symbol tbody tr.position-row-level-2:hover th,
+table.positions-by-symbol tbody tr.position-row-level-2:hover td {
   background: color-mix(in oklch, var(--pt-row-alt) 65%, var(--pt-header-bg));
 }
 
-.positions-by-symbol tbody tr.position-row-level-1:focus-within th,
-.positions-by-symbol tbody tr.position-row-level-1:focus-within td,
-.positions-by-symbol tbody tr.position-row-level-2:focus-within th,
-.positions-by-symbol tbody tr.position-row-level-2:focus-within td {
+table.positions-by-symbol tbody tr.position-row-level-1:focus-within th,
+table.positions-by-symbol tbody tr.position-row-level-1:focus-within td,
+table.positions-by-symbol tbody tr.position-row-level-2:focus-within th,
+table.positions-by-symbol tbody tr.position-row-level-2:focus-within td {
   background: color-mix(in oklch, var(--pt-dot) 7%, var(--pt-row-bg));
+}
+
+/* Neutralize generic data-table row paints so cell-level charcoal bands win. */
+table.positions-by-symbol.data-table tbody tr:hover,
+table.positions-by-symbol.data-table tbody tr:focus-within {
+  background: transparent;
+}
+
+/* Scoped secondary copy: avoid inheriting warm app neutrals inside the grid. */
+.positions-by-symbol .muted {
+  color: var(--pt-text-dim);
+}
+
+.positions-by-symbol .microcopy {
+  color: var(--pt-text-soft);
+}
+
+.positions-by-symbol .catalyst-inline.quiet {
+  /* Lift above global --text-dim so quiet catalysts clear WCAG AA on charcoal rows. */
+  color: var(--pt-text-soft);
+}
+
+.positions-by-symbol .catalyst-inline.promoted {
+  color: var(--pt-text);
 }
 
 /* Soft-wrap only catalyst / long position labels; keep numerics single-line. */
@@ -1356,8 +1412,8 @@ textarea:focus-visible,
   overflow: hidden;
 }
 
-.symbol-group-header-row th,
-.symbol-group-header-row td {
+table.positions-by-symbol .symbol-group-header-row th,
+table.positions-by-symbol .symbol-group-header-row td {
   padding: 0;
   border-bottom: 1px solid var(--pt-rule-strong);
   background: var(--pt-symbol-bg);
@@ -1399,7 +1455,7 @@ textarea:focus-visible,
 }
 
 .symbol-group-toggle:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--pt-focus);
   outline-offset: -2px;
 }
 
@@ -1407,7 +1463,7 @@ textarea:focus-visible,
   display: inline-block;
   width: 0.75rem;
   flex-shrink: 0;
-  color: var(--text-dim);
+  color: var(--pt-text-dim);
   font-size: 0.7rem;
   line-height: 1;
   text-align: center;
@@ -1424,7 +1480,7 @@ textarea:focus-visible,
   letter-spacing: 0.05em;
   font-family: var(--font-mono);
   font-size: 0.9rem;
-  color: var(--text);
+  color: var(--pt-text);
 }
 
 .symbol-group-meta {
@@ -1433,7 +1489,7 @@ textarea:focus-visible,
   align-items: baseline;
   gap: 0.3rem 0.55rem;
   min-width: 0;
-  color: var(--text-soft);
+  color: var(--pt-text-soft);
   font-size: 0.74rem;
   font-weight: 500;
 }
@@ -1449,7 +1505,7 @@ textarea:focus-visible,
   font-family: var(--font-mono);
   font-weight: 650;
   font-size: 0.84rem;
-  color: var(--text);
+  color: var(--pt-text);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1462,7 +1518,7 @@ textarea:focus-visible,
 }
 
 .symbol-group-pnl-flat {
-  color: var(--text);
+  color: var(--pt-text);
 }
 
 /* Hierarchy: indent + magenta dots (no gold vertical bars). */
@@ -1476,8 +1532,8 @@ textarea:focus-visible,
   font-weight: 500;
 }
 
-.positions-by-symbol .position-row-level-2 th[scope="row"],
-.positions-by-symbol .position-row-level-2 td {
+table.positions-by-symbol .position-row-level-2 th[scope="row"],
+table.positions-by-symbol .position-row-level-2 td {
   padding-top: 0.2rem;
   padding-bottom: 0.2rem;
   font-size: 0.76rem;
@@ -1570,7 +1626,7 @@ button.strategy-legs-toggle:hover {
 }
 
 button.strategy-legs-toggle:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--pt-focus);
   outline-offset: 1px;
 }
 
@@ -1578,21 +1634,21 @@ button.strategy-legs-toggle:focus-visible {
   display: inline-block;
   width: 0.7rem;
   flex-shrink: 0;
-  color: var(--text-dim);
+  color: var(--pt-text-dim);
   font-size: 0.68rem;
   line-height: 1;
 }
 
 .strategy-legs-name {
   font-weight: 650;
-  color: var(--text);
+  color: var(--pt-text);
   letter-spacing: 0.01em;
 }
 
 .strategy-leg-count {
   font-size: 0.7rem;
   font-weight: 500;
-  color: var(--text-soft);
+  color: var(--pt-text-soft);
   font-family: var(--font-mono);
   letter-spacing: 0.01em;
   white-space: nowrap;
@@ -1603,7 +1659,7 @@ button.strategy-analysis-action {
   padding: 0.08rem 0.15rem;
   margin: 0;
   background: transparent;
-  color: var(--text-soft);
+  color: var(--pt-text-soft);
   cursor: pointer;
   font: inherit;
   font-size: 0.7rem;
@@ -1616,13 +1672,13 @@ button.strategy-analysis-action {
 }
 
 button.strategy-analysis-action:hover {
-  color: var(--text);
-  background: color-mix(in oklch, var(--text) 6%, transparent);
+  color: var(--pt-text);
+  background: color-mix(in oklch, var(--pt-text) 6%, transparent);
   text-decoration: none;
 }
 
 button.strategy-analysis-action:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--pt-focus);
   outline-offset: 1px;
 }
 
@@ -1632,7 +1688,7 @@ button.strategy-open-action {
   padding: 0.05rem 0.05rem;
   margin: 0;
   background: transparent;
-  color: var(--text);
+  color: var(--pt-text);
   cursor: pointer;
   font: inherit;
   font-weight: 650;
@@ -1648,7 +1704,7 @@ button.strategy-open-action:hover {
 }
 
 button.strategy-open-action:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--pt-focus);
   outline-offset: 1px;
 }
 
@@ -1694,18 +1750,18 @@ button.strategy-open-action:focus-visible {
 .contract-identity-equity .contract-instrument {
   font-family: var(--font-sans, inherit);
   font-weight: 600;
-  color: var(--text);
+  color: var(--pt-text);
   letter-spacing: 0.01em;
 }
 
 .contract-qty {
   font-weight: 700;
-  color: var(--text);
+  color: var(--pt-text);
 }
 
 .contract-type {
   font-weight: 700;
-  color: var(--text);
+  color: var(--pt-text);
   letter-spacing: 0.03em;
   min-width: 1.1rem;
   justify-content: center;
@@ -1745,11 +1801,11 @@ button.strategy-open-action:focus-visible {
   color: var(--pt-danger);
 }
 
-.pnl-metric-percent {
+.positions-by-symbol .pnl-metric-percent {
   flex-shrink: 0;
   font-size: 0.66rem;
   font-weight: 600;
-  color: var(--text-soft);
+  color: var(--pt-text-soft);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1787,12 +1843,12 @@ button.strategy-open-action:focus-visible {
 }
 
 .positions-by-symbol .pnl-bar-fill-flat {
-  background: var(--text-dim);
+  background: var(--pt-text-dim);
 }
 
 .positions-combined-hint {
   margin-top: -0.15rem;
-  color: var(--text-soft);
+  color: var(--pt-text-soft);
 }
 
 .combined-strategy-row th[scope="row"] {
@@ -1884,11 +1940,11 @@ button.strategy-open-action:focus-visible {
 }
 
 .premium-credit {
-  color: var(--good);
+  color: var(--pt-good, var(--good));
 }
 
 .premium-debit {
-  color: var(--danger);
+  color: var(--pt-danger, var(--danger));
 }
 
 .premium-flat {
