@@ -2569,11 +2569,12 @@ test("content density and no page overflow at desktop, tablet, and phone", async
       // More than a single card worth of content above the fold.
       expect(metrics.visibleSectionCount).toBeGreaterThanOrEqual(2);
     }
-    // Body text: ≥16px on phone; desktop/tablet may stay denser (≥13px).
-    if (width <= 390) {
+    // Body text: ≥16px on phone and narrow/side-panel widths; wide desktop stays dense.
+    if (width <= 1024) {
       expect(metrics.bodyFontSize).toBeGreaterThanOrEqual(16);
     } else {
       expect(metrics.bodyFontSize).toBeGreaterThanOrEqual(13);
+      expect(metrics.bodyFontSize).toBeLessThan(15.5);
     }
   }
 
@@ -2694,6 +2695,100 @@ test("content density and no page overflow at desktop, tablet, and phone", async
   });
   expect(narrowMetrics.stacked).toBeTruthy();
   expect(narrowMetrics.pageOverflow).toBeFalsy();
+});
+
+test("responsive typography is larger in Codex side panel and phone, dense on wide desktop", async ({
+  page,
+}) => {
+  await mockDashboardApis(page);
+  const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";
+  await page.goto(`/?launch_token=${encodeURIComponent(launchToken)}`);
+  await page.getByRole("button", { name: "Positions" }).click();
+  await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
+  await expect(page.getByText("Short Put").first()).toBeVisible();
+
+  async function sampleTypeMetrics() {
+    return page.evaluate(() => {
+      const body = document.body;
+      const nav = document.querySelector(".nav-item") as HTMLElement | null;
+      const strategy =
+        (document.querySelector(".strategy-combined-name") as HTMLElement | null) ??
+        (document.querySelector(".strategy-open-action") as HTMLElement | null) ??
+        (document.querySelector(".symbol-group-symbol") as HTMLElement | null);
+      const contract =
+        (document.querySelector(".contract-identity") as HTMLElement | null) ??
+        (document.querySelector(".contract-strike") as HTMLElement | null);
+      const pnl =
+        (document.querySelector(".pnl-metric-value") as HTMLElement | null) ??
+        (document.querySelector(".symbol-group-pnl") as HTMLElement | null) ??
+        (document.querySelector(".data-table.dense td") as HTMLElement | null);
+      const meta =
+        (document.querySelector(".roll-pnl-indicator") as HTMLElement | null) ??
+        (document.querySelector(".roll-status-badge") as HTMLElement | null) ??
+        (document.querySelector(".pnl-metric-percent") as HTMLElement | null) ??
+        (document.querySelector(".symbol-group-meta") as HTMLElement | null) ??
+        (document.querySelector("table.positions-by-symbol thead th") as HTMLElement | null);
+      const catalyst =
+        (document.querySelector(".catalyst-inline") as HTMLElement | null) ??
+        (document.querySelector(".positions-td-catalyst") as HTMLElement | null);
+      const doc = document.documentElement;
+      const px = (el: Element | null) =>
+        el ? Number.parseFloat(getComputedStyle(el).fontSize) || 0 : 0;
+      return {
+        rootFontSize: px(doc),
+        bodyFontSize: px(body),
+        navFontSize: px(nav),
+        strategyFontSize: px(strategy),
+        contractFontSize: px(contract),
+        pnlFontSize: px(pnl),
+        metaFontSize: px(meta),
+        catalystFontSize: px(catalyst),
+        pageOverflow: doc.scrollWidth > doc.clientWidth + 1,
+      };
+    });
+  }
+
+  // Codex in-app browser side panel (~800–900 CSS px): larger than legacy 14px body / ~9–11px chrome.
+  await page.setViewportSize({ width: 850, height: 900 });
+  await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
+  const sidePanel = await sampleTypeMetrics();
+  expect(sidePanel.rootFontSize).toBeGreaterThanOrEqual(17.5);
+  expect(sidePanel.bodyFontSize).toBeGreaterThanOrEqual(16);
+  expect(sidePanel.navFontSize).toBeGreaterThanOrEqual(11);
+  expect(sidePanel.strategyFontSize).toBeGreaterThanOrEqual(13);
+  expect(sidePanel.contractFontSize).toBeGreaterThanOrEqual(12);
+  expect(sidePanel.pnlFontSize).toBeGreaterThanOrEqual(13);
+  expect(sidePanel.metaFontSize).toBeGreaterThanOrEqual(11);
+  if (sidePanel.catalystFontSize > 0) {
+    expect(sidePanel.catalystFontSize).toBeGreaterThanOrEqual(12);
+  }
+  expect(sidePanel.pageOverflow).toBeFalsy();
+
+  // Phone: body remains comfortably large; bottom nav labels stay usable with icons.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
+  const phone = await sampleTypeMetrics();
+  expect(phone.bodyFontSize).toBeGreaterThanOrEqual(16);
+  expect(phone.strategyFontSize).toBeGreaterThanOrEqual(13);
+  expect(phone.contractFontSize).toBeGreaterThanOrEqual(12);
+  expect(phone.pnlFontSize).toBeGreaterThanOrEqual(13);
+  expect(phone.metaFontSize).toBeGreaterThanOrEqual(11);
+  expect(phone.navFontSize).toBeGreaterThanOrEqual(9);
+  expect(phone.pageOverflow).toBeFalsy();
+
+  // Wide desktop: preserve dense 14px body baseline and default 16px root.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
+  const desktop = await sampleTypeMetrics();
+  expect(desktop.rootFontSize).toBeGreaterThanOrEqual(15.5);
+  expect(desktop.rootFontSize).toBeLessThan(16.5);
+  expect(desktop.bodyFontSize).toBeGreaterThanOrEqual(13.5);
+  expect(desktop.bodyFontSize).toBeLessThan(15);
+  // Side-panel type is strictly larger than the preserved dense desktop baseline.
+  expect(sidePanel.bodyFontSize).toBeGreaterThan(desktop.bodyFontSize);
+  expect(sidePanel.navFontSize).toBeGreaterThan(desktop.navFontSize);
+  expect(sidePanel.contractFontSize).toBeGreaterThan(desktop.contractFontSize);
+  expect(desktop.pageOverflow).toBeFalsy();
 });
 
 test("positions roll ledger aggregates all displayable accounts and clears on scope change", async ({
