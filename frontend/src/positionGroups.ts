@@ -334,6 +334,133 @@ export function formatLegStrike(leg: Pick<PositionLeg, "strike_price">): string 
 }
 
 /**
+ * Compact signed quantity for dense leg identity, e.g. "+1" / "−100".
+ * Uses quantity_direction when present; otherwise infers from signed quantity.
+ * Uses Unicode minus (U+2212) for short so it is visually distinct from a hyphen.
+ */
+export function formatSignedQuantity(
+  leg: Pick<PositionLeg, "quantity" | "quantity_direction">,
+): string {
+  const qty = Math.abs(leg.quantity);
+  const direction = (leg.quantity_direction ?? "").trim();
+  const isShort =
+    direction === "Short" || (direction !== "Long" && leg.quantity < 0);
+  return isShort ? `−${qty}` : `+${qty}`;
+}
+
+/** C / P code for option legs; null when not an option or unknown. */
+export function formatOptionTypeCode(
+  optionType: string | null | undefined,
+): string | null {
+  const opt = (optionType ?? "").trim().toUpperCase();
+  if (opt === "C" || opt === "CALL") return "C";
+  if (opt === "P" || opt === "PUT") return "P";
+  return null;
+}
+
+/**
+ * Compact calendar expiration for contract identity, e.g. "Aug 15".
+ * Date-only values (YYYY-MM-DD) format in UTC so the calendar day is stable.
+ */
+export function formatCompactExpiration(
+  value: string | null | undefined,
+): string | null {
+  if (!value) return null;
+  try {
+    const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(value);
+    return new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+      timeZone: dateOnly ? "UTC" : undefined,
+    }).format(new Date(dateOnly ? `${value}T00:00:00Z` : value));
+  } catch {
+    return value;
+  }
+}
+
+/** Compact DTE label, e.g. "18d"; null when unavailable. */
+export function formatDteLabel(dte: number | null | undefined): string | null {
+  if (dte == null || Number.isNaN(dte)) return null;
+  return `${dte}d`;
+}
+
+/**
+ * Clamp only the visual P/L bar fill length (0–100%). Does not alter the
+ * displayed percentage value.
+ */
+export function clampPnlBarPercent(percent: number, max = 100): number {
+  if (!Number.isFinite(percent)) return 0;
+  const abs = Math.abs(percent);
+  return Math.min(max, abs);
+}
+
+/** Segmented contract / equity identity for a position leg (dense first cell). */
+export type LegIdentitySegments = {
+  /** Signed quantity for visual density, e.g. "+1" / "−100". */
+  signedQuantity: string;
+  /** Long/Short + abs qty for screen readers and side column fallbacks. */
+  sideQuantity: string;
+  /** True when the leg is equity rather than an option. */
+  isEquity: boolean;
+  /** "Equity" / "Call" / "Put" / fallback instrument label. */
+  instrument: string;
+  /** Compact expiration, e.g. "Aug 15"; null for equity / missing. */
+  expiration: string | null;
+  /** Compact DTE, e.g. "18d"; null when missing. */
+  dte: string | null;
+  /** Strike with $, e.g. "$470"; null for equity / missing. */
+  strike: string | null;
+  /** Option type code C/P; null for equity / unknown. */
+  optionType: string | null;
+  /**
+   * Single accessible phrase covering all segments, e.g.
+   * "Short 1, Aug 15, 18 days, strike $470, Put".
+   */
+  accessibleLabel: string;
+};
+
+/**
+ * Build compact identity segments for a backend PositionLeg.
+ * Does not invent broker fields — only formats what the leg already carries.
+ */
+export function getLegIdentitySegments(leg: PositionLeg): LegIdentitySegments {
+  const isEquity = isEquityLeg(leg);
+  const instrument = formatLegInstrument(leg);
+  const sideQuantity = formatLegSideQuantity(leg);
+  const signedQuantity = formatSignedQuantity(leg);
+  const expiration = isEquity ? null : formatCompactExpiration(leg.expiration_date);
+  const dte = isEquity ? null : formatDteLabel(leg.days_to_expiration);
+  const strike = isEquity ? null : formatLegStrike(leg);
+  const optionType = isEquity ? null : formatOptionTypeCode(leg.option_type);
+
+  const parts: string[] = [sideQuantity];
+  if (isEquity) {
+    parts.push(instrument);
+  } else {
+    if (expiration) parts.push(expiration);
+    if (leg.days_to_expiration != null && !Number.isNaN(leg.days_to_expiration)) {
+      parts.push(
+        `${leg.days_to_expiration} day${leg.days_to_expiration === 1 ? "" : "s"} to expiration`,
+      );
+    }
+    if (strike) parts.push(`strike ${strike}`);
+    if (instrument) parts.push(instrument);
+  }
+
+  return {
+    signedQuantity,
+    sideQuantity,
+    isEquity,
+    instrument,
+    expiration,
+    dte,
+    strike,
+    optionType,
+    accessibleLabel: parts.join(", "),
+  };
+}
+
+/**
  * Deterministic HTML id fragment for a strategy_id.
  * Same encoding rules as sanitizeSymbolDomId so ids stay collision-free.
  */
@@ -353,7 +480,7 @@ export function sanitizeStrategyDomId(strategyId: string): string {
   return out || "unknown-strategy";
 }
 
-/** Full disclosure panel id for a strategy's leg ledger (`aria-controls` target). */
+/** Stable id for the first disclosed leg row (`aria-controls` target). */
 export function strategyLegsPanelId(strategyId: string): string {
   return `strategy-legs-panel-${sanitizeStrategyDomId(strategyId)}`;
 }

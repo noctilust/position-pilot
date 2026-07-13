@@ -1231,6 +1231,125 @@ test("symbol-grouped positions: collapse, category toggles, ledger isolation, ov
   expect(accessibility.violations).toEqual([]);
 });
 
+test("positions hierarchy levels, aligned leg rows, contract identity, and P/L bars", async ({
+  page,
+}) => {
+  await mockDashboardApis(page);
+  const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";
+  await page.goto(`/?launch_token=${encodeURIComponent(launchToken)}`);
+  await page.getByRole("button", { name: "Positions" }).click();
+  await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
+
+  // Hierarchy hooks: symbol (0), strategy (1), and (after expand) leg (2) rows.
+  const level0 = page.locator("tr[data-level='0']");
+  const level1 = page.locator("tr[data-level='1']");
+  await expect(level0).toHaveCount(3);
+  await expect(level1).toHaveCount(4);
+  await expect(page.locator("tr.position-row-level-0")).toHaveCount(3);
+  await expect(page.locator("tr.position-row-level-1")).toHaveCount(4);
+  // Combined strategies exist but legs stay collapsed by default.
+  await expect(page.locator("tr[data-level='2']:visible")).toHaveCount(0);
+
+  // Indentation hooks: level-2 padding exceeds level-1, which exceeds level-0 content inset.
+  const paddingLeft = await page.evaluate(() => {
+    const l0 = document.querySelector<HTMLElement>(
+      "tr[data-level='0'] th, tr[data-level='0'] td",
+    );
+    const l1 = document.querySelector<HTMLElement>("tr[data-level='1'] th[scope='row']");
+    return {
+      l0: l0 ? Number.parseFloat(getComputedStyle(l0).paddingLeft) : -1,
+      l1: l1 ? Number.parseFloat(getComputedStyle(l1).paddingLeft) : -1,
+    };
+  });
+  expect(paddingLeft.l1).toBeGreaterThan(paddingLeft.l0);
+
+  // One global header — no nested strategy-legs table.
+  await expect(page.locator("table.positions-by-symbol > thead")).toHaveCount(1);
+  await expect(page.locator("table.strategy-legs-table")).toHaveCount(0);
+  await expect(page.locator(".strategy-legs-detail-row")).toHaveCount(0);
+
+  // Positive / negative / unavailable unrealized P/L percent on strategy rows.
+  const spyPutRow = page
+    .locator("tr[data-level='1']")
+    .filter({ has: page.getByRole("button", { name: "Open SPY Short Put" }) });
+  await expect(spyPutRow.locator(".pnl-metric")).toContainText("$40.00");
+  await expect(spyPutRow.locator(".pnl-metric")).toHaveClass(/pnl-metric-positive/);
+  await expect(spyPutRow.locator(".pnl-metric-percent")).toContainText("+10.0%");
+  await expect(spyPutRow.locator(".pnl-bar-fill-positive")).toBeVisible();
+
+  const qqqStrategyRow = page
+    .locator("tr[data-level='1'].combined-strategy-row")
+    .filter({ hasText: "Iron Condor" });
+  await expect(qqqStrategyRow.locator(".pnl-metric")).toContainText("$25.00");
+  await expect(qqqStrategyRow.locator(".pnl-metric")).toHaveClass(/pnl-metric-negative/);
+  await expect(qqqStrategyRow.locator(".pnl-metric-percent")).toContainText("-8.0%");
+  await expect(qqqStrategyRow.locator(".pnl-bar-fill-negative")).toBeVisible();
+
+  // Expand QQQ: four aligned main-table leg rows; no nested table/header.
+  await page.getByRole("button", { name: /Expand legs for QQQ Iron Condor/i }).click();
+  const qqqLegs = page.locator(
+    "tr[data-level='2'][data-parent-strategy='strat-qqq']:visible",
+  );
+  await expect(qqqLegs).toHaveCount(4);
+  await expect(page.locator("table.strategy-legs-table")).toHaveCount(0);
+  await expect(page.locator("table.positions-by-symbol thead")).toHaveCount(1);
+
+  // Contract segments: signed qty, expiry, DTE, strike, option type.
+  const longPutLeg = qqqLegs.filter({ hasText: "$470" }).first();
+  await expect(longPutLeg.locator(".contract-qty")).toHaveText("+1");
+  await expect(longPutLeg.locator(".contract-exp")).toContainText("Aug");
+  await expect(longPutLeg.locator(".contract-dte")).toHaveText("18d");
+  await expect(longPutLeg.locator(".contract-strike")).toHaveText("$470");
+  await expect(longPutLeg.locator(".contract-type")).toHaveText("P");
+  await expect(longPutLeg.locator(".sr-only")).toContainText("Long 1");
+
+  const shortCallLeg = qqqLegs.filter({ hasText: "$505" }).first();
+  await expect(shortCallLeg.locator(".contract-qty")).toHaveText("−1");
+  await expect(shortCallLeg.locator(".contract-type")).toHaveText("C");
+  await expect(shortCallLeg.locator(".contract-strike")).toHaveText("$505");
+
+  // Unavailable leg percent: value shown, bar omitted.
+  await expect(longPutLeg.locator(".pnl-metric-value")).toBeVisible();
+  await expect(longPutLeg.locator(".pnl-bar-track")).toHaveCount(0);
+  await expect(longPutLeg.locator(".pnl-metric-percent")).toHaveCount(0);
+
+  // Level-2 indentation exceeds level-1.
+  const legPad = await page.evaluate(() => {
+    const l1 = document.querySelector<HTMLElement>("tr[data-level='1'] th[scope='row']");
+    const l2 = document.querySelector<HTMLElement>(
+      "tr[data-level='2']:not([hidden]) th[scope='row']",
+    );
+    return {
+      l1: l1 ? Number.parseFloat(getComputedStyle(l1).paddingLeft) : -1,
+      l2: l2 ? Number.parseFloat(getComputedStyle(l2).paddingLeft) : -1,
+    };
+  });
+  expect(legPad.l2).toBeGreaterThan(legPad.l1);
+
+  // Equity leg identity on Covered Call expand.
+  await page.getByRole("button", { name: /Expand legs for AAPL Covered Call/i }).click();
+  const aaplLegs = page.locator(
+    "tr[data-level='2'][data-parent-strategy='strat-aapl-cc']:visible",
+  );
+  await expect(aaplLegs).toHaveCount(2);
+  const equityLeg = aaplLegs.filter({ hasText: "Equity" }).first();
+  await expect(equityLeg.locator(".contract-qty")).toHaveText("+100");
+  await expect(equityLeg.locator(".contract-instrument")).toHaveText("Equity");
+  const callLeg = aaplLegs.filter({ hasText: "$220" }).first();
+  await expect(callLeg.locator(".contract-qty")).toHaveText("−1");
+  await expect(callLeg.locator(".contract-type")).toHaveText("C");
+  await expect(callLeg.locator(".contract-strike")).toHaveText("$220");
+
+  // Single-leg strategy also shows compact identity (not a combined disclosure).
+  const spyPutIdentity = spyPutRow.locator(".contract-identity");
+  await expect(spyPutIdentity.locator(".contract-qty")).toHaveText("−1");
+  await expect(spyPutIdentity.locator(".contract-type")).toHaveText("P");
+  await expect(spyPutIdentity.locator(".contract-strike")).toHaveText("$500");
+
+  const accessibility = await new AxeBuilder({ page }).analyze();
+  expect(accessibility.violations).toEqual([]);
+});
+
 test("combined strategy leg disclosure: expand, independence, filters, analysis, a11y", async ({
   page,
 }) => {
@@ -1242,105 +1361,118 @@ test("combined strategy leg disclosure: expand, independence, filters, analysis,
 
   const qqqToggle = page.getByRole("button", { name: /Expand legs for QQQ Iron Condor/i });
   const aaplToggle = page.getByRole("button", { name: /Expand legs for AAPL Covered Call/i });
-  const qqqPanel = page.locator("#strategy-legs-panel-strat-qqq");
-  const aaplPanel = page.locator("#strategy-legs-panel-strat-aapl-cc");
+  const qqqFirstLeg = page.locator("#strategy-legs-panel-strat-qqq");
+  const aaplFirstLeg = page.locator("#strategy-legs-panel-strat-aapl-cc");
   await expect(qqqToggle).toHaveAttribute("aria-expanded", "false");
   await expect(aaplToggle).toHaveAttribute("aria-expanded", "false");
-  await expect(qqqToggle).toHaveAttribute("aria-controls", "strategy-legs-panel-strat-qqq");
-  await expect(aaplToggle).toHaveAttribute("aria-controls", "strategy-legs-panel-strat-aapl-cc");
-  // Collapsed: aria-controls targets stay in the DOM but are hidden/inert.
-  await expect(qqqPanel).toBeAttached();
-  await expect(qqqPanel).toBeHidden();
-  await expect(aaplPanel).toBeAttached();
-  await expect(aaplPanel).toBeHidden();
-  await expect(qqqPanel.locator("table")).toHaveCount(0);
-  await expect(page.getByRole("region", { name: /Legs for QQQ Iron Condor/i })).toHaveCount(0);
-  await expect(page.getByRole("region", { name: /Legs for AAPL Covered Call/i })).toHaveCount(0);
+  // aria-controls lists every leg row id; first id remains the stable panel root.
+  await expect(qqqToggle).toHaveAttribute(
+    "aria-controls",
+    /strategy-legs-panel-strat-qqq/,
+  );
+  await expect(aaplToggle).toHaveAttribute(
+    "aria-controls",
+    /strategy-legs-panel-strat-aapl-cc/,
+  );
+  // Collapsed: leg rows stay in the DOM but are hidden; no nested table.
+  await expect(qqqFirstLeg).toBeAttached();
+  await expect(qqqFirstLeg).toBeHidden();
+  await expect(aaplFirstLeg).toBeAttached();
+  await expect(aaplFirstLeg).toBeHidden();
+  await expect(page.locator("table.strategy-legs-table")).toHaveCount(0);
+  await expect(
+    page.locator("tr[data-level='2'][data-parent-strategy='strat-qqq']:visible"),
+  ).toHaveCount(0);
 
-  // Expand Iron Condor: same panel id becomes visible with four option legs; other stays collapsed.
+  // Expand Iron Condor: four aligned main-table leg rows; AAPL stays collapsed.
   await qqqToggle.click();
   await expect(
     page.getByRole("button", { name: /Collapse legs for QQQ Iron Condor/i }),
   ).toHaveAttribute("aria-expanded", "true");
   await expect(aaplToggle).toHaveAttribute("aria-expanded", "false");
-  await expect(qqqPanel).toBeVisible();
-  await expect(qqqPanel).toHaveAttribute("id", "strategy-legs-panel-strat-qqq");
-  await expect(aaplPanel).toBeHidden();
-  const qqqLegs = page.getByRole("region", { name: /Legs for QQQ Iron Condor/i });
-  await expect(qqqLegs).toBeVisible();
-  await expect(page.getByRole("region", { name: /Legs for AAPL Covered Call/i })).toHaveCount(0);
-  const qqqLegRows = qqqLegs.locator("tbody tr");
-  await expect(qqqLegRows).toHaveCount(4);
-  await expect(qqqLegs).toContainText("Long 1");
-  await expect(qqqLegs).toContainText("Short 1");
-  await expect(qqqLegs).toContainText("Put");
-  await expect(qqqLegs).toContainText("Call");
-  await expect(qqqLegs).toContainText("$470");
-  await expect(qqqLegs).toContainText("$475");
-  await expect(qqqLegs).toContainText("$505");
-  await expect(qqqLegs).toContainText("$510");
-  await expect(qqqLegs).toContainText("$0.40");
-  await expect(qqqLegs).toContainText("$1.10");
-  await expect(qqqLegs).toContainText("$1.20");
-  await expect(qqqLegs).toContainText("$0.50");
-  await expect(qqqLegs).toContainText("QQQ  260815P00470000");
-  // No account identifiers in the leg ledger.
-  await expect(qqqLegs).not.toContainText("public-account-id");
+  await expect(qqqFirstLeg).toBeVisible();
+  await expect(qqqFirstLeg).toHaveAttribute("data-level", "2");
+  await expect(aaplFirstLeg).toBeHidden();
+  const qqqLegs = page.locator(
+    "tr[data-level='2'][data-parent-strategy='strat-qqq']:visible",
+  );
+  await expect(qqqLegs).toHaveCount(4);
+  await expect(
+    page.locator("tr[data-level='2'][data-parent-strategy='strat-aapl-cc']:visible"),
+  ).toHaveCount(0);
+  await expect(qqqLegs.first()).toContainText("+1");
+  await expect(qqqLegs.nth(1)).toContainText("−1");
+  await expect(qqqLegs.filter({ hasText: "P" }).first()).toBeVisible();
+  await expect(qqqLegs.filter({ hasText: "C" }).first()).toBeVisible();
+  await expect(qqqLegs.filter({ hasText: "$470" })).toHaveCount(1);
+  await expect(qqqLegs.filter({ hasText: "$475" })).toHaveCount(1);
+  await expect(qqqLegs.filter({ hasText: "$505" })).toHaveCount(1);
+  await expect(qqqLegs.filter({ hasText: "$510" })).toHaveCount(1);
+  // Legs align under the main table columns (no nested thead).
+  await expect(page.locator("table.positions-by-symbol thead tr th")).toHaveCount(8);
+  await expect(page.locator("table.strategy-legs-table")).toHaveCount(0);
+  // No account identifiers in leg rows.
+  await expect(qqqLegs.first()).not.toContainText("public-account-id");
 
-  // Expand Covered Call independently: Equity + Call legs; currency marks.
+  // Expand Covered Call independently: Equity + Call legs in main table.
   await aaplToggle.click();
   await expect(
     page.getByRole("button", { name: /Collapse legs for AAPL Covered Call/i }),
   ).toHaveAttribute("aria-expanded", "true");
-  await expect(aaplPanel).toBeVisible();
-  await expect(aaplPanel).toHaveAttribute("id", "strategy-legs-panel-strat-aapl-cc");
-  const aaplLegs = page.getByRole("region", { name: /Legs for AAPL Covered Call/i });
-  await expect(aaplLegs).toBeVisible();
-  await expect(aaplLegs.locator("tbody tr")).toHaveCount(2);
-  await expect(aaplLegs).toContainText("Long 100");
-  await expect(aaplLegs).toContainText("Equity");
-  await expect(aaplLegs).toContainText("Short 1");
-  await expect(aaplLegs).toContainText("Call");
-  await expect(aaplLegs).toContainText("$220");
-  await expect(aaplLegs).toContainText("$210.00");
-  await expect(aaplLegs).toContainText("$1.50");
-  await expect(aaplLegs).toContainText("AAPL 260821C00220000");
-  await expect(aaplLegs).not.toContainText("public-account-id");
+  await expect(aaplFirstLeg).toBeVisible();
+  await expect(aaplFirstLeg).toHaveAttribute("data-level", "2");
+  const aaplLegs = page.locator(
+    "tr[data-level='2'][data-parent-strategy='strat-aapl-cc']:visible",
+  );
+  await expect(aaplLegs).toHaveCount(2);
+  await expect(aaplLegs.first()).toContainText("+100");
+  await expect(aaplLegs.first()).toContainText("Equity");
+  await expect(aaplLegs.nth(1)).toContainText("−1");
+  await expect(aaplLegs.nth(1)).toContainText("C");
+  await expect(aaplLegs.filter({ hasText: "$220" })).toHaveCount(1);
+  await expect(aaplLegs.first()).not.toContainText("public-account-id");
   // QQQ still expanded (independent state).
-  await expect(qqqLegs).toBeVisible();
-  await expect(qqqPanel).toBeVisible();
+  await expect(qqqLegs).toHaveCount(4);
+  await expect(qqqFirstLeg).toBeVisible();
 
-  // Collapse QQQ legs; panel id remains but is hidden again; AAPL remains open.
+  // Collapse QQQ legs; first-leg id remains but is hidden; AAPL remains open.
   await page.getByRole("button", { name: /Collapse legs for QQQ Iron Condor/i }).click();
   await expect(
     page.getByRole("button", { name: /Expand legs for QQQ Iron Condor/i }),
   ).toHaveAttribute("aria-expanded", "false");
-  await expect(qqqPanel).toBeAttached();
-  await expect(qqqPanel).toBeHidden();
-  await expect(qqqPanel.locator("table")).toHaveCount(0);
-  await expect(page.getByRole("region", { name: /Legs for QQQ Iron Condor/i })).toHaveCount(0);
-  await expect(aaplLegs).toBeVisible();
+  await expect(qqqFirstLeg).toBeAttached();
+  await expect(qqqFirstLeg).toBeHidden();
+  await expect(
+    page.locator("tr[data-level='2'][data-parent-strategy='strat-qqq']:visible"),
+  ).toHaveCount(0);
+  await expect(aaplLegs).toHaveCount(2);
 
-  // Symbol collapse hides nested ledger but preserves expanded choice.
+  // Symbol collapse hides leg rows but preserves expanded choice.
   const aaplSymbolToggle = page.locator("button.symbol-group-toggle").filter({ hasText: "AAPL" });
   await aaplSymbolToggle.click();
   await expect(aaplSymbolToggle).toHaveAttribute("aria-expanded", "false");
-  await expect(page.getByRole("region", { name: /Legs for AAPL Covered Call/i })).toHaveCount(0);
+  await expect(
+    page.locator("tr[data-level='2'][data-parent-strategy='strat-aapl-cc']:visible"),
+  ).toHaveCount(0);
   await aaplSymbolToggle.click();
   await expect(aaplSymbolToggle).toHaveAttribute("aria-expanded", "true");
   await expect(
     page.getByRole("button", { name: /Collapse legs for AAPL Covered Call/i }),
   ).toHaveAttribute("aria-expanded", "true");
-  await expect(page.getByRole("region", { name: /Legs for AAPL Covered Call/i })).toBeVisible();
+  await expect(
+    page.locator("tr[data-level='2'][data-parent-strategy='strat-aapl-cc']:visible"),
+  ).toHaveCount(2);
 
-  // Stock/Options filter: Covered Call stays under Options; nested state preserved when shown.
+  // Stock/Options filter: Covered Call stays under Options; leg state preserved when shown.
   const stockToggle = page.getByRole("checkbox", { name: /Show stock positions/i });
   const optionsToggle = page.getByRole("checkbox", { name: /Show options positions/i });
   await stockToggle.uncheck();
   await expect(
     page.getByRole("button", { name: /Collapse legs for AAPL Covered Call/i }),
   ).toHaveAttribute("aria-expanded", "true");
-  await expect(page.getByRole("region", { name: /Legs for AAPL Covered Call/i })).toBeVisible();
+  await expect(
+    page.locator("tr[data-level='2'][data-parent-strategy='strat-aapl-cc']:visible"),
+  ).toHaveCount(2);
   await expect(page.getByRole("button", { name: "Open SPY Long Stock" })).toHaveCount(0);
 
   await optionsToggle.uncheck();
@@ -1349,12 +1481,17 @@ test("combined strategy leg disclosure: expand, independence, filters, analysis,
     page.getByRole("button", { name: /Expand legs for AAPL Covered Call|Collapse legs for AAPL Covered Call/i }),
   ).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Open SPY Long Stock" })).toBeVisible();
-  // Re-enable Options: nested expanded state for AAPL restored.
+  // Re-enable Options: expanded state for AAPL restored.
   await optionsToggle.check();
   await expect(
     page.getByRole("button", { name: /Collapse legs for AAPL Covered Call/i }),
   ).toHaveAttribute("aria-expanded", "true");
-  await expect(page.getByRole("region", { name: /Legs for AAPL Covered Call/i })).toBeVisible();
+  await expect(
+    page.locator("tr[data-level='2'][data-parent-strategy='strat-aapl-cc']:visible"),
+  ).toHaveCount(2);
+
+  // Catalyst content still present on strategy rows.
+  await expect(page.getByText("No confirmed catalyst found").first()).toBeVisible();
 
   // Analysis action opens the strategy drawer without depending on disclosure.
   await page.getByRole("button", { name: "Open analysis for AAPL Covered Call" }).click();
@@ -1366,6 +1503,10 @@ test("combined strategy leg disclosure: expand, independence, filters, analysis,
   await page.getByRole("button", { name: "Open SPY Short Put" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await page.keyboard.press("Escape");
+
+  // Roll ledger rail still present beside positions.
+  await expect(page.getByRole("heading", { name: "Roll ledger" })).toBeVisible();
+  await expect(page.locator(".roll-ledger-row")).toHaveCount(3);
 
   for (const size of [
     { width: 1280, height: 800 },

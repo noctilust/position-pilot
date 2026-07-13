@@ -1,14 +1,20 @@
 import { expect, test } from "@playwright/test";
 
 import {
+  clampPnlBarPercent,
   classifyStrategy,
   countStrategiesByCategory,
   filterStrategiesByCategory,
+  formatCompactExpiration,
+  formatDteLabel,
   formatLegCountLabel,
   formatLegInstrument,
   formatLegSideQuantity,
   formatLegStrike,
+  formatOptionTypeCode,
+  formatSignedQuantity,
   formatSymbolGroupSplit,
+  getLegIdentitySegments,
   groupStrategiesBySymbol,
   isCombinedOptionStrategy,
   isEquityLeg,
@@ -436,6 +442,67 @@ test.describe("leg presentation helpers", () => {
     expect(isOptionLeg(leg())).toBe(false);
     expect(isOptionLeg(optionLeg())).toBe(true);
     expect(isOptionLeg(leg({ option_type: "P" }))).toBe(true);
+  });
+
+  test("formatSignedQuantity and option type / DTE helpers", () => {
+    expect(formatSignedQuantity(leg({ quantity: 100, quantity_direction: "Long" }))).toBe(
+      "+100",
+    );
+    expect(
+      formatSignedQuantity(optionLeg({ quantity: 1, quantity_direction: "Short" })),
+    ).toBe("−1");
+    expect(formatOptionTypeCode("C")).toBe("C");
+    expect(formatOptionTypeCode("put")).toBe("P");
+    expect(formatOptionTypeCode(null)).toBeNull();
+    expect(formatDteLabel(18)).toBe("18d");
+    expect(formatDteLabel(null)).toBeNull();
+    expect(formatCompactExpiration("2026-08-15")).toMatch(/Aug/);
+    expect(formatCompactExpiration("2026-08-15")).toMatch(/15/);
+    expect(formatCompactExpiration(null)).toBeNull();
+  });
+
+  test("getLegIdentitySegments builds option and equity compact identities", () => {
+    const put = getLegIdentitySegments(
+      optionLeg({
+        quantity: 1,
+        quantity_direction: "Short",
+        option_type: "P",
+        strike_price: 475,
+        expiration_date: "2026-08-15",
+        days_to_expiration: 18,
+      }),
+    );
+    expect(put.isEquity).toBe(false);
+    expect(put.signedQuantity).toBe("−1");
+    expect(put.sideQuantity).toBe("Short 1");
+    expect(put.expiration).toMatch(/Aug/);
+    expect(put.dte).toBe("18d");
+    expect(put.strike).toBe("$475");
+    expect(put.optionType).toBe("P");
+    expect(put.instrument).toBe("Put");
+    expect(put.accessibleLabel).toContain("Short 1");
+    expect(put.accessibleLabel).toContain("Put");
+    expect(put.accessibleLabel).not.toContain("null");
+    expect(put.accessibleLabel).not.toContain("undefined");
+
+    const equity = getLegIdentitySegments(leg({ quantity: 100, quantity_direction: "Long" }));
+    expect(equity.isEquity).toBe(true);
+    expect(equity.signedQuantity).toBe("+100");
+    expect(equity.instrument).toBe("Equity");
+    expect(equity.expiration).toBeNull();
+    expect(equity.dte).toBeNull();
+    expect(equity.strike).toBeNull();
+    expect(equity.optionType).toBeNull();
+    expect(equity.accessibleLabel).toContain("Long 100");
+    expect(equity.accessibleLabel).toContain("Equity");
+  });
+
+  test("clampPnlBarPercent clamps visual bar only", () => {
+    expect(clampPnlBarPercent(10)).toBe(10);
+    expect(clampPnlBarPercent(-8)).toBe(8);
+    expect(clampPnlBarPercent(250)).toBe(100);
+    expect(clampPnlBarPercent(-999)).toBe(100);
+    expect(clampPnlBarPercent(Number.NaN)).toBe(0);
   });
 });
 
