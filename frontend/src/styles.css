@@ -1182,6 +1182,8 @@ textarea:focus-visible,
   --pt-seg-rule: oklch(39.8% 0 0);
   --pt-seg-text: oklch(86% 0.004 100);
   --pt-text: oklch(95.8% 0.0067 97);
+  /* Strategy names + contract identity: softer than primary symbol, brighter than metadata */
+  --pt-text-identity: oklch(89.5% 0.006 98);
   --pt-text-soft: oklch(78.1% 0.0056 107);
   --pt-text-dim: oklch(68% 0.004 100);
   --pt-good: oklch(71% 0.132 153);
@@ -1218,6 +1220,8 @@ textarea:focus-visible,
   --pt-seg-rule: oklch(82% 0.006 100);
   --pt-seg-text: oklch(28% 0.008 100);
   --pt-text: oklch(20% 0.008 100);
+  /* Softened near-black between primary (20%) and soft metadata (36%) */
+  --pt-text-identity: oklch(27% 0.008 100);
   --pt-text-soft: oklch(36% 0.008 100);
   --pt-text-dim: oklch(48% 0.006 100);
   /* Darker P/L tones so light theme meets WCAG on pale row bands */
@@ -1625,7 +1629,7 @@ table.positions-by-symbol .position-row-level-2 td {
 /* Combined multi-leg strategy name: same visual weight/origin as single-leg open action */
 .strategy-combined-name {
   font-weight: 650;
-  color: var(--pt-text);
+  color: var(--pt-text-identity);
   letter-spacing: 0.01em;
   padding: 0.05rem 0.05rem;
 }
@@ -1667,13 +1671,13 @@ button.strategy-analysis-action:focus-visible {
   outline-offset: 1px;
 }
 
-/* Single-leg open action: bright label, not orange hyperlink */
+/* Single-leg open action: identity tone (softer than symbol), not orange hyperlink */
 button.strategy-open-action {
   border: 0;
   padding: 0.05rem 0.05rem;
   margin: 0;
   background: transparent;
-  color: var(--pt-text);
+  color: var(--pt-text-identity);
   cursor: pointer;
   font: inherit;
   font-weight: 650;
@@ -1761,7 +1765,7 @@ button.strategy-open-action:focus-visible {
 .contract-qty {
   justify-content: flex-end;
   font-weight: 700;
-  color: var(--pt-text);
+  color: var(--pt-text-identity);
   padding-right: 0.28rem;
 }
 
@@ -1783,7 +1787,7 @@ button.strategy-open-action:focus-visible {
 
 .contract-type {
   font-weight: 700;
-  color: var(--pt-text);
+  color: var(--pt-text-identity);
   letter-spacing: 0.03em;
   justify-content: center;
 }
@@ -1791,7 +1795,7 @@ button.strategy-open-action:focus-visible {
 .contract-identity-equity .contract-instrument {
   font-family: var(--font-sans, inherit);
   font-weight: 600;
-  color: var(--pt-text);
+  color: var(--pt-text-identity);
   letter-spacing: 0.01em;
   justify-content: flex-start;
   padding-left: 0.35rem;

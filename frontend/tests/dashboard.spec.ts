@@ -1694,6 +1694,15 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
     const negativePnl = document.querySelector<HTMLElement>(
       ".symbol-group-pnl-negative, .pnl-metric-negative .pnl-metric-value",
     );
+    const symbolLabel = document.querySelector<HTMLElement>(".symbol-group-symbol");
+    const singleStrategyName = document.querySelector<HTMLElement>("button.strategy-open-action");
+    const combinedStrategyName = document.querySelector<HTMLElement>(".strategy-combined-name");
+    const contractQty = document.querySelector<HTMLElement>(".contract-qty");
+    const contractType = document.querySelector<HTMLElement>(".contract-type");
+    const contractDte = document.querySelector<HTMLElement>(".contract-dte");
+    const contractEquity = document.querySelector<HTMLElement>(
+      ".contract-identity-equity .contract-instrument",
+    );
     if (
       !table ||
       !header ||
@@ -1704,7 +1713,13 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
       !dot ||
       !hierarchyDot ||
       !positivePnl ||
-      !negativePnl
+      !negativePnl ||
+      !symbolLabel ||
+      !singleStrategyName ||
+      !combinedStrategyName ||
+      !contractQty ||
+      !contractType ||
+      !contractDte
     ) {
       return { ok: false as const, reason: "missing-nodes" };
     }
@@ -1718,6 +1733,7 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
       segBg: cs.getPropertyValue("--pt-seg-bg").trim(),
       segRule: cs.getPropertyValue("--pt-seg-rule").trim(),
       text: cs.getPropertyValue("--pt-text").trim(),
+      textIdentity: cs.getPropertyValue("--pt-text-identity").trim(),
       textSoft: cs.getPropertyValue("--pt-text-soft").trim(),
       dot: cs.getPropertyValue("--pt-dot").trim(),
       good: cs.getPropertyValue("--pt-good").trim(),
@@ -1736,6 +1752,15 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
     const posColor = parseOklch(getComputedStyle(positivePnl).color);
     const negColor = parseOklch(getComputedStyle(negativePnl).color);
     const primaryText = parseOklch(getComputedStyle(table).color);
+    const symbolColor = parseOklch(getComputedStyle(symbolLabel).color);
+    const singleNameColor = parseOklch(getComputedStyle(singleStrategyName).color);
+    const combinedNameColor = parseOklch(getComputedStyle(combinedStrategyName).color);
+    const qtyColor = parseOklch(getComputedStyle(contractQty).color);
+    const typeColor = parseOklch(getComputedStyle(contractType).color);
+    const dteColor = parseOklch(getComputedStyle(contractDte).color);
+    const equityColor = contractEquity
+      ? parseOklch(getComputedStyle(contractEquity).color)
+      : null;
 
     const tokenRow = parseTokenOklch(tokens.rowBg);
     const tokenHeader = parseTokenOklch(tokens.headerBg);
@@ -1744,6 +1769,9 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
     const tokenDanger = parseTokenOklch(tokens.danger);
     const tokenSeg = parseTokenOklch(tokens.segBg);
     const tokenSegRule = parseTokenOklch(tokens.segRule);
+    const tokenText = parseTokenOklch(tokens.text);
+    const tokenIdentity = parseTokenOklch(tokens.textIdentity);
+    const tokenSoft = parseTokenOklch(tokens.textSoft);
 
     if (
       !headerBg ||
@@ -1757,13 +1785,22 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
       !posColor ||
       !negColor ||
       !primaryText ||
+      !symbolColor ||
+      !singleNameColor ||
+      !combinedNameColor ||
+      !qtyColor ||
+      !typeColor ||
+      !dteColor ||
       !tokenRow ||
       !tokenHeader ||
       !tokenDot ||
       !tokenGood ||
       !tokenDanger ||
       !tokenSeg ||
-      !tokenSegRule
+      !tokenSegRule ||
+      !tokenText ||
+      !tokenIdentity ||
+      !tokenSoft
     ) {
       return {
         ok: false as const,
@@ -1790,6 +1827,13 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
       posColor,
       negColor,
       primaryText,
+      symbolColor,
+      singleNameColor,
+      combinedNameColor,
+      qtyColor,
+      typeColor,
+      dteColor,
+      equityColor,
       tokenRow,
       tokenHeader,
       tokenDot,
@@ -1797,6 +1841,9 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
       tokenDanger,
       tokenSeg,
       tokenSegRule,
+      tokenText,
+      tokenIdentity,
+      tokenSoft,
     };
   });
 
@@ -1808,6 +1855,7 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
     expect(darkPalette.tokens.legBg).toMatch(/oklch\(/i);
     expect(darkPalette.tokens.segBg).toMatch(/oklch\(/i);
     expect(darkPalette.tokens.text).toMatch(/oklch\(/i);
+    expect(darkPalette.tokens.textIdentity).toMatch(/oklch\(/i);
     expect(darkPalette.tokens.textSoft).toMatch(/oklch\(/i);
     expect(darkPalette.tokens.dot).toMatch(/oklch\(/i);
     expect(darkPalette.tokens.good).toMatch(/oklch\(/i);
@@ -1838,6 +1886,36 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
     // Primary labels remain light and readable on charcoal.
     expect(darkPalette.primaryText.l).toBeGreaterThan(90);
     expect(darkPalette.primaryText.c).toBeLessThan(0.03);
+
+    // Text identity hierarchy (dark): symbol primary > strategy/position identity > soft metadata.
+    // Compare relative lightness only — no brittle exact RGB literals.
+    const lTol = 1.5;
+    expect(Math.abs(darkPalette.symbolColor.l - darkPalette.tokenText.l)).toBeLessThanOrEqual(lTol);
+    expect(Math.abs(darkPalette.singleNameColor.l - darkPalette.tokenIdentity.l)).toBeLessThanOrEqual(
+      lTol,
+    );
+    expect(
+      Math.abs(darkPalette.combinedNameColor.l - darkPalette.tokenIdentity.l),
+    ).toBeLessThanOrEqual(lTol);
+    expect(Math.abs(darkPalette.singleNameColor.l - darkPalette.combinedNameColor.l)).toBeLessThanOrEqual(
+      lTol,
+    );
+    expect(Math.abs(darkPalette.qtyColor.l - darkPalette.tokenIdentity.l)).toBeLessThanOrEqual(lTol);
+    expect(Math.abs(darkPalette.typeColor.l - darkPalette.tokenIdentity.l)).toBeLessThanOrEqual(lTol);
+    if (darkPalette.equityColor) {
+      expect(Math.abs(darkPalette.equityColor.l - darkPalette.tokenIdentity.l)).toBeLessThanOrEqual(
+        lTol,
+      );
+    }
+    expect(darkPalette.tokenText.l).toBeGreaterThan(darkPalette.tokenIdentity.l + 2);
+    expect(darkPalette.tokenIdentity.l).toBeGreaterThan(darkPalette.tokenSoft.l + 2);
+    expect(darkPalette.symbolColor.l).toBeGreaterThan(darkPalette.singleNameColor.l + 2);
+    expect(darkPalette.singleNameColor.l).toBeGreaterThan(darkPalette.dteColor.l + 2);
+    // Emphasized contract segments must not jump back to bright primary.
+    expect(darkPalette.qtyColor.l).toBeLessThan(darkPalette.symbolColor.l - 2);
+    expect(darkPalette.typeColor.l).toBeLessThan(darkPalette.symbolColor.l - 2);
+    // DTE stays at most identity-bright (typically soft).
+    expect(darkPalette.dteColor.l).toBeLessThanOrEqual(darkPalette.tokenIdentity.l + lTol);
 
     // Magenta markers (high chroma, magenta-ish hue near 0/350–20).
     expect(darkPalette.dotBg.c).toBeGreaterThan(0.15);
@@ -1873,6 +1951,84 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
     .include("table.positions-by-symbol")
     .analyze();
   expect(lightAxe.violations).toEqual([]);
+
+  // Light theme text hierarchy: symbol primary < identity < soft metadata (numeric L).
+  const lightIdentity = await page.evaluate(() => {
+    type Oklch = { l: number; c: number; h: number };
+    const parseOklch = (value: string): Oklch | null => {
+      const m = value.match(/oklch\(\s*([\d.]+)\s*%?\s+([\d.]+)\s+(-?[\d.]+)/i);
+      if (!m) return null;
+      let l = Number(m[1]);
+      if (l <= 1) l *= 100;
+      return { l, c: Number(m[2]), h: Number(m[3]) };
+    };
+    const table = document.querySelector<HTMLElement>("table.positions-by-symbol");
+    const symbolLabel = document.querySelector<HTMLElement>(".symbol-group-symbol");
+    const singleName = document.querySelector<HTMLElement>("button.strategy-open-action");
+    const combinedName = document.querySelector<HTMLElement>(".strategy-combined-name");
+    const contractQty = document.querySelector<HTMLElement>(".contract-qty");
+    const contractDte = document.querySelector<HTMLElement>(".contract-dte");
+    if (!table || !symbolLabel || !singleName || !combinedName || !contractQty || !contractDte) {
+      return { ok: false as const, reason: "missing-nodes" };
+    }
+    const cs = getComputedStyle(table);
+    const tokenText = parseOklch(cs.getPropertyValue("--pt-text").trim());
+    const tokenIdentity = parseOklch(cs.getPropertyValue("--pt-text-identity").trim());
+    const tokenSoft = parseOklch(cs.getPropertyValue("--pt-text-soft").trim());
+    const symbolColor = parseOklch(getComputedStyle(symbolLabel).color);
+    const singleNameColor = parseOklch(getComputedStyle(singleName).color);
+    const combinedNameColor = parseOklch(getComputedStyle(combinedName).color);
+    const qtyColor = parseOklch(getComputedStyle(contractQty).color);
+    const dteColor = parseOklch(getComputedStyle(contractDte).color);
+    if (
+      !tokenText ||
+      !tokenIdentity ||
+      !tokenSoft ||
+      !symbolColor ||
+      !singleNameColor ||
+      !combinedNameColor ||
+      !qtyColor ||
+      !dteColor
+    ) {
+      return { ok: false as const, reason: "parse-oklch" };
+    }
+    return {
+      ok: true as const,
+      tokenText,
+      tokenIdentity,
+      tokenSoft,
+      symbolColor,
+      singleNameColor,
+      combinedNameColor,
+      qtyColor,
+      dteColor,
+    };
+  });
+  expect(lightIdentity, JSON.stringify(lightIdentity)).toMatchObject({ ok: true });
+  if (lightIdentity.ok) {
+    const lTol = 1.5;
+    expect(Math.abs(lightIdentity.symbolColor.l - lightIdentity.tokenText.l)).toBeLessThanOrEqual(
+      lTol,
+    );
+    expect(
+      Math.abs(lightIdentity.singleNameColor.l - lightIdentity.tokenIdentity.l),
+    ).toBeLessThanOrEqual(lTol);
+    expect(
+      Math.abs(lightIdentity.combinedNameColor.l - lightIdentity.tokenIdentity.l),
+    ).toBeLessThanOrEqual(lTol);
+    expect(
+      Math.abs(lightIdentity.singleNameColor.l - lightIdentity.combinedNameColor.l),
+    ).toBeLessThanOrEqual(lTol);
+    expect(Math.abs(lightIdentity.qtyColor.l - lightIdentity.tokenIdentity.l)).toBeLessThanOrEqual(
+      lTol,
+    );
+    // Light theme numeric L: primary (darker) < identity < soft (lighter gray).
+    expect(lightIdentity.tokenText.l).toBeLessThan(lightIdentity.tokenIdentity.l - 2);
+    expect(lightIdentity.tokenIdentity.l).toBeLessThan(lightIdentity.tokenSoft.l - 2);
+    expect(lightIdentity.symbolColor.l).toBeLessThan(lightIdentity.singleNameColor.l - 2);
+    expect(lightIdentity.singleNameColor.l).toBeLessThan(lightIdentity.dteColor.l + lTol);
+    expect(lightIdentity.qtyColor.l).toBeGreaterThan(lightIdentity.symbolColor.l + 2);
+  }
 
   // Narrow viewport: document does not overflow; table-local overflow is allowed.
   await page.setViewportSize({ width: 390, height: 844 });
