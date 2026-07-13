@@ -1335,8 +1335,8 @@ function formatPremiumEffect(value: number): { text: string; kind: "credit" | "d
 const POSITIONS_TABLE_COL_COUNT = 8;
 
 /**
- * Compact segmented identity for a leg in the main positions table first cell.
- * Visual segments stay dense; full phrase is exposed to assistive tech.
+ * Compact joined contract strip for a leg in the main positions table first cell.
+ * Visual segments use graphite bands; full phrase is exposed only via sr-only.
  */
 function LegContractIdentity({ leg }: { leg: PositionLeg }) {
   const identity = getLegIdentitySegments(leg);
@@ -1346,14 +1346,9 @@ function LegContractIdentity({ leg }: { leg: PositionLeg }) {
     return (
       <span className="contract-identity contract-identity-equity" title={contractTitle}>
         <span className="sr-only">{identity.accessibleLabel}</span>
-        <span className="contract-seg contract-qty" aria-hidden="true">
-          {identity.signedQuantity}
-        </span>
-        <span className="contract-seg-sep" aria-hidden="true">
-          ·
-        </span>
-        <span className="contract-seg contract-instrument" aria-hidden="true">
-          {identity.instrument}
+        <span className="contract-strip" aria-hidden="true">
+          <span className="contract-seg contract-qty">{identity.signedQuantity}</span>
+          <span className="contract-seg contract-instrument">{identity.instrument}</span>
         </span>
       </span>
     );
@@ -1362,49 +1357,21 @@ function LegContractIdentity({ leg }: { leg: PositionLeg }) {
   return (
     <span className="contract-identity contract-identity-option" title={contractTitle}>
       <span className="sr-only">{identity.accessibleLabel}</span>
-      <span className="contract-seg contract-qty" aria-hidden="true">
-        {identity.signedQuantity}
+      <span className="contract-strip" aria-hidden="true">
+        <span className="contract-seg contract-qty">{identity.signedQuantity}</span>
+        {identity.expiration ? (
+          <span className="contract-seg contract-exp">{identity.expiration}</span>
+        ) : null}
+        {identity.dte ? (
+          <span className="contract-seg contract-dte">{identity.dte}</span>
+        ) : null}
+        {identity.strike ? (
+          <span className="contract-seg contract-strike">{identity.strike}</span>
+        ) : null}
+        {identity.optionType ? (
+          <span className="contract-seg contract-type">{identity.optionType}</span>
+        ) : null}
       </span>
-      {identity.expiration ? (
-        <>
-          <span className="contract-seg-sep" aria-hidden="true">
-            ·
-          </span>
-          <span className="contract-seg contract-exp" aria-hidden="true">
-            {identity.expiration}
-          </span>
-        </>
-      ) : null}
-      {identity.dte ? (
-        <>
-          <span className="contract-seg-sep" aria-hidden="true">
-            ·
-          </span>
-          <span className="contract-seg contract-dte" aria-hidden="true">
-            {identity.dte}
-          </span>
-        </>
-      ) : null}
-      {identity.strike ? (
-        <>
-          <span className="contract-seg-sep" aria-hidden="true">
-            ·
-          </span>
-          <span className="contract-seg contract-strike" aria-hidden="true">
-            {identity.strike}
-          </span>
-        </>
-      ) : null}
-      {identity.optionType ? (
-        <>
-          <span className="contract-seg-sep" aria-hidden="true">
-            ·
-          </span>
-          <span className="contract-seg contract-type" aria-hidden="true">
-            {identity.optionType}
-          </span>
-        </>
-      ) : null}
     </span>
   );
 }
@@ -1437,20 +1404,22 @@ function UnrealizedPnlCell({
 
   return (
     <div className={`pnl-metric pnl-metric-${tone}`}>
-      <span className="pnl-metric-value tabular">{currency(value)}</span>
-      {hasPercent ? (
-        <div className="pnl-metric-bar-row">
+      <div className="pnl-metric-value-row">
+        <span className="pnl-metric-value tabular">{currency(value)}</span>
+        {hasPercent ? (
           <span className={`pnl-metric-percent tabular pnl-metric-percent-${percentTone}`}>
             <span className="sr-only">Unrealized </span>
             {percentLabel}
           </span>
-          <span className="pnl-bar-track" aria-hidden="true">
-            <span
-              className={`pnl-bar-fill pnl-bar-fill-${percentTone}`}
-              style={{ width: `${barWidth}%` }}
-            />
-          </span>
-        </div>
+        ) : null}
+      </div>
+      {hasPercent ? (
+        <span className="pnl-bar-track" aria-hidden="true">
+          <span
+            className={`pnl-bar-fill pnl-bar-fill-${percentTone}`}
+            style={{ width: `${barWidth}%` }}
+          />
+        </span>
       ) : null}
     </div>
   );
@@ -1683,16 +1652,42 @@ function PositionsSection({
                   Hierarchy: symbol, detected strategy, then individual legs when a
                   combined strategy is expanded.
                 </caption>
+                <colgroup>
+                  <col className="positions-col-position" />
+                  <col className="positions-col-horizon" />
+                  <col className="positions-col-dte" />
+                  <col className="positions-col-strikes" />
+                  <col className="positions-col-catalyst" />
+                  <col className="positions-col-delta" />
+                  <col className="positions-col-theta" />
+                  <col className="positions-col-pnl" />
+                </colgroup>
                 <thead>
                   <tr>
-                    <th scope="col">Position</th>
-                    <th scope="col">Horizon</th>
-                    <th scope="col">DTE</th>
-                    <th scope="col">Strikes</th>
-                    <th scope="col">Catalyst</th>
-                    <th scope="col">Δ</th>
-                    <th scope="col">Θ</th>
-                    <th scope="col">P/L</th>
+                    <th scope="col" className="positions-th-position">
+                      Position
+                    </th>
+                    <th scope="col" className="positions-th-horizon">
+                      Horizon
+                    </th>
+                    <th scope="col" className="positions-th-num positions-th-dte">
+                      DTE
+                    </th>
+                    <th scope="col" className="positions-th-num positions-th-strikes">
+                      Strikes
+                    </th>
+                    <th scope="col" className="positions-th-catalyst">
+                      Catalyst
+                    </th>
+                    <th scope="col" className="positions-th-num positions-th-delta">
+                      Δ
+                    </th>
+                    <th scope="col" className="positions-th-num positions-th-theta">
+                      Θ
+                    </th>
+                    <th scope="col" className="positions-th-num positions-th-pnl">
+                      P/L
+                    </th>
                   </tr>
                 </thead>
                 {symbolGroups.map((group) => {
@@ -1709,7 +1704,11 @@ function PositionsSection({
                           className="symbol-group-header-row position-row position-row-level-0"
                           data-level="0"
                         >
-                          <th scope="rowgroup" colSpan={POSITIONS_TABLE_COL_COUNT}>
+                          <th
+                            scope="rowgroup"
+                            colSpan={POSITIONS_TABLE_COL_COUNT - 1}
+                            className="symbol-group-identity-cell"
+                          >
                             <button
                               type="button"
                               className="symbol-group-toggle"
@@ -1720,9 +1719,13 @@ function PositionsSection({
                               <span className="symbol-group-chevron" aria-hidden="true">
                                 {expanded ? "▾" : "▸"}
                               </span>
+                              <span
+                                className="symbol-group-dot position-hierarchy-dot"
+                                aria-hidden="true"
+                              />
                               <span className="symbol-group-symbol">{group.symbol}</span>
                               <span className="symbol-group-meta">
-                                <span className="tabular">
+                                <span className="tabular symbol-group-count">
                                   {group.totalCount}{" "}
                                   {group.totalCount === 1 ? "position" : "positions"}
                                 </span>
@@ -1731,12 +1734,22 @@ function PositionsSection({
                                     {splitLabel}
                                   </span>
                                 ) : null}
-                                <span className="symbol-group-pnl tabular">
-                                  {currency(group.unrealizedPnl)}
-                                </span>
                               </span>
                             </button>
                           </th>
+                          <td className="positions-td-num positions-td-pnl symbol-group-aggregate-pnl">
+                            <span
+                              className={`symbol-group-pnl tabular ${
+                                group.unrealizedPnl > 0
+                                  ? "symbol-group-pnl-positive"
+                                  : group.unrealizedPnl < 0
+                                    ? "symbol-group-pnl-negative"
+                                    : "symbol-group-pnl-flat"
+                              }`}
+                            >
+                              {currency(group.unrealizedPnl)}
+                            </span>
+                          </td>
                         </tr>
                       </tbody>
                       <tbody
@@ -1777,14 +1790,14 @@ function PositionsSection({
                                 }
                                 data-level="1"
                               >
-                                <th scope="row">
+                                <th scope="row" className="positions-td-position">
                                   <div className="position-hierarchy-cell">
                                     <span
-                                      className="position-hierarchy-guide"
+                                      className="position-hierarchy-dot"
                                       aria-hidden="true"
                                     />
                                     {combined ? (
-                                      <div className="strategy-label-stack">
+                                      <div className="strategy-label-row">
                                         <button
                                           type="button"
                                           className="strategy-legs-toggle"
@@ -1812,20 +1825,20 @@ function PositionsSection({
                                         </button>
                                         <button
                                           type="button"
-                                          className="linkish strategy-analysis-action"
+                                          className="strategy-analysis-action"
                                           aria-label={`Open analysis for ${group.symbol} ${strategy.strategy_type}`}
                                           onClick={() =>
                                             onSelectStrategy(strategy.strategy_id)
                                           }
                                         >
-                                          Open analysis
+                                          Analyze
                                         </button>
                                       </div>
                                     ) : (
-                                      <div className="strategy-label-stack">
+                                      <div className="strategy-label-row strategy-label-row-single">
                                         <button
                                           type="button"
-                                          className="linkish"
+                                          className="strategy-open-action"
                                           aria-label={`Open ${group.symbol} ${strategy.strategy_type}`}
                                           onClick={() =>
                                             onSelectStrategy(strategy.strategy_id)
@@ -1842,18 +1855,18 @@ function PositionsSection({
                                     )}
                                   </div>
                                 </th>
-                                <td>
+                                <td className="positions-td-horizon">
                                   <span className={`chip horizon-${strategy.horizon}`}>
                                     {strategy.horizon}
                                   </span>
                                 </td>
-                                <td className="tabular">
+                                <td className="tabular positions-td-num positions-td-dte">
                                   {strategy.days_to_expiration ?? "—"}
                                 </td>
-                                <td className="tabular">
+                                <td className="tabular positions-td-num positions-td-strikes">
                                   {strategy.strikes || "—"}
                                 </td>
-                                <td>
+                                <td className="positions-td-catalyst">
                                   <span
                                     className={`catalyst-inline ${
                                       catalyst
@@ -1872,13 +1885,13 @@ function PositionsSection({
                                       : "No confirmed catalyst found"}
                                   </span>
                                 </td>
-                                <td className="tabular">
+                                <td className="tabular positions-td-num positions-td-delta">
                                   {signed(strategy.total_delta, 2)}
                                 </td>
-                                <td className="tabular">
+                                <td className="tabular positions-td-num positions-td-theta">
                                   {signed(strategy.total_theta, 0)}
                                 </td>
-                                <td>
+                                <td className="positions-td-num positions-td-pnl">
                                   <UnrealizedPnlCell
                                     value={strategy.unrealized_pnl}
                                     percent={strategy.unrealized_pnl_percent}
@@ -1901,36 +1914,38 @@ function PositionsSection({
                                         data-parent-strategy={strategy.strategy_id}
                                         hidden={!legsExpanded}
                                       >
-                                        <th scope="row">
+                                        <th scope="row" className="positions-td-position">
                                           <div className="position-hierarchy-cell position-hierarchy-cell-leg">
                                             <span
-                                              className="position-hierarchy-guide position-hierarchy-guide-leg"
+                                              className="position-hierarchy-dot position-hierarchy-dot-leg"
                                               aria-hidden="true"
                                             />
                                             <LegContractIdentity leg={leg} />
                                           </div>
                                         </th>
-                                        <td>
+                                        <td className="positions-td-horizon">
                                           <span className="muted">—</span>
                                         </td>
-                                        <td className="tabular">
+                                        <td className="tabular positions-td-num positions-td-dte">
                                           {leg.days_to_expiration ?? "—"}
                                         </td>
-                                        <td className="tabular">{strike ?? "—"}</td>
-                                        <td>
+                                        <td className="tabular positions-td-num positions-td-strikes">
+                                          {strike ?? "—"}
+                                        </td>
+                                        <td className="positions-td-catalyst">
                                           <span className="muted">—</span>
                                         </td>
-                                        <td className="tabular">
+                                        <td className="tabular positions-td-num positions-td-delta">
                                           {leg.delta == null
                                             ? "—"
                                             : signed(leg.delta, 2)}
                                         </td>
-                                        <td className="tabular">
+                                        <td className="tabular positions-td-num positions-td-theta">
                                           {leg.theta == null
                                             ? "—"
                                             : signed(leg.theta, 2)}
                                         </td>
-                                        <td>
+                                        <td className="positions-td-num positions-td-pnl">
                                           <UnrealizedPnlCell
                                             value={leg.unrealized_pnl}
                                             percent={leg.unrealized_pnl_percent}

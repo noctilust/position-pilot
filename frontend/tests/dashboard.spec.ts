@@ -1250,6 +1250,39 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   // Combined strategies exist but legs stay collapsed by default.
   await expect(page.locator("tr[data-level='2']:visible")).toHaveCount(0);
 
+  // Explicit colgroup / column width system + numeric alignment hooks.
+  await expect(page.locator("table.positions-by-symbol > colgroup > col")).toHaveCount(8);
+  await expect(page.locator("th.positions-th-num")).toHaveCount(5);
+  await expect(page.locator("th.positions-th-position")).toBeVisible();
+  await expect(page.locator("th.positions-th-pnl")).toHaveClass(/positions-th-num/);
+
+  // Level-0: identity spans first columns; aggregate P/L lives in the global P/L column.
+  const level0Structure = await page.evaluate(() => {
+    const row = document.querySelector<HTMLTableRowElement>("tr[data-level='0']");
+    if (!row) return null;
+    const cells = Array.from(row.querySelectorAll(":scope > th, :scope > td"));
+    const identity = cells[0] as HTMLTableCellElement | undefined;
+    const pnl = cells[cells.length - 1] as HTMLTableCellElement | undefined;
+    const colSpanTotal = cells.reduce(
+      (sum, cell) => sum + ((cell as HTMLTableCellElement).colSpan || 1),
+      0,
+    );
+    return {
+      cellCount: cells.length,
+      colSpanTotal,
+      identityColSpan: identity?.colSpan ?? 0,
+      hasAggregateClass: pnl?.classList.contains("symbol-group-aggregate-pnl") ?? false,
+      pnlText: (pnl?.textContent || "").replace(/\s+/g, " ").trim(),
+      identityHasPnlClass: identity?.querySelector(".symbol-group-pnl") != null,
+    };
+  });
+  expect(level0Structure).not.toBeNull();
+  expect(level0Structure!.colSpanTotal).toBe(8);
+  expect(level0Structure!.identityColSpan).toBe(7);
+  expect(level0Structure!.hasAggregateClass).toBeTruthy();
+  expect(level0Structure!.identityHasPnlClass).toBeFalsy();
+  expect(level0Structure!.pnlText.length).toBeGreaterThan(0);
+
   // Indentation hooks: level-2 padding exceeds level-1, which exceeds level-0 content inset.
   const paddingLeft = await page.evaluate(() => {
     const l0 = document.querySelector<HTMLElement>(
@@ -1262,6 +1295,33 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
     };
   });
   expect(paddingLeft.l1).toBeGreaterThan(paddingLeft.l0);
+
+  // Level-0 magenta position dots (reference-style anchors) on every symbol row.
+  await expect(page.locator("tr[data-level='0'] .symbol-group-dot")).toHaveCount(3);
+  await expect(
+    page.locator("tr[data-level='0'] .symbol-group-dot[aria-hidden='true']"),
+  ).toHaveCount(3);
+
+  // Magenta hierarchy dots present; old gold vertical guide hooks removed.
+  await expect(page.locator("tr[data-level='1'] .position-hierarchy-dot")).toHaveCount(4);
+  await expect(page.locator(".position-hierarchy-guide")).toHaveCount(0);
+
+  // Aggregate symbol P/L uses signed tone classes (currency text remains primary signal).
+  // Fixtures: AAPL +$55, QQQ −$25, SPY +$160.
+  const aaplHeader = page.locator("tr[data-level='0']").filter({ hasText: "AAPL" });
+  const qqqHeader = page.locator("tr[data-level='0']").filter({ hasText: "QQQ" });
+  const spyHeader = page.locator("tr[data-level='0']").filter({ hasText: "SPY" });
+  await expect(aaplHeader.locator(".symbol-group-pnl")).toHaveClass(
+    /symbol-group-pnl-positive/,
+  );
+  await expect(aaplHeader.locator(".symbol-group-pnl")).toContainText("$55");
+  await expect(qqqHeader.locator(".symbol-group-pnl")).toHaveClass(
+    /symbol-group-pnl-negative/,
+  );
+  await expect(qqqHeader.locator(".symbol-group-pnl")).toContainText("$25");
+  await expect(spyHeader.locator(".symbol-group-pnl")).toHaveClass(
+    /symbol-group-pnl-positive/,
+  );
 
   // One global header — no nested strategy-legs table.
   await expect(page.locator("table.positions-by-symbol > thead")).toHaveCount(1);
@@ -1276,6 +1336,7 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   await expect(spyPutRow.locator(".pnl-metric")).toHaveClass(/pnl-metric-positive/);
   await expect(spyPutRow.locator(".pnl-metric-percent")).toContainText("+10.0%");
   await expect(spyPutRow.locator(".pnl-bar-fill-positive")).toBeVisible();
+  await expect(spyPutRow.locator(".positions-td-pnl")).toHaveCount(1);
 
   const qqqStrategyRow = page
     .locator("tr[data-level='1'].combined-strategy-row")
@@ -1285,6 +1346,30 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   await expect(qqqStrategyRow.locator(".pnl-metric-percent")).toContainText("-8.0%");
   await expect(qqqStrategyRow.locator(".pnl-bar-fill-negative")).toBeVisible();
 
+  // Dense strategy row: analyze is inline (not a tall orphan second line).
+  await expect(qqqStrategyRow.locator(".strategy-label-row")).toHaveCount(1);
+  await expect(qqqStrategyRow.locator(".strategy-label-stack")).toHaveCount(0);
+  await expect(
+    qqqStrategyRow.getByRole("button", { name: "Open analysis for QQQ Iron Condor" }),
+  ).toHaveText("Analyze");
+  const strategyRowLayout = await qqqStrategyRow.evaluate((row) => {
+    const labelRow = row.querySelector(".strategy-label-row") as HTMLElement | null;
+    if (!labelRow) return { ok: false };
+    const style = getComputedStyle(labelRow);
+    return {
+      ok: true,
+      display: style.display,
+      flexDirection: style.flexDirection,
+      hasToggle: labelRow.querySelector(".strategy-legs-toggle") != null,
+      hasAnalyze: labelRow.querySelector(".strategy-analysis-action") != null,
+    };
+  });
+  expect(strategyRowLayout.ok).toBeTruthy();
+  expect(strategyRowLayout.display).toBe("flex");
+  expect(strategyRowLayout.flexDirection).toBe("row");
+  expect(strategyRowLayout.hasToggle).toBeTruthy();
+  expect(strategyRowLayout.hasAnalyze).toBeTruthy();
+
   // Expand QQQ: four aligned main-table leg rows; no nested table/header.
   await page.getByRole("button", { name: /Expand legs for QQQ Iron Condor/i }).click();
   const qqqLegs = page.locator(
@@ -1293,15 +1378,72 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   await expect(qqqLegs).toHaveCount(4);
   await expect(page.locator("table.strategy-legs-table")).toHaveCount(0);
   await expect(page.locator("table.positions-by-symbol thead")).toHaveCount(1);
+  await expect(
+    page.locator("tr[data-level='2']:visible .position-hierarchy-dot"),
+  ).toHaveCount(4);
 
-  // Contract segments: signed qty, expiry, DTE, strike, option type.
+  // Rendered hierarchy offset (desktop): measure painted left edges after chevrons/gaps.
+  // Target ≥1rem (~16px) of visible separation at each level transition.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const visualHierarchy = await page.evaluate(() => {
+    const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    const minStep = rem * 0.95; // allow tiny subpixel tolerance under 1rem target
+    const qqqSymbolRow = Array.from(
+      document.querySelectorAll<HTMLElement>("tr[data-level='0']"),
+    ).find((row) => row.querySelector(".symbol-group-symbol")?.textContent?.trim() === "QQQ");
+    const qqqStrategyRow = Array.from(
+      document.querySelectorAll<HTMLElement>("tr[data-level='1'].combined-strategy-row"),
+    ).find((row) => (row.textContent || "").includes("Iron Condor"));
+    const qqqLegRow = document.querySelector<HTMLElement>(
+      "tr[data-level='2'][data-parent-strategy='strat-qqq']:not([hidden])",
+    );
+    const symbolLabel = qqqSymbolRow?.querySelector<HTMLElement>(".symbol-group-symbol");
+    const l1Dot = qqqStrategyRow?.querySelector<HTMLElement>(".position-hierarchy-dot");
+    const l1Name = qqqStrategyRow?.querySelector<HTMLElement>(".strategy-legs-name");
+    const l2Dot = qqqLegRow?.querySelector<HTMLElement>(".position-hierarchy-dot");
+    const l2Strip = qqqLegRow?.querySelector<HTMLElement>(".contract-strip");
+    if (!symbolLabel || !l1Dot || !l1Name || !l2Dot || !l2Strip) {
+      return { ok: false as const, rem, minStep };
+    }
+    const symbolLeft = symbolLabel.getBoundingClientRect().left;
+    const l1DotLeft = l1Dot.getBoundingClientRect().left;
+    const l1NameLeft = l1Name.getBoundingClientRect().left;
+    const l2DotLeft = l2Dot.getBoundingClientRect().left;
+    const l2StripLeft = l2Strip.getBoundingClientRect().left;
+    return {
+      ok: true as const,
+      rem,
+      minStep,
+      symbolLeft,
+      l1DotLeft,
+      l1NameLeft,
+      l2DotLeft,
+      l2StripLeft,
+      step1: l1DotLeft - symbolLeft,
+      step1Name: l1NameLeft - symbolLeft,
+      step2: l2DotLeft - l1DotLeft,
+      step2Strip: l2StripLeft - l1NameLeft,
+    };
+  });
+  expect(visualHierarchy.ok).toBeTruthy();
+  if (visualHierarchy.ok) {
+    expect(visualHierarchy.step1).toBeGreaterThanOrEqual(visualHierarchy.minStep);
+    expect(visualHierarchy.step1Name).toBeGreaterThanOrEqual(visualHierarchy.minStep);
+    expect(visualHierarchy.step2).toBeGreaterThanOrEqual(visualHierarchy.minStep);
+    expect(visualHierarchy.step2Strip).toBeGreaterThanOrEqual(visualHierarchy.minStep);
+  }
+
+  // Joined contract strip: signed qty, expiry, DTE, strike, option type — no · separators.
   const longPutLeg = qqqLegs.filter({ hasText: "$470" }).first();
+  await expect(longPutLeg.locator(".contract-strip")).toHaveCount(1);
   await expect(longPutLeg.locator(".contract-qty")).toHaveText("+1");
   await expect(longPutLeg.locator(".contract-exp")).toContainText("Aug");
   await expect(longPutLeg.locator(".contract-dte")).toHaveText("18d");
   await expect(longPutLeg.locator(".contract-strike")).toHaveText("$470");
   await expect(longPutLeg.locator(".contract-type")).toHaveText("P");
   await expect(longPutLeg.locator(".sr-only")).toContainText("Long 1");
+  await expect(longPutLeg.locator(".contract-seg-sep")).toHaveCount(0);
+  await expect(longPutLeg.locator(".contract-strip")).not.toContainText("·");
 
   const shortCallLeg = qqqLegs.filter({ hasText: "$505" }).first();
   await expect(shortCallLeg.locator(".contract-qty")).toHaveText("−1");
@@ -1335,6 +1477,7 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   const equityLeg = aaplLegs.filter({ hasText: "Equity" }).first();
   await expect(equityLeg.locator(".contract-qty")).toHaveText("+100");
   await expect(equityLeg.locator(".contract-instrument")).toHaveText("Equity");
+  await expect(equityLeg.locator(".contract-strip")).toHaveCount(1);
   const callLeg = aaplLegs.filter({ hasText: "$220" }).first();
   await expect(callLeg.locator(".contract-qty")).toHaveText("−1");
   await expect(callLeg.locator(".contract-type")).toHaveText("C");
@@ -1348,7 +1491,47 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
 
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(accessibility.violations).toEqual([]);
+
+  // Light theme: positions grid stays free of axe violations (scoped tokens).
+  await page.getByRole("button", { name: "Use light theme" }).click();
+  await expect
+    .poll(async () =>
+      page.evaluate(() => document.documentElement.getAttribute("data-theme")),
+    )
+    .toBe("light");
+  const lightAxe = await new AxeBuilder({ page })
+    .include("table.positions-by-symbol")
+    .analyze();
+  expect(lightAxe.violations).toEqual([]);
+
+  // Narrow viewport: document does not overflow; table-local overflow is allowed.
+  await page.setViewportSize({ width: 390, height: 844 });
+  const overflow = await page.evaluate(() => {
+    const doc = document.documentElement;
+    const wrap = document.querySelector(
+      ".positions-workspace-main .table-wrap, .positions-pane .table-wrap",
+    ) as HTMLElement | null;
+    const table = wrap?.querySelector(".positions-by-symbol") as HTMLElement | null;
+    return {
+      docScroll: doc.scrollWidth,
+      docClient: doc.clientWidth,
+      wrapClient: wrap?.clientWidth ?? 0,
+      wrapScroll: wrap?.scrollWidth ?? 0,
+      tableMin: table
+        ? Number.parseFloat(getComputedStyle(table).minWidth || "0")
+        : 0,
+      wrapOverflowX: wrap ? getComputedStyle(wrap).overflowX : "",
+    };
+  });
+  expect(overflow.docScroll).toBeLessThanOrEqual(overflow.docClient + 1);
+  expect(overflow.wrapOverflowX === "auto" || overflow.wrapOverflowX === "scroll").toBeTruthy();
+  // Table may be wider than the wrap (local scroll); wrap itself stays within the viewport.
+  expect(overflow.wrapClient).toBeLessThanOrEqual(overflow.docClient + 1);
+  if (overflow.tableMin > overflow.wrapClient) {
+    expect(overflow.wrapScroll).toBeGreaterThan(overflow.wrapClient);
+  }
 });
+
 
 test("combined strategy leg disclosure: expand, independence, filters, analysis, a11y", async ({
   page,

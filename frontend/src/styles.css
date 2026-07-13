@@ -1045,14 +1045,17 @@ textarea:focus-visible,
   align-items: start;
   min-width: 0;
   max-width: 100%;
+  overflow-x: clip;
 }
 
 .positions-workspace-main {
   min-width: 0;
+  max-width: 100%;
   display: grid;
   gap: 0;
   padding-right: var(--space-4);
   border-right: 1px solid var(--line);
+  overflow-x: clip;
 }
 
 .positions-workspace-main > .panel-section {
@@ -1157,68 +1160,228 @@ textarea:focus-visible,
   padding: 0.3rem 0.65rem;
 }
 
+/* —— Positions brokerage grid (scoped tokens; Tastytrade-inspired hierarchy) —— */
 .positions-by-symbol {
-  width: 100%;
-  min-width: 0;
-  /* Fixed layout keeps the grid inside the viewport; dense cells wrap/ellipsis. */
+  --pt-header-bg: oklch(17% 0.01 86);
+  --pt-row-bg: oklch(16.5% 0.01 86);
+  --pt-row-alt: oklch(18% 0.011 86);
+  --pt-symbol-bg: oklch(20% 0.012 86);
+  --pt-leg-bg: oklch(15.2% 0.009 86);
+  --pt-rule: oklch(28% 0.012 86);
+  --pt-rule-strong: oklch(36% 0.014 86);
+  --pt-dot: oklch(62% 0.24 350);
+  --pt-seg-bg: oklch(24% 0.01 86);
+  --pt-seg-rule: oklch(32% 0.012 86);
+  --pt-seg-text: oklch(82% 0.014 88);
+  --pt-good: var(--good);
+  --pt-danger: var(--danger);
+  /*
+   * Visual hierarchy steps measured against rendered content (not cell padding alone).
+   * Level-1 starts ~1rem+ right of the level-0 symbol label after chevron/dot/gaps;
+   * level-2 steps another ~1rem+ past level-1.
+   * Tuned so getBoundingClientRect left edges clear ~1rem after internal flex gaps.
+   */
+  --pt-indent-1: 3.65rem;
+  --pt-indent-2: 6.1rem;
+  --pt-min-table: 44rem;
+
+  width: max(100%, var(--pt-min-table));
+  min-width: var(--pt-min-table);
   table-layout: fixed;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  background: var(--pt-row-bg);
+  color: var(--text);
 }
 
-/* First column holds hierarchy identity; allow denser wrapping than other cells. */
-.positions-by-symbol td:first-child,
-.positions-by-symbol th:first-child {
-  width: 28%;
+:root[data-theme="light"] .positions-by-symbol {
+  --pt-header-bg: oklch(93% 0.01 88);
+  --pt-row-bg: oklch(99% 0.004 88);
+  --pt-row-alt: oklch(96.5% 0.008 88);
+  --pt-symbol-bg: oklch(92% 0.012 88);
+  --pt-leg-bg: oklch(97% 0.006 88);
+  --pt-rule: oklch(88% 0.012 88);
+  --pt-rule-strong: oklch(78% 0.018 88);
+  --pt-dot: oklch(48% 0.21 350);
+  --pt-seg-bg: oklch(94% 0.008 88);
+  --pt-seg-rule: oklch(82% 0.012 88);
+  --pt-seg-text: oklch(28% 0.02 80);
+  /* Darker P/L tones so light theme meets WCAG on pale row bands */
+  --pt-good: oklch(40% 0.11 155);
+  --pt-danger: oklch(45% 0.15 28);
+}
+
+/* Horizon chips: keep readable on light row bands without orange-link look. */
+:root[data-theme="light"] .positions-by-symbol .horizon-tactical {
+  color: oklch(38% 0.12 54);
+  border-color: color-mix(in oklch, oklch(38% 0.12 54) 45%, var(--pt-rule));
+}
+
+:root[data-theme="light"] .positions-by-symbol .horizon-strategic {
+  color: oklch(38% 0.08 246);
+  border-color: color-mix(in oklch, oklch(38% 0.08 246) 45%, var(--pt-rule));
+}
+
+/* Column width system via colgroup classes */
+.positions-by-symbol .positions-col-position {
+  width: 32%;
+}
+.positions-by-symbol .positions-col-horizon {
+  width: 9%;
+}
+.positions-by-symbol .positions-col-dte {
+  width: 6%;
+}
+.positions-by-symbol .positions-col-strikes {
+  width: 10%;
+}
+.positions-by-symbol .positions-col-catalyst {
+  width: 13%;
+}
+.positions-by-symbol .positions-col-delta {
+  width: 8%;
+}
+.positions-by-symbol .positions-col-theta {
+  width: 8%;
+}
+.positions-by-symbol .positions-col-pnl {
+  width: 14%;
+}
+
+/*
+ * Local scroll host: overflow stays on the table region, not the document.
+ * Keep the wrap width independent of the table's min-width.
+ */
+.positions-pane,
+.positions-workspace-main > .panel-section {
   min-width: 0;
-  overflow-wrap: anywhere;
+  max-width: 100%;
 }
 
-/* Soft-wrap long catalyst / strike labels. */
-.positions-by-symbol .catalyst-inline,
-.positions-by-symbol td:nth-child(4),
-.positions-by-symbol td:nth-child(5) {
+.positions-pane .table-wrap:has(.positions-by-symbol),
+.positions-workspace-main .table-wrap:has(.positions-by-symbol) {
+  display: block;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* width:0 + min-width:100% keeps grid/flex parents from expanding to table min-width */
+  width: 0;
+  min-width: 100%;
+  max-width: 100%;
+  contain: inline-size paint;
+  isolation: isolate;
+  border-color: var(--line-strong);
+  border-radius: 0;
+  -webkit-overflow-scrolling: touch;
+}
+
+.positions-by-symbol thead th {
+  /* Static: sticky headers + wide min-width tables can expand document scrollWidth. */
+  position: static;
+  background: var(--pt-header-bg);
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--pt-rule-strong);
+  font-size: 0.62rem;
+  letter-spacing: 0.07em;
+  padding: 0.4rem 0.45rem;
+  white-space: nowrap;
+  z-index: auto;
+}
+
+.positions-by-symbol .positions-th-position,
+.positions-by-symbol .positions-th-catalyst,
+.positions-by-symbol .positions-td-position,
+.positions-by-symbol .positions-td-catalyst {
+  text-align: left;
+}
+
+.positions-by-symbol .positions-th-horizon,
+.positions-by-symbol .positions-td-horizon {
+  text-align: center;
+}
+
+.positions-by-symbol .positions-th-num,
+.positions-by-symbol .positions-td-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.positions-by-symbol th,
+.positions-by-symbol td {
+  border-bottom: 1px solid var(--pt-rule);
+  vertical-align: middle;
+  min-width: 0;
+}
+
+.positions-by-symbol tbody tr.position-row-level-1 th,
+.positions-by-symbol tbody tr.position-row-level-1 td {
+  background: var(--pt-row-bg);
+}
+
+.positions-by-symbol tbody tr.position-row-level-1:nth-child(even) th,
+.positions-by-symbol tbody tr.position-row-level-1:nth-child(even) td {
+  background: var(--pt-row-alt);
+}
+
+.positions-by-symbol tbody tr.position-row-level-1:hover th,
+.positions-by-symbol tbody tr.position-row-level-1:hover td,
+.positions-by-symbol tbody tr.position-row-level-2:hover th,
+.positions-by-symbol tbody tr.position-row-level-2:hover td {
+  background: color-mix(in oklch, var(--pt-row-alt) 65%, var(--pt-header-bg));
+}
+
+.positions-by-symbol tbody tr.position-row-level-1:focus-within th,
+.positions-by-symbol tbody tr.position-row-level-1:focus-within td,
+.positions-by-symbol tbody tr.position-row-level-2:focus-within th,
+.positions-by-symbol tbody tr.position-row-level-2:focus-within td {
+  background: color-mix(in oklch, var(--pt-dot) 7%, var(--pt-row-bg));
+}
+
+/* Soft-wrap only catalyst / long position labels; keep numerics single-line. */
+.positions-by-symbol .catalyst-inline {
   white-space: normal;
   overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
-.positions-by-symbol th:nth-child(n + 2),
-.positions-by-symbol td:nth-child(n + 2) {
-  min-width: 0;
+.positions-by-symbol .positions-td-num {
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.positions-by-symbol .pnl-metric-bar-row {
-  max-width: 100%;
+.positions-by-symbol .positions-td-position {
+  overflow: hidden;
 }
 
-/* On very narrow viewports, keep local scroll as a fallback if fixed columns still overflow. */
-@media (max-width: 48rem) {
-  .positions-by-symbol {
-    table-layout: fixed;
-    width: 100%;
-  }
-
-  .positions-by-symbol th,
-  .positions-by-symbol td {
-    white-space: normal;
-  }
-}
-
-.symbol-group-header-row th {
+.symbol-group-header-row th,
+.symbol-group-header-row td {
   padding: 0;
-  border-bottom: 1px solid var(--line-strong);
-  background: color-mix(in oklch, var(--surface) 92%, var(--line));
+  border-bottom: 1px solid var(--pt-rule-strong);
+  background: var(--pt-symbol-bg);
   font-weight: 600;
+}
+
+.symbol-group-identity-cell {
+  padding: 0 !important;
+}
+
+.symbol-group-aggregate-pnl {
+  padding: 0.35rem 0.55rem !important;
+  vertical-align: middle;
+  white-space: nowrap;
 }
 
 .symbol-group-toggle {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.35rem 0.75rem;
+  align-items: center;
+  gap: 0.28rem 0.4rem;
   width: 100%;
   margin: 0;
-  padding: 0.4rem 0.55rem;
+  padding: 0.38rem 0.45rem;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -1226,13 +1389,13 @@ textarea:focus-visible,
   font: inherit;
   text-align: left;
   cursor: pointer;
-  min-height: 2.25rem;
+  min-height: 2.1rem;
   min-width: 0;
   max-width: 100%;
 }
 
 .symbol-group-toggle:hover {
-  background: color-mix(in oklch, var(--accent) 6%, transparent);
+  background: color-mix(in oklch, var(--pt-dot) 8%, transparent);
 }
 
 .symbol-group-toggle:focus-visible {
@@ -1242,28 +1405,36 @@ textarea:focus-visible,
 
 .symbol-group-chevron {
   display: inline-block;
-  width: 0.85rem;
+  width: 0.75rem;
   flex-shrink: 0;
   color: var(--text-dim);
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   line-height: 1;
+  text-align: center;
+}
+
+/* Level-0 magenta anchor (same family as strategy/leg hierarchy dots). */
+.symbol-group-dot {
+  flex-shrink: 0;
+  margin: 0;
 }
 
 .symbol-group-symbol {
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
   font-family: var(--font-mono);
-  font-size: 0.88rem;
+  font-size: 0.9rem;
+  color: var(--text);
 }
 
 .symbol-group-meta {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 0.35rem 0.75rem;
+  gap: 0.3rem 0.55rem;
   min-width: 0;
   color: var(--text-soft);
-  font-size: 0.78rem;
+  font-size: 0.74rem;
   font-weight: 500;
 }
 
@@ -1272,67 +1443,83 @@ textarea:focus-visible,
 }
 
 .symbol-group-pnl {
-  margin-left: auto;
+  display: block;
+  width: 100%;
+  text-align: right;
   font-family: var(--font-mono);
-  font-weight: 600;
+  font-weight: 650;
+  font-size: 0.84rem;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.symbol-group-pnl-positive {
+  color: var(--pt-good);
+}
+
+.symbol-group-pnl-negative {
+  color: var(--pt-danger);
+}
+
+.symbol-group-pnl-flat {
   color: var(--text);
 }
 
-/* Hierarchy levels: 0 symbol, 1 strategy, 2 leg — indentation via padding + guide.
-   Specificity must beat `.data-table.dense th/td` padding. */
+/* Hierarchy: indent + magenta dots (no gold vertical bars). */
 .positions-by-symbol .position-row-level-0 th[scope="rowgroup"] {
   padding-left: 0;
   padding-right: 0;
 }
 
 .positions-by-symbol .position-row-level-1 th[scope="row"] {
-  padding-left: 1.1rem;
+  padding-left: var(--pt-indent-1);
   font-weight: 500;
 }
 
 .positions-by-symbol .position-row-level-2 th[scope="row"],
 .positions-by-symbol .position-row-level-2 td {
-  padding-top: 0.22rem;
-  padding-bottom: 0.22rem;
-  font-size: 0.78rem;
-  border-bottom-color: color-mix(in oklch, var(--line) 70%, transparent);
-  background: color-mix(in oklch, var(--surface) 96%, var(--line));
+  padding-top: 0.2rem;
+  padding-bottom: 0.2rem;
+  font-size: 0.76rem;
+  border-bottom-color: color-mix(in oklch, var(--pt-rule) 75%, transparent);
+  background: var(--pt-leg-bg);
 }
 
 .positions-by-symbol .position-row-level-2 th[scope="row"] {
-  padding-left: 2.15rem;
+  padding-left: var(--pt-indent-2);
   font-weight: 500;
 }
 
 .position-hierarchy-cell {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 0.4rem;
   min-width: 0;
 }
 
-.position-hierarchy-guide {
+.position-hierarchy-dot {
   flex-shrink: 0;
-  width: 0.12rem;
-  align-self: stretch;
-  min-height: 1.1rem;
-  margin-top: 0.15rem;
-  border-radius: 1px;
-  background: color-mix(in oklch, var(--accent) 35%, var(--line-strong));
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: var(--pt-dot);
+  box-shadow: 0 0 0 1px color-mix(in oklch, var(--pt-dot) 35%, transparent);
 }
 
-.position-hierarchy-guide-leg {
-  background: color-mix(in oklch, var(--text-dim) 45%, var(--line));
-  min-height: 0.95rem;
+.position-hierarchy-dot-leg {
+  width: 0.34rem;
+  height: 0.34rem;
+  opacity: 0.92;
 }
 
 .position-hierarchy-cell-leg {
-  gap: 0.35rem;
+  gap: 0.38rem;
+  align-items: center;
 }
 
 .symbol-group-row th,
 .symbol-group-row td {
-  border-bottom-color: var(--line);
+  border-bottom-color: var(--pt-rule);
 }
 
 .symbol-group-body[hidden] {
@@ -1343,81 +1530,165 @@ textarea:focus-visible,
   display: none;
 }
 
-.strategy-label-stack {
+/* Dense single-line strategy identity: name + count + analyze */
+.strategy-label-row {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.15rem;
-  min-width: 0;
-}
-
-.strategy-legs-toggle {
-  display: inline-flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 0.3rem 0.45rem;
+  gap: 0.2rem 0.45rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.strategy-label-row-single {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+}
+
+button.strategy-legs-toggle {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: baseline;
+  gap: 0.28rem 0.4rem;
   margin: 0;
-  padding: 0.1rem 0.15rem;
+  padding: 0.08rem 0.1rem;
   border: 0;
-  border-radius: 0.2rem;
+  border-radius: 0.12rem;
   background: transparent;
   color: inherit;
   font: inherit;
   font-weight: 600;
   text-align: left;
   cursor: pointer;
-  min-height: 1.75rem;
+  min-height: 1.55rem;
   max-width: 100%;
 }
 
-.strategy-legs-toggle:hover {
-  background: color-mix(in oklch, var(--accent) 8%, transparent);
+button.strategy-legs-toggle:hover {
+  background: color-mix(in oklch, var(--pt-dot) 8%, transparent);
 }
 
-.strategy-legs-toggle:focus-visible {
+button.strategy-legs-toggle:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
 .strategy-legs-chevron {
   display: inline-block;
-  width: 0.75rem;
+  width: 0.7rem;
   flex-shrink: 0;
   color: var(--text-dim);
-  font-size: 0.7rem;
+  font-size: 0.68rem;
   line-height: 1;
 }
 
 .strategy-legs-name {
-  font-weight: 600;
+  font-weight: 650;
+  color: var(--text);
+  letter-spacing: 0.01em;
 }
 
 .strategy-leg-count {
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   font-weight: 500;
   color: var(--text-soft);
   font-family: var(--font-mono);
   letter-spacing: 0.01em;
+  white-space: nowrap;
 }
 
-.strategy-analysis-action {
-  font-size: 0.72rem;
-  padding: 0.05rem 0;
+button.strategy-analysis-action {
+  border: 0;
+  padding: 0.08rem 0.15rem;
+  margin: 0;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 550;
+  letter-spacing: 0.02em;
+  text-decoration: none;
+  min-height: auto;
+  border-radius: 0.12rem;
+  flex-shrink: 0;
 }
 
-/* Compact segmented contract identity (qty · exp · dte · strike · C/P). */
+button.strategy-analysis-action:hover {
+  color: var(--text);
+  background: color-mix(in oklch, var(--text) 6%, transparent);
+  text-decoration: none;
+}
+
+button.strategy-analysis-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Single-leg open action: bright label, not orange hyperlink */
+button.strategy-open-action {
+  border: 0;
+  padding: 0.05rem 0.05rem;
+  margin: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+  text-decoration: none;
+  min-height: auto;
+  text-align: left;
+  border-radius: 0.12rem;
+}
+
+button.strategy-open-action:hover {
+  background: color-mix(in oklch, var(--pt-dot) 8%, transparent);
+  text-decoration: none;
+}
+
+button.strategy-open-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Joined graphite contract strip: qty | exp | dte | strike | C/P */
 .contract-identity {
   display: inline-flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.12rem 0.28rem;
+  align-items: center;
   min-width: 0;
   max-width: 100%;
   font-family: var(--font-mono);
-  font-size: 0.74rem;
+  font-size: 0.72rem;
   font-weight: 500;
-  line-height: 1.3;
-  color: var(--text-soft);
+  line-height: 1.2;
+  color: var(--pt-seg-text);
+}
+
+.contract-strip {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid var(--pt-seg-rule);
+  border-radius: 0.15rem;
+  overflow: hidden;
+  background: var(--pt-seg-bg);
+}
+
+.contract-seg {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  padding: 0.12rem 0.32rem;
+  border-right: 1px solid var(--pt-seg-rule);
+  font-variant-numeric: tabular-nums;
+  color: var(--pt-seg-text);
+}
+
+.contract-seg:last-child {
+  border-right: 0;
 }
 
 .contract-identity-equity .contract-instrument {
@@ -1427,106 +1698,95 @@ textarea:focus-visible,
   letter-spacing: 0.01em;
 }
 
-.contract-seg {
-  white-space: nowrap;
-}
-
 .contract-qty {
   font-weight: 700;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
-}
-
-.contract-exp,
-.contract-dte,
-.contract-strike {
-  font-variant-numeric: tabular-nums;
 }
 
 .contract-type {
   font-weight: 700;
   color: var(--text);
-  letter-spacing: 0.02em;
+  letter-spacing: 0.03em;
+  min-width: 1.1rem;
+  justify-content: center;
 }
 
-.contract-seg-sep {
-  color: var(--text-dim);
-  font-weight: 400;
-  user-select: none;
-}
-
-/* Unrealized P/L with optional percent bar (sign/text remain primary). */
+/* Unrealized P/L: right-aligned value + full-width thin bar (percent optional). */
 .pnl-metric {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 0.12rem;
+  align-items: stretch;
+  gap: 0.14rem;
+  min-width: 0;
+  width: 100%;
+}
+
+.pnl-metric-value-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: baseline;
+  gap: 0.25rem 0.4rem;
   min-width: 0;
 }
 
 .pnl-metric-value {
-  font-weight: 600;
-  line-height: 1.2;
+  font-weight: 650;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
-.pnl-metric-positive .pnl-metric-value {
-  color: var(--good);
+.positions-by-symbol .pnl-metric-positive .pnl-metric-value {
+  color: var(--pt-good);
 }
 
-.pnl-metric-negative .pnl-metric-value {
-  color: var(--danger);
-}
-
-.pnl-metric-bar-row {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  width: 100%;
-  max-width: 6.5rem;
+.positions-by-symbol .pnl-metric-negative .pnl-metric-value {
+  color: var(--pt-danger);
 }
 
 .pnl-metric-percent {
   flex-shrink: 0;
-  font-size: 0.68rem;
+  font-size: 0.66rem;
   font-weight: 600;
   color: var(--text-soft);
-  min-width: 2.4rem;
+  font-variant-numeric: tabular-nums;
 }
 
-.pnl-metric-percent-positive {
-  color: var(--good);
+.positions-by-symbol .pnl-metric-percent-positive {
+  color: var(--pt-good);
 }
 
-.pnl-metric-percent-negative {
-  color: var(--danger);
+.positions-by-symbol .pnl-metric-percent-negative {
+  color: var(--pt-danger);
 }
 
-.pnl-bar-track {
+.positions-by-symbol .pnl-bar-track {
   display: block;
-  flex: 1 1 auto;
-  height: 0.28rem;
-  min-width: 1.75rem;
-  border-radius: 999px;
-  background: color-mix(in oklch, var(--line) 80%, var(--surface));
+  width: 100%;
+  height: 0.18rem;
+  min-width: 2rem;
+  border-radius: 0;
+  background: color-mix(in oklch, var(--pt-rule) 85%, var(--pt-row-bg));
   overflow: hidden;
 }
 
-.pnl-bar-fill {
+.positions-by-symbol .pnl-bar-fill {
   display: block;
   height: 100%;
-  border-radius: inherit;
+  border-radius: 0;
   max-width: 100%;
 }
 
-.pnl-bar-fill-positive {
-  background: color-mix(in oklch, var(--good) 78%, transparent);
+.positions-by-symbol .pnl-bar-fill-positive {
+  background: color-mix(in oklch, var(--pt-good) 82%, transparent);
 }
 
-.pnl-bar-fill-negative {
-  background: color-mix(in oklch, var(--danger) 78%, transparent);
+.positions-by-symbol .pnl-bar-fill-negative {
+  background: color-mix(in oklch, var(--pt-danger) 82%, transparent);
 }
 
-.pnl-bar-fill-flat {
+.positions-by-symbol .pnl-bar-fill-flat {
   background: var(--text-dim);
 }
 
@@ -1536,7 +1796,13 @@ textarea:focus-visible,
 }
 
 .combined-strategy-row th[scope="row"] {
-  vertical-align: top;
+  vertical-align: middle;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .positions-by-symbol tbody tr {
+    transition: none;
+  }
 }
 
 .roll-ledger-rail {
@@ -2111,8 +2377,11 @@ textarea:focus-visible,
   margin: -1px;
   overflow: hidden;
   clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
+  left: 0;
+  top: 0;
 }
 
 /* —— Catalysts —— */
