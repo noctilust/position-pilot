@@ -1297,18 +1297,21 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   expect(level0Structure!.identityHasPnlClass).toBeFalsy();
   expect(level0Structure!.pnlText.length).toBeGreaterThan(0);
 
-  // Indentation hooks: level-2 padding exceeds level-1, which exceeds level-0 content inset.
+  // Indentation hooks: level-1 exceeds level-0; level-2 matches level-1 (no extra x-indent).
   const paddingLeft = await page.evaluate(() => {
     const l0 = document.querySelector<HTMLElement>(
       "tr[data-level='0'] th, tr[data-level='0'] td",
     );
     const l1 = document.querySelector<HTMLElement>("tr[data-level='1'] th[scope='row']");
+    const l2 = document.querySelector<HTMLElement>("tr[data-level='2'] th[scope='row']");
     return {
       l0: l0 ? Number.parseFloat(getComputedStyle(l0).paddingLeft) : -1,
       l1: l1 ? Number.parseFloat(getComputedStyle(l1).paddingLeft) : -1,
+      l2: l2 ? Number.parseFloat(getComputedStyle(l2).paddingLeft) : -1,
     };
   });
   expect(paddingLeft.l1).toBeGreaterThan(paddingLeft.l0);
+  expect(Math.abs(paddingLeft.l2 - paddingLeft.l1)).toBeLessThanOrEqual(1);
 
   // Level-0 magenta position dots (reference-style anchors) on every symbol row.
   await expect(page.locator("tr[data-level='0'] .symbol-group-dot")).toHaveCount(3);
@@ -1401,9 +1404,9 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
     page.locator("tr[data-level='2']:visible .position-hierarchy-dot"),
   ).toHaveCount(6);
 
-  // Rendered hierarchy offset (desktop): measure painted left edges after gaps.
-  // Target ≥1rem (~16px) of visible separation at each level transition.
-  // Combined vs single strategy name/dot must share the same x-origin (≤1px).
+  // Rendered hierarchy alignment (desktop): measure painted left edges after gaps.
+  // Level-0 → level-1 still steps ≥1rem. Level-2 leg dots/strips align with
+  // single-leg strategy dots/strips (≤1px). Combined parent matches single strategy.
   await page.setViewportSize({ width: 1280, height: 800 });
   const visualHierarchy = await page.evaluate(() => {
     const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
@@ -1428,6 +1431,7 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
     const l1Name = qqqStrategyRow?.querySelector<HTMLElement>(".strategy-combined-name");
     const singleDot = spyPutRow?.querySelector<HTMLElement>(".position-hierarchy-dot");
     const singleName = spyPutRow?.querySelector<HTMLElement>(".strategy-open-action");
+    const singleStrip = spyPutRow?.querySelector<HTMLElement>(".contract-strip");
     const l2Dot = qqqLegRow?.querySelector<HTMLElement>(".position-hierarchy-dot");
     const l2Strip = qqqLegRow?.querySelector<HTMLElement>(".contract-strip");
     if (
@@ -1436,6 +1440,7 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
       !l1Name ||
       !singleDot ||
       !singleName ||
+      !singleStrip ||
       !l2Dot ||
       !l2Strip
     ) {
@@ -1446,6 +1451,7 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
     const l1NameLeft = l1Name.getBoundingClientRect().left;
     const singleDotLeft = singleDot.getBoundingClientRect().left;
     const singleNameLeft = singleName.getBoundingClientRect().left;
+    const singleStripLeft = singleStrip.getBoundingClientRect().left;
     const l2DotLeft = l2Dot.getBoundingClientRect().left;
     const l2StripLeft = l2Strip.getBoundingClientRect().left;
     return {
@@ -1457,12 +1463,13 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
       l1NameLeft,
       singleDotLeft,
       singleNameLeft,
+      singleStripLeft,
       l2DotLeft,
       l2StripLeft,
       step1: l1DotLeft - symbolLeft,
       step1Name: l1NameLeft - symbolLeft,
-      step2: l2DotLeft - l1DotLeft,
-      step2Strip: l2StripLeft - l1NameLeft,
+      legVsSingleDotDelta: Math.abs(l2DotLeft - singleDotLeft),
+      legVsSingleStripDelta: Math.abs(l2StripLeft - singleStripLeft),
       combinedVsSingleDotDelta: Math.abs(l1DotLeft - singleDotLeft),
       combinedVsSingleNameDelta: Math.abs(l1NameLeft - singleNameLeft),
     };
@@ -1471,8 +1478,8 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   if (visualHierarchy.ok) {
     expect(visualHierarchy.step1).toBeGreaterThanOrEqual(visualHierarchy.minStep);
     expect(visualHierarchy.step1Name).toBeGreaterThanOrEqual(visualHierarchy.minStep);
-    expect(visualHierarchy.step2).toBeGreaterThanOrEqual(visualHierarchy.minStep);
-    expect(visualHierarchy.step2Strip).toBeGreaterThanOrEqual(visualHierarchy.minStep);
+    expect(visualHierarchy.legVsSingleDotDelta).toBeLessThanOrEqual(1);
+    expect(visualHierarchy.legVsSingleStripDelta).toBeLessThanOrEqual(1);
     expect(visualHierarchy.combinedVsSingleDotDelta).toBeLessThanOrEqual(1);
     expect(visualHierarchy.combinedVsSingleNameDelta).toBeLessThanOrEqual(1);
   }
@@ -1499,7 +1506,7 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   await expect(longPutLeg.locator(".pnl-bar-track")).toHaveCount(0);
   await expect(longPutLeg.locator(".pnl-metric-percent")).toHaveCount(0);
 
-  // Level-2 indentation exceeds level-1.
+  // Level-2 shares level-1 left inset (no extra x-indent for combined legs).
   const legPad = await page.evaluate(() => {
     const l1 = document.querySelector<HTMLElement>("tr[data-level='1'] th[scope='row']");
     const l2 = document.querySelector<HTMLElement>(
@@ -1510,7 +1517,7 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
       l2: l2 ? Number.parseFloat(getComputedStyle(l2).paddingLeft) : -1,
     };
   });
-  expect(legPad.l2).toBeGreaterThan(legPad.l1);
+  expect(Math.abs(legPad.l2 - legPad.l1)).toBeLessThanOrEqual(1);
 
   // Equity leg identity on Covered Call (always visible).
   const aaplLegs = page.locator(
