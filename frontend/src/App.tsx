@@ -1335,7 +1335,8 @@ function formatPremiumEffect(value: number): { text: string; kind: "credit" | "d
 const POSITIONS_TABLE_COL_COUNT = 8;
 
 /**
- * Compact joined contract strip for a leg in the main positions table first cell.
+ * Compact fixed-track contract grid for a leg in the main positions table first cell.
+ * Tracks: qty | exp | dte | strike | C/P (equity spans label across non-qty tracks).
  * Visual segments use graphite bands; full phrase is exposed only via sr-only.
  */
 function LegContractIdentity({ leg }: { leg: PositionLeg }) {
@@ -1346,7 +1347,7 @@ function LegContractIdentity({ leg }: { leg: PositionLeg }) {
     return (
       <span className="contract-identity contract-identity-equity" title={contractTitle}>
         <span className="sr-only">{identity.accessibleLabel}</span>
-        <span className="contract-strip" aria-hidden="true">
+        <span className="contract-strip contract-grid" aria-hidden="true">
           <span className="contract-seg contract-qty">{identity.signedQuantity}</span>
           <span className="contract-seg contract-instrument">{identity.instrument}</span>
         </span>
@@ -1354,23 +1355,22 @@ function LegContractIdentity({ leg }: { leg: PositionLeg }) {
     );
   }
 
+  // Always render every option track so column positions stay fixed across legs.
   return (
     <span className="contract-identity contract-identity-option" title={contractTitle}>
       <span className="sr-only">{identity.accessibleLabel}</span>
-      <span className="contract-strip" aria-hidden="true">
+      <span className="contract-strip contract-grid" aria-hidden="true">
         <span className="contract-seg contract-qty">{identity.signedQuantity}</span>
-        {identity.expiration ? (
-          <span className="contract-seg contract-exp">{identity.expiration}</span>
-        ) : null}
-        {identity.dte ? (
-          <span className="contract-seg contract-dte">{identity.dte}</span>
-        ) : null}
-        {identity.strike ? (
-          <span className="contract-seg contract-strike">{identity.strike}</span>
-        ) : null}
-        {identity.optionType ? (
-          <span className="contract-seg contract-type">{identity.optionType}</span>
-        ) : null}
+        <span className="contract-seg contract-exp">
+          {identity.expiration ?? ""}
+        </span>
+        <span className="contract-seg contract-dte">{identity.dte ?? ""}</span>
+        <span className="contract-seg contract-strike">
+          {identity.strike ?? ""}
+        </span>
+        <span className="contract-seg contract-type">
+          {identity.optionType ?? ""}
+        </span>
       </span>
     </span>
   );

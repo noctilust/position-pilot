@@ -16,6 +16,7 @@ import {
   formatSymbolGroupSplit,
   getLegIdentitySegments,
   groupStrategiesBySymbol,
+  horizonDisplayRank,
   isCombinedOptionStrategy,
   isEquityLeg,
   isOptionLeg,
@@ -26,6 +27,7 @@ import {
   pruneExpandedStrategyIds,
   sanitizeStrategyDomId,
   sanitizeSymbolDomId,
+  sortStrategiesForSymbolGroup,
   strategyLegsPanelId,
   symbolGroupPanelId,
   UNKNOWN_UNDERLYING_SYMBOL,
@@ -266,7 +268,8 @@ test.describe("groupStrategiesBySymbol", () => {
     expect(groups.map((g) => g.symbol)).toEqual(["SPY", UNKNOWN_UNDERLYING_SYMBOL]);
     const unknown = groups.find((g) => g.symbol === UNKNOWN_UNDERLYING_SYMBOL);
     expect(unknown?.totalCount).toBe(2);
-    expect(unknown?.strategies.map((s) => s.strategy_id)).toEqual(["blank-a", "blank-b"]);
+    // Stock rows sort ahead of options even when stock arrives second.
+    expect(unknown?.strategies.map((s) => s.strategy_id)).toEqual(["blank-b", "blank-a"]);
   });
 
   test("same-symbol stock and option rows share one group with split counts", () => {
@@ -292,6 +295,164 @@ test.describe("groupStrategiesBySymbol", () => {
     expect(groups[0]?.optionsCount).toBe(1);
     expect(groups[0]?.totalCount).toBe(2);
     expect(groups[0]?.unrealizedPnl).toBe(140);
+  });
+
+  test("shares precede options even when options arrive first", () => {
+    const groups = groupStrategiesBySymbol([
+      strategy({
+        strategy_id: "opt-first",
+        underlying: "IWM",
+        strategy_type: "Short Put",
+        horizon: "tactical",
+        legs: [optionLeg({ underlying_symbol: "IWM" })],
+      }),
+      strategy({
+        strategy_id: "stock-second",
+        underlying: "IWM",
+        strategy_type: "Long Stock",
+        horizon: "tactical",
+        legs: [leg({ underlying_symbol: "IWM" })],
+      }),
+      strategy({
+        strategy_id: "opt-third",
+        underlying: "IWM",
+        strategy_type: "Short Call",
+        horizon: "tactical",
+        legs: [optionLeg({ underlying_symbol: "IWM", option_type: "C" })],
+      }),
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.strategies.map((s) => s.strategy_id)).toEqual([
+      "stock-second",
+      "opt-first",
+      "opt-third",
+    ]);
+  });
+
+  test("within options, Strategic precedes Tactical with stable equal-priority order", () => {
+    const groups = groupStrategiesBySymbol([
+      strategy({
+        strategy_id: "tac-a",
+        underlying: "SPY",
+        strategy_type: "Short Put",
+        horizon: "tactical",
+        legs: [optionLeg()],
+      }),
+      strategy({
+        strategy_id: "strat-b",
+        underlying: "SPY",
+        strategy_type: "Long Call",
+        horizon: "strategic",
+        legs: [optionLeg({ option_type: "C" })],
+      }),
+      strategy({
+        strategy_id: "tac-c",
+        underlying: "SPY",
+        strategy_type: "Iron Condor",
+        horizon: "tactical",
+        legs: [
+          optionLeg({ option_type: "P", strike_price: 480 }),
+          optionLeg({ option_type: "P", strike_price: 470 }),
+          optionLeg({ option_type: "C", strike_price: 520 }),
+          optionLeg({ option_type: "C", strike_price: 530 }),
+        ],
+      }),
+      strategy({
+        strategy_id: "strat-d",
+        underlying: "SPY",
+        strategy_type: "Calendar",
+        horizon: "strategic",
+        legs: [
+          optionLeg({ expiration_date: "2026-08-21", days_to_expiration: 21 }),
+          optionLeg({ expiration_date: "2026-09-18", days_to_expiration: 49 }),
+        ],
+      }),
+    ]);
+    expect(groups[0]?.strategies.map((s) => s.strategy_id)).toEqual([
+      "strat-b",
+      "strat-d",
+      "tac-a",
+      "tac-c",
+    ]);
+  });
+
+  test("stock + strategic options + tactical options order within one symbol", () => {
+    const groups = groupStrategiesBySymbol([
+      strategy({
+        strategy_id: "tac-opt",
+        underlying: "QQQ",
+        strategy_type: "Short Put",
+        horizon: "tactical",
+        legs: [optionLeg()],
+      }),
+      strategy({
+        strategy_id: "stock",
+        underlying: "QQQ",
+        strategy_type: "Long Stock",
+        horizon: "tactical",
+        legs: [leg()],
+      }),
+      strategy({
+        strategy_id: "strat-opt",
+        underlying: "QQQ",
+        strategy_type: "Long Call",
+        horizon: "strategic",
+        legs: [optionLeg({ option_type: "C" })],
+      }),
+    ]);
+    expect(groups[0]?.strategies.map((s) => s.strategy_id)).toEqual([
+      "stock",
+      "strat-opt",
+      "tac-opt",
+    ]);
+  });
+});
+
+test.describe("sortStrategiesForSymbolGroup / horizonDisplayRank", () => {
+  test("horizonDisplayRank ranks strategic ahead of tactical", () => {
+    expect(horizonDisplayRank("strategic")).toBe(0);
+    expect(horizonDisplayRank("Strategic")).toBe(0);
+    expect(horizonDisplayRank("tactical")).toBe(1);
+    expect(horizonDisplayRank("other")).toBe(1);
+    expect(horizonDisplayRank(null)).toBe(1);
+  });
+
+  test("sortStrategiesForSymbolGroup is stable for equal priority", () => {
+    const rows = [
+      strategy({ strategy_id: "a", horizon: "tactical", legs: [optionLeg()] }),
+      strategy({ strategy_id: "b", horizon: "tactical", legs: [optionLeg()] }),
+      strategy({ strategy_id: "c", horizon: "tactical", legs: [optionLeg()] }),
+    ];
+    expect(sortStrategiesForSymbolGroup(rows).map((s) => s.strategy_id)).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
+  });
+
+  test("combined multi-leg strategies stay as single sortable units", () => {
+    const ic = strategy({
+      strategy_id: "ic",
+      strategy_type: "Iron Condor",
+      horizon: "tactical",
+      legs: [
+        optionLeg({ option_type: "P", strike_price: 480 }),
+        optionLeg({ option_type: "P", strike_price: 470 }),
+        optionLeg({ option_type: "C", strike_price: 520 }),
+        optionLeg({ option_type: "C", strike_price: 530 }),
+      ],
+    });
+    const stock = strategy({
+      strategy_id: "stock",
+      strategy_type: "Long Stock",
+      horizon: "strategic",
+      legs: [leg()],
+    });
+    const sorted = sortStrategiesForSymbolGroup([ic, stock]);
+    expect(sorted.map((s) => s.strategy_id)).toEqual(["stock", "ic"]);
+    // Legs remain attached to the parent strategy object (not flattened).
+    expect(sorted[1]?.legs).toHaveLength(4);
+    expect(sorted[1]?.legs?.map((l) => l.strike_price)).toEqual([480, 470, 520, 530]);
   });
 });
 
@@ -495,6 +656,43 @@ test.describe("leg presentation helpers", () => {
     expect(equity.optionType).toBeNull();
     expect(equity.accessibleLabel).toContain("Long 100");
     expect(equity.accessibleLabel).toContain("Equity");
+  });
+
+  test("option identity segments always expose fixed tracks for the descriptor grid", () => {
+    const full = getLegIdentitySegments(
+      optionLeg({
+        quantity: 10,
+        quantity_direction: "Long",
+        option_type: "C",
+        strike_price: 1600,
+        expiration_date: "2026-08-21",
+        days_to_expiration: 40,
+      }),
+    );
+    // Track fields used by LegContractIdentity grid (qty + 4 option columns).
+    expect(full.signedQuantity).toBe("+10");
+    expect(full.expiration).toBeTruthy();
+    expect(full.dte).toBe("40d");
+    expect(full.strike).toBe("$1600");
+    expect(full.optionType).toBe("C");
+
+    const sparse = getLegIdentitySegments(
+      optionLeg({
+        quantity: 1,
+        quantity_direction: "Short",
+        option_type: null,
+        strike_price: null,
+        expiration_date: null,
+        days_to_expiration: null,
+      }),
+    );
+    // Sparse legs still return the segment shape so UI can reserve empty tracks.
+    expect(sparse.signedQuantity).toBe("−1");
+    expect(sparse.expiration).toBeNull();
+    expect(sparse.dte).toBeNull();
+    expect(sparse.strike).toBeNull();
+    expect(sparse.optionType).toBeNull();
+    expect(sparse.isEquity).toBe(false);
   });
 
   test("clampPnlBarPercent clamps visual bar only", () => {

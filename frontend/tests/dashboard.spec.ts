@@ -1489,6 +1489,108 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   await expect(spyPutIdentity.locator(".contract-type")).toHaveText("P");
   await expect(spyPutIdentity.locator(".contract-strike")).toHaveText("$500");
 
+  // Within SPY: shares/stock row precedes options even though options arrive first in fixture.
+  const spyOrder = await page.evaluate(() => {
+    const spyPanel = document.getElementById("symbol-group-panel-SPY");
+    if (!spyPanel) return [] as string[];
+    return Array.from(spyPanel.querySelectorAll<HTMLElement>("tr[data-level='1']")).map(
+      (row) => {
+        const open = row.querySelector<HTMLElement>(".strategy-open-action");
+        return (open?.textContent || row.textContent || "").replace(/\s+/g, " ").trim();
+      },
+    );
+  });
+  expect(spyOrder.length).toBe(2);
+  expect(spyOrder[0]).toMatch(/Long Stock/i);
+  expect(spyOrder[1]).toMatch(/Short Put/i);
+
+  // Fixed-track instrument grid: option legs always expose 5 segments; equity uses same width.
+  await expect(longPutLeg.locator(".contract-grid .contract-seg")).toHaveCount(5);
+  await expect(shortCallLeg.locator(".contract-grid .contract-seg")).toHaveCount(5);
+  await expect(spyPutIdentity.locator(".contract-grid .contract-seg")).toHaveCount(5);
+  await expect(equityLeg.locator(".contract-identity-equity .contract-grid")).toHaveCount(1);
+  await expect(equityLeg.locator(".contract-grid .contract-seg")).toHaveCount(2);
+
+  const gridAlignment = await page.evaluate(() => {
+    const optionStrips = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        "tr[data-level='2']:not([hidden]) .contract-identity-option .contract-grid",
+      ),
+    );
+    const equityStrip = document.querySelector<HTMLElement>(
+      "tr[data-level='2']:not([hidden]) .contract-identity-equity .contract-grid",
+    );
+    if (optionStrips.length < 2 || !equityStrip) {
+      return { ok: false as const };
+    }
+    const widths = optionStrips.map((el) => Math.round(el.getBoundingClientRect().width));
+    const lefts = optionStrips.map((el) => Math.round(el.getBoundingClientRect().left));
+    const equityWidth = Math.round(equityStrip.getBoundingClientRect().width);
+    const equityLeft = Math.round(equityStrip.getBoundingClientRect().left);
+
+    // Column track positions for qty / strike across two option legs with different content.
+    const trackLefts = optionStrips.map((strip) => {
+      const qty = strip.querySelector<HTMLElement>(".contract-qty");
+      const strike = strip.querySelector<HTMLElement>(".contract-strike");
+      const type = strip.querySelector<HTMLElement>(".contract-type");
+      return {
+        qty: qty ? Math.round(qty.getBoundingClientRect().left) : -1,
+        strike: strike ? Math.round(strike.getBoundingClientRect().left) : -1,
+        type: type ? Math.round(type.getBoundingClientRect().left) : -1,
+      };
+    });
+
+    const first = trackLefts[0]!;
+    const tracksAligned = trackLefts.every(
+      (t) =>
+        t.qty === first.qty && t.strike === first.strike && t.type === first.type,
+    );
+
+    return {
+      ok: true as const,
+      widths,
+      lefts,
+      equityWidth,
+      equityLeft,
+      optionWidth: widths[0] ?? 0,
+      tracksAligned,
+      display: getComputedStyle(optionStrips[0]!).display,
+    };
+  });
+  expect(gridAlignment.ok).toBeTruthy();
+  if (gridAlignment.ok) {
+    expect(gridAlignment.display).toBe("grid");
+    expect(new Set(gridAlignment.widths).size).toBe(1);
+    expect(gridAlignment.equityWidth).toBe(gridAlignment.optionWidth);
+    expect(gridAlignment.tracksAligned).toBeTruthy();
+    // Equity and option descriptors share the same left origin within their respective cells;
+    // compare width equality only here (indent levels differ for nested legs).
+    expect(gridAlignment.optionWidth).toBeGreaterThan(80);
+  }
+
+  // Strategic vs Tactical horizon chips are visually distinct (not identical graphite).
+  const horizonColors = await page.evaluate(() => {
+    const strategic = document.querySelector<HTMLElement>(
+      "tr[data-level='1'] .horizon-strategic",
+    );
+    const tactical = document.querySelector<HTMLElement>(
+      "tr[data-level='1'] .horizon-tactical",
+    );
+    if (!strategic || !tactical) return null;
+    const s = getComputedStyle(strategic);
+    const t = getComputedStyle(tactical);
+    return {
+      strategicColor: s.color,
+      tacticalColor: t.color,
+      strategicBorder: s.borderColor,
+      tacticalBorder: t.borderColor,
+      strategicBg: s.backgroundColor,
+      tacticalBg: t.backgroundColor,
+    };
+  });
+  expect(horizonColors).not.toBeNull();
+  expect(horizonColors!.strategicColor).not.toBe(horizonColors!.tacticalColor);
+
   // Dark theme palette: neutral charcoal bands + magenta dots + Tastytrade-like P/L.
   // Prefer computed styles / CSS tokens over brittle screenshot snapshots.
   await expect

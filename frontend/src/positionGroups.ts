@@ -170,8 +170,43 @@ export function filterStrategiesByCategory<T extends Pick<Strategy, "strategy_ty
 }
 
 /**
+ * Presentation sort rank for horizon: Strategic before Tactical (and other).
+ * Does not mutate broker data — used only for within-group display order.
+ */
+export function horizonDisplayRank(horizon: string | null | undefined): number {
+  return (horizon ?? "").trim().toLowerCase() === "strategic" ? 0 : 1;
+}
+
+/**
+ * Sort strategies within one symbol group for the Positions table:
+ * 1. Stock/equity strategies before every options strategy
+ * 2. Within each asset bucket, Strategic before Tactical
+ * 3. Equal-priority entries keep input relative order (stable sort)
+ *
+ * Multi-leg structures stay intact as single strategy entries; legs are never
+ * reordered relative to their parent (legs render nested under the parent row).
+ */
+export function sortStrategiesForSymbolGroup(
+  strategies: readonly Strategy[],
+): Strategy[] {
+  return strategies
+    .map((strategy, index) => ({ strategy, index }))
+    .sort((a, b) => {
+      const catA = classifyStrategy(a.strategy) === "stock" ? 0 : 1;
+      const catB = classifyStrategy(b.strategy) === "stock" ? 0 : 1;
+      if (catA !== catB) return catA - catB;
+      const horA = horizonDisplayRank(a.strategy.horizon);
+      const horB = horizonDisplayRank(b.strategy.horizon);
+      if (horA !== horB) return horA - horB;
+      return a.index - b.index;
+    })
+    .map(({ strategy }) => strategy);
+}
+
+/**
  * Group strategies by normalized underlying. Groups are sorted alphabetically
- * by display symbol. Within a group, original relative order is preserved.
+ * by display symbol. Within a group: stock before options, then Strategic
+ * before Tactical; equal-priority order is stable.
  */
 export function groupStrategiesBySymbol(
   strategies: readonly Strategy[],
@@ -189,7 +224,7 @@ export function groupStrategiesBySymbol(
 
   const symbols = [...buckets.keys()].sort((a, b) => a.localeCompare(b));
   return symbols.map((symbol) => {
-    const rows = buckets.get(symbol) ?? [];
+    const rows = sortStrategiesForSymbolGroup(buckets.get(symbol) ?? []);
     let stockCount = 0;
     let optionsCount = 0;
     let unrealizedPnl = 0;
