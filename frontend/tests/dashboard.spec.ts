@@ -2569,12 +2569,11 @@ test("content density and no page overflow at desktop, tablet, and phone", async
       // More than a single card worth of content above the fold.
       expect(metrics.visibleSectionCount).toBeGreaterThanOrEqual(2);
     }
-    // Body text: ≥16px on phone and narrow/side-panel widths; wide desktop stays dense.
+    // Body text: ≥16px on phone and narrow/side-panel; ≥15.5px on wide canvases.
     if (width <= 1024) {
       expect(metrics.bodyFontSize).toBeGreaterThanOrEqual(16);
     } else {
-      expect(metrics.bodyFontSize).toBeGreaterThanOrEqual(13);
-      expect(metrics.bodyFontSize).toBeLessThan(15.5);
+      expect(metrics.bodyFontSize).toBeGreaterThanOrEqual(15.5);
     }
   }
 
@@ -2697,7 +2696,7 @@ test("content density and no page overflow at desktop, tablet, and phone", async
   expect(narrowMetrics.pageOverflow).toBeFalsy();
 });
 
-test("responsive typography is larger in Codex side panel and phone, dense on wide desktop", async ({
+test("responsive typography is readable on wide canvas, side panel, phone, and desktop", async ({
   page,
 }) => {
   await mockDashboardApis(page);
@@ -2711,6 +2710,8 @@ test("responsive typography is larger in Codex side panel and phone, dense on wi
     return page.evaluate(() => {
       const body = document.body;
       const nav = document.querySelector(".nav-item") as HTMLElement | null;
+      const brand = document.querySelector(".brand-lockup") as HTMLElement | null;
+      const railFoot = document.querySelector(".rail-foot") as HTMLElement | null;
       const strategy =
         (document.querySelector(".strategy-combined-name") as HTMLElement | null) ??
         (document.querySelector(".strategy-open-action") as HTMLElement | null) ??
@@ -2718,10 +2719,24 @@ test("responsive typography is larger in Codex side panel and phone, dense on wi
       const contract =
         (document.querySelector(".contract-identity") as HTMLElement | null) ??
         (document.querySelector(".contract-strike") as HTMLElement | null);
+      // Prefer primary positions P/L tabular values (not compact meta counts).
+      const tabular =
+        (document.querySelector(".symbol-group-pnl.tabular") as HTMLElement | null) ??
+        (document.querySelector(".pnl-metric-value.tabular") as HTMLElement | null) ??
+        (document.querySelector(
+          ".data-table.dense tbody td.tabular.positions-td-pnl",
+        ) as HTMLElement | null) ??
+        (document.querySelector(
+          ".data-table.dense tbody td.tabular",
+        ) as HTMLElement | null);
+      const denseCell =
+        (tabular?.closest("td, th") as HTMLElement | null) ??
+        (document.querySelector(".data-table.dense tbody td") as HTMLElement | null);
       const pnl =
         (document.querySelector(".pnl-metric-value") as HTMLElement | null) ??
         (document.querySelector(".symbol-group-pnl") as HTMLElement | null) ??
-        (document.querySelector(".data-table.dense td") as HTMLElement | null);
+        tabular ??
+        denseCell;
       const meta =
         (document.querySelector(".roll-pnl-indicator") as HTMLElement | null) ??
         (document.querySelector(".roll-status-badge") as HTMLElement | null) ??
@@ -2738,8 +2753,12 @@ test("responsive typography is larger in Codex side panel and phone, dense on wi
         rootFontSize: px(doc),
         bodyFontSize: px(body),
         navFontSize: px(nav),
+        brandFontSize: px(brand),
+        railFootFontSize: px(railFoot),
         strategyFontSize: px(strategy),
         contractFontSize: px(contract),
+        denseCellFontSize: px(denseCell),
+        tabularFontSize: px(tabular),
         pnlFontSize: px(pnl),
         metaFontSize: px(meta),
         catalystFontSize: px(catalyst),
@@ -2748,47 +2767,58 @@ test("responsive typography is larger in Codex side panel and phone, dense on wi
     });
   }
 
-  // Codex in-app browser side panel (~800–900 CSS px): larger than legacy 14px body / ~9–11px chrome.
+  function expectReadableCore(
+    metrics: Awaited<ReturnType<typeof sampleTypeMetrics>>,
+    opts: { minBody: number; minNav: number },
+  ) {
+    expect(metrics.rootFontSize).toBeGreaterThanOrEqual(17.5);
+    expect(metrics.bodyFontSize).toBeGreaterThanOrEqual(opts.minBody);
+    expect(metrics.navFontSize).toBeGreaterThanOrEqual(opts.minNav);
+    expect(metrics.strategyFontSize).toBeGreaterThanOrEqual(13);
+    expect(metrics.contractFontSize).toBeGreaterThanOrEqual(12);
+    expect(metrics.pnlFontSize).toBeGreaterThanOrEqual(13);
+    expect(metrics.metaFontSize).toBeGreaterThanOrEqual(11);
+    // Tabular P/L must not be materially smaller than surrounding cell text.
+    if (metrics.tabularFontSize > 0 && metrics.denseCellFontSize > 0) {
+      expect(metrics.tabularFontSize).toBeGreaterThanOrEqual(metrics.denseCellFontSize - 0.5);
+    }
+    if (metrics.catalystFontSize > 0) {
+      expect(metrics.catalystFontSize).toBeGreaterThanOrEqual(12);
+    }
+    expect(metrics.pageOverflow).toBeFalsy();
+  }
+
+  // Wide internal canvas (Codex embedded browser ~1919 CSS px): base type must
+  // be large without relying on max-width: 70rem media queries.
+  await page.setViewportSize({ width: 1919, height: 1080 });
+  await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
+  const wideCanvas = await sampleTypeMetrics();
+  expectReadableCore(wideCanvas, { minBody: 15.5, minNav: 11 });
+  expect(wideCanvas.brandFontSize).toBeGreaterThanOrEqual(11);
+  expect(wideCanvas.railFootFontSize).toBeGreaterThanOrEqual(11);
+
+  // Codex side panel / tablet (~800–900 CSS px): stronger body than wide base.
   await page.setViewportSize({ width: 850, height: 900 });
   await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
   const sidePanel = await sampleTypeMetrics();
-  expect(sidePanel.rootFontSize).toBeGreaterThanOrEqual(17.5);
-  expect(sidePanel.bodyFontSize).toBeGreaterThanOrEqual(16);
-  expect(sidePanel.navFontSize).toBeGreaterThanOrEqual(11);
-  expect(sidePanel.strategyFontSize).toBeGreaterThanOrEqual(13);
-  expect(sidePanel.contractFontSize).toBeGreaterThanOrEqual(12);
-  expect(sidePanel.pnlFontSize).toBeGreaterThanOrEqual(13);
-  expect(sidePanel.metaFontSize).toBeGreaterThanOrEqual(11);
-  if (sidePanel.catalystFontSize > 0) {
-    expect(sidePanel.catalystFontSize).toBeGreaterThanOrEqual(12);
-  }
-  expect(sidePanel.pageOverflow).toBeFalsy();
+  expectReadableCore(sidePanel, { minBody: 16, minNav: 11 });
+  expect(sidePanel.bodyFontSize).toBeGreaterThanOrEqual(wideCanvas.bodyFontSize);
 
   // Phone: body remains comfortably large; bottom nav labels stay usable with icons.
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
   const phone = await sampleTypeMetrics();
-  expect(phone.bodyFontSize).toBeGreaterThanOrEqual(16);
-  expect(phone.strategyFontSize).toBeGreaterThanOrEqual(13);
-  expect(phone.contractFontSize).toBeGreaterThanOrEqual(12);
-  expect(phone.pnlFontSize).toBeGreaterThanOrEqual(13);
-  expect(phone.metaFontSize).toBeGreaterThanOrEqual(11);
-  expect(phone.navFontSize).toBeGreaterThanOrEqual(9);
-  expect(phone.pageOverflow).toBeFalsy();
+  expectReadableCore(phone, { minBody: 16, minNav: 9 });
 
-  // Wide desktop: preserve dense 14px body baseline and default 16px root.
+  // Ordinary desktop width: same global 18px root / readable body baseline.
   await page.setViewportSize({ width: 1440, height: 900 });
   await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
   const desktop = await sampleTypeMetrics();
-  expect(desktop.rootFontSize).toBeGreaterThanOrEqual(15.5);
-  expect(desktop.rootFontSize).toBeLessThan(16.5);
-  expect(desktop.bodyFontSize).toBeGreaterThanOrEqual(13.5);
-  expect(desktop.bodyFontSize).toBeLessThan(15);
-  // Side-panel type is strictly larger than the preserved dense desktop baseline.
-  expect(sidePanel.bodyFontSize).toBeGreaterThan(desktop.bodyFontSize);
-  expect(sidePanel.navFontSize).toBeGreaterThan(desktop.navFontSize);
-  expect(sidePanel.contractFontSize).toBeGreaterThan(desktop.contractFontSize);
-  expect(desktop.pageOverflow).toBeFalsy();
+  expectReadableCore(desktop, { minBody: 15.5, minNav: 11 });
+  expect(desktop.brandFontSize).toBeGreaterThanOrEqual(11);
+  expect(desktop.railFootFontSize).toBeGreaterThanOrEqual(11);
+  expect(desktop.rootFontSize).toBeGreaterThanOrEqual(wideCanvas.rootFontSize - 0.5);
+  expect(desktop.rootFontSize).toBeLessThanOrEqual(wideCanvas.rootFontSize + 0.5);
 });
 
 test("positions roll ledger aggregates all displayable accounts and clears on scope change", async ({

@@ -76,6 +76,12 @@
 
 html {
   background: var(--bg);
+  /*
+   * App-wide rem base: 18px when the UA default is 16px. Codex and other
+   * embedded canvases often report a wide internal viewport (~1920px), so
+   * readability cannot depend on a narrow max-width media query alone.
+   */
+  font-size: 112.5%;
 }
 
 body {
@@ -84,7 +90,7 @@ body {
   min-height: 100vh;
   background: var(--bg);
   color: var(--text);
-  font-size: 0.875rem;
+  font-size: 0.875rem; /* 15.75px at the 18px root */
   line-height: 1.4;
 }
 
@@ -176,7 +182,7 @@ textarea:focus-visible,
   place-content: center;
   border-bottom: 1px solid var(--line);
   color: var(--text-soft);
-  font-size: 0.55rem;
+  font-size: 0.62rem; /* ~11.2px at 18px root; avoid sub-11px metadata */
   font-weight: 700;
   letter-spacing: 0.14em;
   line-height: 1.05;
@@ -211,7 +217,7 @@ textarea:focus-visible,
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
-  font-size: 0.58rem;
+  font-size: 0.68rem; /* ~12.2px at 18px root; readable wide-rail labels */
   letter-spacing: 0.02em;
   border-radius: var(--radius-sm);
 }
@@ -255,7 +261,7 @@ textarea:focus-visible,
   min-height: 3rem;
   border-top: 1px solid var(--line);
   color: var(--good);
-  font-size: 0.55rem;
+  font-size: 0.62rem; /* ~11.2px at 18px root; match brand metadata floor */
   text-transform: uppercase;
   letter-spacing: 0.08em;
   padding: var(--space-2);
@@ -2196,7 +2202,11 @@ button.strategy-open-action:focus-visible {
 
 .data-table .tabular {
   font-family: var(--font-mono);
-  font-size: 0.8em;
+  /*
+   * Keep mono tabular figures at the cell size so positions P/L and other
+   * primary numbers are not rendered ~20% smaller than surrounding text.
+   */
+  font-size: 1em;
   letter-spacing: -0.01em;
 }
 
@@ -2993,38 +3003,14 @@ button.drawer-backdrop:focus-visible {
 /* Tablet / narrow desktop / Codex side panel (~800–1120px) */
 @media (max-width: 70rem) {
   /*
-   * Side-panel readability: raise the root rem so rem-based chrome, tables,
-   * contract identity, and position hierarchy scale as one type system.
-   * Wide desktop (>70rem) keeps the dense 16px-root / 14px-body baseline.
-   * Phone (≤48rem) inherits this root and further lifts body to 1rem.
+   * Stronger side-panel body copy on top of the global 18px root.
+   * Nav, brand/footer, and tabular sizing live on the base rules so wide
+   * embedded canvases stay readable without this breakpoint.
+   * Phone (≤48rem) further lifts body to 1rem.
    */
-  html {
-    font-size: 112.5%; /* 18px when the UA default is 16px */
-  }
-
   body {
-    font-size: 0.9375rem; /* ~16.9px primary copy at the scaled root */
+    font-size: 0.9375rem; /* ~16.9px primary copy at the 18px root */
     line-height: 1.42;
-  }
-
-  /* Icon-rail labels stay legible in the side panel after the root scale. */
-  .nav-item {
-    font-size: 0.68rem; /* ~12.2px */
-  }
-
-  .brand-lockup,
-  .rail-foot {
-    font-size: 0.62rem; /* ~11.2px metadata floor */
-  }
-
-  /*
-   * Dense tables use .tabular { font-size: 0.8em }, which dropped primary
-   * P/L and numeric cells ~20% below the cell size (~10–12px). At side-panel
-   * widths keep mono tabular figures at the cell size so Open P/L stays
-   * readable; wide desktop keeps the denser 0.8em shrink.
-   */
-  .data-table .tabular {
-    font-size: 1em;
   }
 
   .overview-grid {
