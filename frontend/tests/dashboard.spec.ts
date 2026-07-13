@@ -1131,18 +1131,31 @@ test("symbol-grouped positions: collapse, category toggles, ledger isolation, ov
     page.locator("th[scope='rowgroup']").filter({ hasText: "SPY" }),
   ).toBeVisible();
 
-  // Combined multi-leg strategies render as one row each (not one row per leg).
-  await expect(page.getByRole("button", { name: /Expand legs for QQQ Iron Condor/i })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Expand legs for AAPL Covered Call/i })).toBeVisible();
+  // Combined multi-leg strategies render as one strategy row each with legs always visible.
+  await expect(
+    page.locator("tr[data-level='1'].combined-strategy-row").filter({ hasText: "Iron Condor" }),
+  ).toBeVisible();
+  await expect(
+    page.locator("tr[data-level='1'].combined-strategy-row").filter({ hasText: "Covered Call" }),
+  ).toBeVisible();
   await expect(page.getByText("4 legs").first()).toBeVisible();
   await expect(page.getByText("2 legs").first()).toBeVisible();
-  // Single-leg rows open analysis directly and have no false leg disclosure.
+  await expect(page.getByRole("button", { name: /Expand legs|Collapse legs/i })).toHaveCount(0);
+  await expect(page.locator(".strategy-legs-toggle")).toHaveCount(0);
+  await expect(page.locator(".strategy-legs-chevron")).toHaveCount(0);
+  // Legs for combined strategies are visible under expanded symbols by default.
+  await expect(
+    page.locator("tr[data-level='2'][data-parent-strategy='strat-qqq']:visible"),
+  ).toHaveCount(4);
+  await expect(
+    page.locator("tr[data-level='2'][data-parent-strategy='strat-aapl-cc']:visible"),
+  ).toHaveCount(2);
+  // Single-leg rows open analysis directly and have no leg disclosure.
   await expect(page.getByRole("button", { name: "Open SPY Short Put" })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Expand legs for SPY Short Put/i })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /Expand legs for SPY Long Stock/i })).toHaveCount(0);
   await expect(
     page.getByText(/Multi-leg rows are Position Pilot detected strategies/i),
   ).toBeVisible();
+  await expect(page.getByText(/individual legs are shown below/i)).toBeVisible();
 
   // Collapse only SPY; AAPL/QQQ rows remain visible.
   await groupToggles.nth(2).click();
@@ -1240,15 +1253,16 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   await page.getByRole("button", { name: "Positions" }).click();
   await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
 
-  // Hierarchy hooks: symbol (0), strategy (1), and (after expand) leg (2) rows.
+  // Hierarchy hooks: symbol (0), strategy (1), and always-visible combined legs (2).
   const level0 = page.locator("tr[data-level='0']");
   const level1 = page.locator("tr[data-level='1']");
   await expect(level0).toHaveCount(3);
   await expect(level1).toHaveCount(4);
   await expect(page.locator("tr.position-row-level-0")).toHaveCount(3);
   await expect(page.locator("tr.position-row-level-1")).toHaveCount(4);
-  // Combined strategies exist but legs stay collapsed by default.
-  await expect(page.locator("tr[data-level='2']:visible")).toHaveCount(0);
+  // Combined strategies always show legs under expanded symbols (IC 4 + CC 2).
+  await expect(page.locator("tr[data-level='2']:visible")).toHaveCount(6);
+  await expect(page.getByRole("button", { name: /Expand legs|Collapse legs/i })).toHaveCount(0);
 
   // Explicit colgroup / column width system + numeric alignment hooks.
   await expect(page.locator("table.positions-by-symbol > colgroup > col")).toHaveCount(8);
@@ -1346,9 +1360,11 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   await expect(qqqStrategyRow.locator(".pnl-metric-percent")).toContainText("-8.0%");
   await expect(qqqStrategyRow.locator(".pnl-bar-fill-negative")).toBeVisible();
 
-  // Dense strategy row: analyze is inline (not a tall orphan second line).
+  // Dense strategy row: name + leg count + analyze on one line; no disclosure control.
   await expect(qqqStrategyRow.locator(".strategy-label-row")).toHaveCount(1);
   await expect(qqqStrategyRow.locator(".strategy-label-stack")).toHaveCount(0);
+  await expect(qqqStrategyRow.locator(".strategy-combined-name")).toHaveText("Iron Condor");
+  await expect(qqqStrategyRow.locator(".strategy-leg-count")).toHaveText("4 legs");
   await expect(
     qqqStrategyRow.getByRole("button", { name: "Open analysis for QQQ Iron Condor" }),
   ).toHaveText("Analyze");
@@ -1361,17 +1377,20 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
       display: style.display,
       flexDirection: style.flexDirection,
       hasToggle: labelRow.querySelector(".strategy-legs-toggle") != null,
+      hasChevron: labelRow.querySelector(".strategy-legs-chevron") != null,
+      hasName: labelRow.querySelector(".strategy-combined-name") != null,
       hasAnalyze: labelRow.querySelector(".strategy-analysis-action") != null,
     };
   });
   expect(strategyRowLayout.ok).toBeTruthy();
   expect(strategyRowLayout.display).toBe("flex");
   expect(strategyRowLayout.flexDirection).toBe("row");
-  expect(strategyRowLayout.hasToggle).toBeTruthy();
+  expect(strategyRowLayout.hasToggle).toBeFalsy();
+  expect(strategyRowLayout.hasChevron).toBeFalsy();
+  expect(strategyRowLayout.hasName).toBeTruthy();
   expect(strategyRowLayout.hasAnalyze).toBeTruthy();
 
-  // Expand QQQ: four aligned main-table leg rows; no nested table/header.
-  await page.getByRole("button", { name: /Expand legs for QQQ Iron Condor/i }).click();
+  // Combined legs always visible: four aligned main-table leg rows; no nested table/header.
   const qqqLegs = page.locator(
     "tr[data-level='2'][data-parent-strategy='strat-qqq']:visible",
   );
@@ -1380,10 +1399,11 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   await expect(page.locator("table.positions-by-symbol thead")).toHaveCount(1);
   await expect(
     page.locator("tr[data-level='2']:visible .position-hierarchy-dot"),
-  ).toHaveCount(4);
+  ).toHaveCount(6);
 
-  // Rendered hierarchy offset (desktop): measure painted left edges after chevrons/gaps.
+  // Rendered hierarchy offset (desktop): measure painted left edges after gaps.
   // Target ≥1rem (~16px) of visible separation at each level transition.
+  // Combined vs single strategy name/dot must share the same x-origin (≤1px).
   await page.setViewportSize({ width: 1280, height: 800 });
   const visualHierarchy = await page.evaluate(() => {
     const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
@@ -1394,20 +1414,38 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
     const qqqStrategyRow = Array.from(
       document.querySelectorAll<HTMLElement>("tr[data-level='1'].combined-strategy-row"),
     ).find((row) => (row.textContent || "").includes("Iron Condor"));
+    const spyPutRow = Array.from(
+      document.querySelectorAll<HTMLElement>("tr[data-level='1']"),
+    ).find((row) => {
+      const open = row.querySelector(".strategy-open-action");
+      return (open?.textContent || "").includes("Short Put");
+    });
     const qqqLegRow = document.querySelector<HTMLElement>(
-      "tr[data-level='2'][data-parent-strategy='strat-qqq']:not([hidden])",
+      "tr[data-level='2'][data-parent-strategy='strat-qqq']",
     );
     const symbolLabel = qqqSymbolRow?.querySelector<HTMLElement>(".symbol-group-symbol");
     const l1Dot = qqqStrategyRow?.querySelector<HTMLElement>(".position-hierarchy-dot");
-    const l1Name = qqqStrategyRow?.querySelector<HTMLElement>(".strategy-legs-name");
+    const l1Name = qqqStrategyRow?.querySelector<HTMLElement>(".strategy-combined-name");
+    const singleDot = spyPutRow?.querySelector<HTMLElement>(".position-hierarchy-dot");
+    const singleName = spyPutRow?.querySelector<HTMLElement>(".strategy-open-action");
     const l2Dot = qqqLegRow?.querySelector<HTMLElement>(".position-hierarchy-dot");
     const l2Strip = qqqLegRow?.querySelector<HTMLElement>(".contract-strip");
-    if (!symbolLabel || !l1Dot || !l1Name || !l2Dot || !l2Strip) {
+    if (
+      !symbolLabel ||
+      !l1Dot ||
+      !l1Name ||
+      !singleDot ||
+      !singleName ||
+      !l2Dot ||
+      !l2Strip
+    ) {
       return { ok: false as const, rem, minStep };
     }
     const symbolLeft = symbolLabel.getBoundingClientRect().left;
     const l1DotLeft = l1Dot.getBoundingClientRect().left;
     const l1NameLeft = l1Name.getBoundingClientRect().left;
+    const singleDotLeft = singleDot.getBoundingClientRect().left;
+    const singleNameLeft = singleName.getBoundingClientRect().left;
     const l2DotLeft = l2Dot.getBoundingClientRect().left;
     const l2StripLeft = l2Strip.getBoundingClientRect().left;
     return {
@@ -1417,12 +1455,16 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
       symbolLeft,
       l1DotLeft,
       l1NameLeft,
+      singleDotLeft,
+      singleNameLeft,
       l2DotLeft,
       l2StripLeft,
       step1: l1DotLeft - symbolLeft,
       step1Name: l1NameLeft - symbolLeft,
       step2: l2DotLeft - l1DotLeft,
       step2Strip: l2StripLeft - l1NameLeft,
+      combinedVsSingleDotDelta: Math.abs(l1DotLeft - singleDotLeft),
+      combinedVsSingleNameDelta: Math.abs(l1NameLeft - singleNameLeft),
     };
   });
   expect(visualHierarchy.ok).toBeTruthy();
@@ -1431,6 +1473,8 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
     expect(visualHierarchy.step1Name).toBeGreaterThanOrEqual(visualHierarchy.minStep);
     expect(visualHierarchy.step2).toBeGreaterThanOrEqual(visualHierarchy.minStep);
     expect(visualHierarchy.step2Strip).toBeGreaterThanOrEqual(visualHierarchy.minStep);
+    expect(visualHierarchy.combinedVsSingleDotDelta).toBeLessThanOrEqual(1);
+    expect(visualHierarchy.combinedVsSingleNameDelta).toBeLessThanOrEqual(1);
   }
 
   // Joined contract strip: signed qty, expiry, DTE, strike, option type — no · separators.
@@ -1459,7 +1503,7 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   const legPad = await page.evaluate(() => {
     const l1 = document.querySelector<HTMLElement>("tr[data-level='1'] th[scope='row']");
     const l2 = document.querySelector<HTMLElement>(
-      "tr[data-level='2']:not([hidden]) th[scope='row']",
+      "tr[data-level='2'] th[scope='row']",
     );
     return {
       l1: l1 ? Number.parseFloat(getComputedStyle(l1).paddingLeft) : -1,
@@ -1468,8 +1512,7 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   });
   expect(legPad.l2).toBeGreaterThan(legPad.l1);
 
-  // Equity leg identity on Covered Call expand.
-  await page.getByRole("button", { name: /Expand legs for AAPL Covered Call/i }).click();
+  // Equity leg identity on Covered Call (always visible).
   const aaplLegs = page.locator(
     "tr[data-level='2'][data-parent-strategy='strat-aapl-cc']:visible",
   );
@@ -1853,7 +1896,7 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
 });
 
 
-test("combined strategy leg disclosure: expand, independence, filters, analysis, a11y", async ({
+test("combined strategy legs always visible: no disclosure, filters, analysis, a11y", async ({
   page,
 }) => {
   await mockDashboardApis(page);
@@ -1862,47 +1905,38 @@ test("combined strategy leg disclosure: expand, independence, filters, analysis,
   await page.getByRole("button", { name: "Positions" }).click();
   await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
 
-  const qqqToggle = page.getByRole("button", { name: /Expand legs for QQQ Iron Condor/i });
-  const aaplToggle = page.getByRole("button", { name: /Expand legs for AAPL Covered Call/i });
-  const qqqFirstLeg = page.locator("#strategy-legs-panel-strat-qqq");
-  const aaplFirstLeg = page.locator("#strategy-legs-panel-strat-aapl-cc");
-  await expect(qqqToggle).toHaveAttribute("aria-expanded", "false");
-  await expect(aaplToggle).toHaveAttribute("aria-expanded", "false");
-  // aria-controls lists every leg row id; first id remains the stable panel root.
-  await expect(qqqToggle).toHaveAttribute(
-    "aria-controls",
-    /strategy-legs-panel-strat-qqq/,
-  );
-  await expect(aaplToggle).toHaveAttribute(
-    "aria-controls",
-    /strategy-legs-panel-strat-aapl-cc/,
-  );
-  // Collapsed: leg rows stay in the DOM but are hidden; no nested table.
-  await expect(qqqFirstLeg).toBeAttached();
-  await expect(qqqFirstLeg).toBeHidden();
-  await expect(aaplFirstLeg).toBeAttached();
-  await expect(aaplFirstLeg).toBeHidden();
+  // No per-strategy disclosure controls remain.
+  await expect(page.getByRole("button", { name: /Expand legs|Collapse legs/i })).toHaveCount(0);
+  await expect(page.locator(".strategy-legs-toggle")).toHaveCount(0);
+  await expect(page.locator(".strategy-legs-chevron")).toHaveCount(0);
+  await expect(page.locator("#strategy-legs-panel-strat-qqq")).toHaveCount(0);
   await expect(page.locator("table.strategy-legs-table")).toHaveCount(0);
-  await expect(
-    page.locator("tr[data-level='2'][data-parent-strategy='strat-qqq']:visible"),
-  ).toHaveCount(0);
 
-  // Expand Iron Condor: four aligned main-table leg rows; AAPL stays collapsed.
-  await qqqToggle.click();
-  await expect(
-    page.getByRole("button", { name: /Collapse legs for QQQ Iron Condor/i }),
-  ).toHaveAttribute("aria-expanded", "true");
-  await expect(aaplToggle).toHaveAttribute("aria-expanded", "false");
-  await expect(qqqFirstLeg).toBeVisible();
-  await expect(qqqFirstLeg).toHaveAttribute("data-level", "2");
-  await expect(aaplFirstLeg).toBeHidden();
+  const qqqStrategyRow = page
+    .locator("tr[data-level='1'].combined-strategy-row")
+    .filter({ hasText: "Iron Condor" });
+  const aaplStrategyRow = page
+    .locator("tr[data-level='1'].combined-strategy-row")
+    .filter({ hasText: "Covered Call" });
+  await expect(qqqStrategyRow.locator(".strategy-combined-name")).toHaveText("Iron Condor");
+  await expect(qqqStrategyRow.locator(".strategy-leg-count")).toHaveText("4 legs");
+  await expect(aaplStrategyRow.locator(".strategy-combined-name")).toHaveText("Covered Call");
+  await expect(aaplStrategyRow.locator(".strategy-leg-count")).toHaveText("2 legs");
+  // Combined name is static text — not a button with disclosure semantics.
+  await expect(qqqStrategyRow.locator(".strategy-combined-name")).toHaveJSProperty(
+    "tagName",
+    "SPAN",
+  );
+
+  // Legs always visible under every expanded symbol.
   const qqqLegs = page.locator(
     "tr[data-level='2'][data-parent-strategy='strat-qqq']:visible",
   );
+  const aaplLegs = page.locator(
+    "tr[data-level='2'][data-parent-strategy='strat-aapl-cc']:visible",
+  );
   await expect(qqqLegs).toHaveCount(4);
-  await expect(
-    page.locator("tr[data-level='2'][data-parent-strategy='strat-aapl-cc']:visible"),
-  ).toHaveCount(0);
+  await expect(aaplLegs).toHaveCount(2);
   await expect(qqqLegs.first()).toContainText("+1");
   await expect(qqqLegs.nth(1)).toContainText("−1");
   await expect(qqqLegs.filter({ hasText: "P" }).first()).toBeVisible();
@@ -1911,68 +1945,71 @@ test("combined strategy leg disclosure: expand, independence, filters, analysis,
   await expect(qqqLegs.filter({ hasText: "$475" })).toHaveCount(1);
   await expect(qqqLegs.filter({ hasText: "$505" })).toHaveCount(1);
   await expect(qqqLegs.filter({ hasText: "$510" })).toHaveCount(1);
-  // Legs align under the main table columns (no nested thead).
-  await expect(page.locator("table.positions-by-symbol thead tr th")).toHaveCount(8);
-  await expect(page.locator("table.strategy-legs-table")).toHaveCount(0);
-  // No account identifiers in leg rows.
-  await expect(qqqLegs.first()).not.toContainText("public-account-id");
-
-  // Expand Covered Call independently: Equity + Call legs in main table.
-  await aaplToggle.click();
-  await expect(
-    page.getByRole("button", { name: /Collapse legs for AAPL Covered Call/i }),
-  ).toHaveAttribute("aria-expanded", "true");
-  await expect(aaplFirstLeg).toBeVisible();
-  await expect(aaplFirstLeg).toHaveAttribute("data-level", "2");
-  const aaplLegs = page.locator(
-    "tr[data-level='2'][data-parent-strategy='strat-aapl-cc']:visible",
-  );
-  await expect(aaplLegs).toHaveCount(2);
   await expect(aaplLegs.first()).toContainText("+100");
   await expect(aaplLegs.first()).toContainText("Equity");
   await expect(aaplLegs.nth(1)).toContainText("−1");
   await expect(aaplLegs.nth(1)).toContainText("C");
   await expect(aaplLegs.filter({ hasText: "$220" })).toHaveCount(1);
+  // Legs align under the main table columns (no nested thead).
+  await expect(page.locator("table.positions-by-symbol thead tr th")).toHaveCount(8);
+  // No account identifiers in leg rows.
+  await expect(qqqLegs.first()).not.toContainText("public-account-id");
   await expect(aaplLegs.first()).not.toContainText("public-account-id");
-  // QQQ still expanded (independent state).
-  await expect(qqqLegs).toHaveCount(4);
-  await expect(qqqFirstLeg).toBeVisible();
 
-  // Collapse QQQ legs; first-leg id remains but is hidden; AAPL remains open.
-  await page.getByRole("button", { name: /Collapse legs for QQQ Iron Condor/i }).click();
-  await expect(
-    page.getByRole("button", { name: /Expand legs for QQQ Iron Condor/i }),
-  ).toHaveAttribute("aria-expanded", "false");
-  await expect(qqqFirstLeg).toBeAttached();
-  await expect(qqqFirstLeg).toBeHidden();
-  await expect(
-    page.locator("tr[data-level='2'][data-parent-strategy='strat-qqq']:visible"),
-  ).toHaveCount(0);
-  await expect(aaplLegs).toHaveCount(2);
+  // Combined vs single strategy hierarchy dots/names share the same x-origin.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const alignment = await page.evaluate(() => {
+    const combined = Array.from(
+      document.querySelectorAll<HTMLElement>("tr[data-level='1'].combined-strategy-row"),
+    ).find((row) => (row.textContent || "").includes("Iron Condor"));
+    const single = Array.from(
+      document.querySelectorAll<HTMLElement>("tr[data-level='1']"),
+    ).find((row) => {
+      const open = row.querySelector(".strategy-open-action");
+      return (open?.textContent || "").includes("Short Put");
+    });
+    const cDot = combined?.querySelector<HTMLElement>(".position-hierarchy-dot");
+    const cName = combined?.querySelector<HTMLElement>(".strategy-combined-name");
+    const sDot = single?.querySelector<HTMLElement>(".position-hierarchy-dot");
+    const sName = single?.querySelector<HTMLElement>(".strategy-open-action");
+    if (!cDot || !cName || !sDot || !sName) return { ok: false as const };
+    return {
+      ok: true as const,
+      dotDelta: Math.abs(cDot.getBoundingClientRect().left - sDot.getBoundingClientRect().left),
+      nameDelta: Math.abs(
+        cName.getBoundingClientRect().left - sName.getBoundingClientRect().left,
+      ),
+    };
+  });
+  expect(alignment.ok).toBeTruthy();
+  if (alignment.ok) {
+    expect(alignment.dotDelta).toBeLessThanOrEqual(1);
+    expect(alignment.nameDelta).toBeLessThanOrEqual(1);
+  }
 
-  // Symbol collapse hides leg rows but preserves expanded choice.
+  // Symbol collapse hides strategy + legs; reopen restores both immediately.
   const aaplSymbolToggle = page.locator("button.symbol-group-toggle").filter({ hasText: "AAPL" });
   await aaplSymbolToggle.click();
   await expect(aaplSymbolToggle).toHaveAttribute("aria-expanded", "false");
+  await expect(aaplStrategyRow).toBeHidden();
   await expect(
     page.locator("tr[data-level='2'][data-parent-strategy='strat-aapl-cc']:visible"),
   ).toHaveCount(0);
+  // QQQ combined strategy + legs remain visible.
+  await expect(qqqStrategyRow).toBeVisible();
+  await expect(qqqLegs).toHaveCount(4);
   await aaplSymbolToggle.click();
   await expect(aaplSymbolToggle).toHaveAttribute("aria-expanded", "true");
-  await expect(
-    page.getByRole("button", { name: /Collapse legs for AAPL Covered Call/i }),
-  ).toHaveAttribute("aria-expanded", "true");
+  await expect(aaplStrategyRow).toBeVisible();
   await expect(
     page.locator("tr[data-level='2'][data-parent-strategy='strat-aapl-cc']:visible"),
   ).toHaveCount(2);
 
-  // Stock/Options filter: Covered Call stays under Options; leg state preserved when shown.
+  // Stock/Options filter: Options off hides combined strategies and their legs.
   const stockToggle = page.getByRole("checkbox", { name: /Show stock positions/i });
   const optionsToggle = page.getByRole("checkbox", { name: /Show options positions/i });
   await stockToggle.uncheck();
-  await expect(
-    page.getByRole("button", { name: /Collapse legs for AAPL Covered Call/i }),
-  ).toHaveAttribute("aria-expanded", "true");
+  await expect(aaplStrategyRow).toBeVisible();
   await expect(
     page.locator("tr[data-level='2'][data-parent-strategy='strat-aapl-cc']:visible"),
   ).toHaveCount(2);
@@ -1981,22 +2018,25 @@ test("combined strategy leg disclosure: expand, independence, filters, analysis,
   await optionsToggle.uncheck();
   await stockToggle.check();
   await expect(
-    page.getByRole("button", { name: /Expand legs for AAPL Covered Call|Collapse legs for AAPL Covered Call/i }),
+    page.locator("tr[data-level='1'].combined-strategy-row"),
   ).toHaveCount(0);
+  await expect(page.locator("tr[data-level='2']:visible")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Open SPY Long Stock" })).toBeVisible();
-  // Re-enable Options: expanded state for AAPL restored.
+  // Re-enable Options: combined strategies and legs restore immediately (no expand step).
   await optionsToggle.check();
-  await expect(
-    page.getByRole("button", { name: /Collapse legs for AAPL Covered Call/i }),
-  ).toHaveAttribute("aria-expanded", "true");
+  await expect(aaplStrategyRow).toBeVisible();
   await expect(
     page.locator("tr[data-level='2'][data-parent-strategy='strat-aapl-cc']:visible"),
   ).toHaveCount(2);
+  await expect(qqqStrategyRow).toBeVisible();
+  await expect(
+    page.locator("tr[data-level='2'][data-parent-strategy='strat-qqq']:visible"),
+  ).toHaveCount(4);
 
   // Catalyst content still present on strategy rows.
   await expect(page.getByText("No confirmed catalyst found").first()).toBeVisible();
 
-  // Analysis action opens the strategy drawer without depending on disclosure.
+  // Analyze opens the strategy drawer.
   await page.getByRole("button", { name: "Open analysis for AAPL Covered Call" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await page.keyboard.press("Escape");

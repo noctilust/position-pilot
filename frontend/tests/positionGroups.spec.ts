@@ -21,14 +21,10 @@ import {
   isEquityLeg,
   isOptionLeg,
   normalizeUnderlying,
-  presentStrategyIdsFromStrategies,
   presentSymbolsFromStrategies,
   pruneCollapsedSymbols,
-  pruneExpandedStrategyIds,
-  sanitizeStrategyDomId,
   sanitizeSymbolDomId,
   sortStrategiesForSymbolGroup,
-  strategyLegsPanelId,
   symbolGroupPanelId,
   UNKNOWN_UNDERLYING_SYMBOL,
 } from "../src/positionGroups";
@@ -701,31 +697,5 @@ test.describe("leg presentation helpers", () => {
     expect(clampPnlBarPercent(250)).toBe(100);
     expect(clampPnlBarPercent(-999)).toBe(100);
     expect(clampPnlBarPercent(Number.NaN)).toBe(0);
-  });
-});
-
-test.describe("strategy leg panel ids and expand pruning", () => {
-  test("sanitizeStrategyDomId encodes fragile characters uniquely", () => {
-    expect(sanitizeStrategyDomId("strat-qqq")).toBe("strat-qqq");
-    expect(strategyLegsPanelId("strat-qqq")).toBe("strategy-legs-panel-strat-qqq");
-    expect(sanitizeStrategyDomId("acct:SPY:ic")).toBe("acct_3a_SPY_3a_ic");
-    expect(sanitizeStrategyDomId("a/b")).not.toBe(sanitizeStrategyDomId("a_b"));
-    expect(sanitizeStrategyDomId("")).toBe("unknown-strategy");
-  });
-
-  test("pruneExpandedStrategyIds drops strategies that disappear", () => {
-    const expanded = new Set(["strat-a", "strat-b", "strat-gone"]);
-    const next = pruneExpandedStrategyIds(expanded, ["strat-a", "strat-c"]);
-    expect([...next].sort()).toEqual(["strat-a"]);
-  });
-
-  test("presentStrategyIdsFromStrategies is sorted and unique", () => {
-    expect(
-      presentStrategyIdsFromStrategies([
-        { strategy_id: "z" },
-        { strategy_id: "a" },
-        { strategy_id: "z" },
-      ]),
-    ).toEqual(["a", "z"]);
   });
 });

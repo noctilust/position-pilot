@@ -78,11 +78,8 @@ import {
   groupStrategiesBySymbol,
   isCombinedOptionStrategy,
   normalizeUnderlying,
-  presentStrategyIdsFromStrategies,
   presentSymbolsFromStrategies,
   pruneCollapsedSymbols,
-  pruneExpandedStrategyIds,
-  strategyLegsPanelId,
   symbolGroupPanelId,
 } from "./positionGroups";
 import type {
@@ -1455,8 +1452,6 @@ function PositionsSection({
   const [showOptions, setShowOptions] = useState(true);
   /** Symbols the user has collapsed; default is expanded (absent from set). */
   const [collapsedSymbols, setCollapsedSymbols] = useState<Set<string>>(() => new Set());
-  /** Combined multi-leg strategies the user has expanded; default is collapsed. */
-  const [expandedStrategyIds, setExpandedStrategyIds] = useState<Set<string>>(() => new Set());
 
   const catalystBySymbol = useMemo(() => {
     const map = new Map<string, SymbolCatalystResult>();
@@ -1487,10 +1482,6 @@ function PositionsSection({
     () => presentSymbolsFromStrategies(strategies).join("|"),
     [strategies],
   );
-  const presentStrategyIdKey = useMemo(
-    () => presentStrategyIdsFromStrategies(strategies).join("|"),
-    [strategies],
-  );
   const hasCombinedStrategies = useMemo(
     () => strategies.some(isCombinedOptionStrategy),
     [strategies],
@@ -1507,18 +1498,6 @@ function PositionsSection({
       return next;
     });
   }, [presentSymbolKey]);
-
-  // Leg disclosure is per strategy_id; prune when strategies leave the book.
-  useEffect(() => {
-    const present = presentStrategyIdKey ? presentStrategyIdKey.split("|") : [];
-    setExpandedStrategyIds((prev) => {
-      const next = pruneExpandedStrategyIds(prev, present);
-      if (next.size === prev.size && [...next].every((id) => prev.has(id))) {
-        return prev;
-      }
-      return next;
-    });
-  }, [presentStrategyIdKey]);
 
   useEffect(() => {
     setOrderPage(0);
@@ -1558,18 +1537,6 @@ function PositionsSection({
     });
   }
 
-  function toggleStrategyLegsExpanded(strategyId: string) {
-    setExpandedStrategyIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(strategyId)) {
-        next.delete(strategyId);
-      } else {
-        next.add(strategyId);
-      }
-      return next;
-    });
-  }
-
   return (
     <div className="positions-workspace">
       <div className="positions-workspace-main">
@@ -1586,8 +1553,8 @@ function PositionsSection({
           </p>
           {hasCombinedStrategies ? (
             <p className="microcopy positions-combined-hint">
-              Multi-leg rows are Position Pilot detected strategies. Expand a combined row to
-              audit its individual option and stock legs.
+              Multi-leg rows are Position Pilot detected strategies; individual legs are shown
+              below each combined strategy.
             </p>
           ) : null}
 
@@ -1649,8 +1616,8 @@ function PositionsSection({
               <table className="data-table dense positions-by-symbol">
                 <caption className="sr-only">
                   Strategies grouped by underlying symbol with Greeks and P/L.
-                  Hierarchy: symbol, detected strategy, then individual legs when a
-                  combined strategy is expanded.
+                  Hierarchy: symbol, detected strategy, then individual legs for each
+                  combined multi-leg strategy.
                 </caption>
                 <colgroup>
                   <col className="positions-col-position" />
@@ -1762,20 +1729,8 @@ function PositionsSection({
                             catalystBySymbol.get(strategy.underlying) ??
                             catalystBySymbol.get(group.symbol);
                           const combined = isCombinedOptionStrategy(strategy);
-                          const legsExpanded =
-                            combined && expandedStrategyIds.has(strategy.strategy_id);
-                          const legsPanelId = strategyLegsPanelId(strategy.strategy_id);
                           const legs = strategy.legs ?? [];
                           const legCount = legs.length;
-                          const legControlIds = combined
-                            ? legs
-                                .map((_, index) =>
-                                  index === 0
-                                    ? legsPanelId
-                                    : `${legsPanelId}-leg-${index}`,
-                                )
-                                .join(" ")
-                            : undefined;
                           const rowClass =
                             catalyst?.quiet === false
                               ? "row-promoted symbol-group-row position-row position-row-level-1"
@@ -1798,31 +1753,12 @@ function PositionsSection({
                                     />
                                     {combined ? (
                                       <div className="strategy-label-row">
-                                        <button
-                                          type="button"
-                                          className="strategy-legs-toggle"
-                                          aria-expanded={legsExpanded}
-                                          aria-controls={legControlIds}
-                                          aria-label={`${legsExpanded ? "Collapse" : "Expand"} legs for ${group.symbol} ${strategy.strategy_type}`}
-                                          onClick={() =>
-                                            toggleStrategyLegsExpanded(
-                                              strategy.strategy_id,
-                                            )
-                                          }
-                                        >
-                                          <span
-                                            className="strategy-legs-chevron"
-                                            aria-hidden="true"
-                                          >
-                                            {legsExpanded ? "▾" : "▸"}
-                                          </span>
-                                          <span className="strategy-legs-name">
-                                            {strategy.strategy_type}
-                                          </span>
-                                          <span className="strategy-leg-count tabular">
-                                            {formatLegCountLabel(legCount)}
-                                          </span>
-                                        </button>
+                                        <span className="strategy-combined-name">
+                                          {strategy.strategy_type}
+                                        </span>
+                                        <span className="strategy-leg-count tabular">
+                                          {formatLegCountLabel(legCount)}
+                                        </span>
                                         <button
                                           type="button"
                                           className="strategy-analysis-action"
@@ -1900,19 +1836,13 @@ function PositionsSection({
                               </tr>
                               {combined
                                 ? legs.map((leg, index) => {
-                                    const legId =
-                                      index === 0
-                                        ? legsPanelId
-                                        : `${legsPanelId}-leg-${index}`;
                                     const strike = formatLegStrike(leg);
                                     return (
                                       <tr
                                         key={`${strategy.strategy_id}-leg-${index}`}
-                                        id={legId}
                                         className="strategy-leg-row position-row position-row-level-2"
                                         data-level="2"
                                         data-parent-strategy={strategy.strategy_id}
-                                        hidden={!legsExpanded}
                                       >
                                         <th scope="row" className="positions-td-position">
                                           <div className="position-hierarchy-cell position-hierarchy-cell-leg">

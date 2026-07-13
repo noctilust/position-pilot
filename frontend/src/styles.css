@@ -1602,10 +1602,6 @@ table.positions-by-symbol .position-row-level-2 td {
   display: none;
 }
 
-.strategy-leg-row[hidden] {
-  display: none;
-}
-
 /* Dense single-line strategy identity: name + count + analyze */
 .strategy-label-row {
   display: flex;
@@ -1622,47 +1618,12 @@ table.positions-by-symbol .position-row-level-2 td {
   gap: 0.2rem;
 }
 
-button.strategy-legs-toggle {
-  display: inline-flex;
-  flex-wrap: nowrap;
-  align-items: baseline;
-  gap: 0.28rem 0.4rem;
-  margin: 0;
-  padding: 0.08rem 0.1rem;
-  border: 0;
-  border-radius: 0.12rem;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-weight: 600;
-  text-align: left;
-  cursor: pointer;
-  min-height: 1.55rem;
-  max-width: 100%;
-}
-
-button.strategy-legs-toggle:hover {
-  background: color-mix(in oklch, var(--pt-dot) 8%, transparent);
-}
-
-button.strategy-legs-toggle:focus-visible {
-  outline: 2px solid var(--pt-focus);
-  outline-offset: 1px;
-}
-
-.strategy-legs-chevron {
-  display: inline-block;
-  width: 0.7rem;
-  flex-shrink: 0;
-  color: var(--pt-text-dim);
-  font-size: 0.68rem;
-  line-height: 1;
-}
-
-.strategy-legs-name {
+/* Combined multi-leg strategy name: same visual weight/origin as single-leg open action */
+.strategy-combined-name {
   font-weight: 650;
   color: var(--pt-text);
   letter-spacing: 0.01em;
+  padding: 0.05rem 0.05rem;
 }
 
 .strategy-leg-count {
