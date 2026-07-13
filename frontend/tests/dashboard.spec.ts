@@ -2102,6 +2102,95 @@ test("responsive layouts remain usable at narrow and large widths", async ({ pag
   expect(wideAxe.violations).toEqual([]);
 });
 
+test("strategy drawer backdrop stays translucent on hover (not opaque surface-3)", async ({
+  page,
+}) => {
+  await mockDashboardApis(page);
+  const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";
+  // Desktop layout: .drawer-backdrop is hidden below 960px.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`/?launch_token=${encodeURIComponent(launchToken)}`);
+  await page.getByRole("button", { name: "Positions" }).click();
+  await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
+
+  async function assertBackdropTranslucentOnHover(theme: "dark" | "light") {
+    if (theme === "light") {
+      await page.getByRole("button", { name: "Use light theme" }).click();
+      await expect
+        .poll(() => page.evaluate(() => document.documentElement.getAttribute("data-theme")))
+        .toBe("light");
+    }
+
+    // Combined multi-leg strategy with a detail fixture (strat-aapl-cc).
+    await page.getByRole("button", { name: "Open analysis for AAPL Covered Call" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+
+    const backdrop = page.locator("button.drawer-backdrop");
+    await expect(backdrop).toBeVisible();
+
+    // Real pointer hover — exercises the global button:hover cascade.
+    await backdrop.hover({ position: { x: 24, y: 24 } });
+
+    const paint = await backdrop.evaluate((el) => {
+      const style = getComputedStyle(el);
+      const backgroundColor = style.backgroundColor;
+
+      const probe = document.createElement("div");
+      probe.style.background = "var(--surface-3)";
+      probe.style.position = "fixed";
+      probe.style.left = "-9999px";
+      document.body.appendChild(probe);
+      const surface3 = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+
+      const parseAlpha = (value: string): number | null => {
+        const rgba = value.match(
+          /^rgba?\(\s*[\d.]+%?\s*[,\s/]+[\d.]+%?\s*[,\s/]+[\d.]+%?(?:\s*[,/]\s*([\d.]+%?))?\s*\)$/i,
+        );
+        if (rgba) {
+          if (rgba[1] === undefined) return 1;
+          return rgba[1].endsWith("%") ? Number.parseFloat(rgba[1]) / 100 : Number.parseFloat(rgba[1]);
+        }
+        const slash = value.match(/\/\s*([\d.]+%?)\s*\)/);
+        if (slash) {
+          return slash[1].endsWith("%")
+            ? Number.parseFloat(slash[1]) / 100
+            : Number.parseFloat(slash[1]);
+        }
+        // rgb()/oklab()/oklch()/color() without a slash channel is opaque.
+        if (/^(rgb|oklab|oklch|color)\(/i.test(value)) return 1;
+        return null;
+      };
+
+      return {
+        backgroundColor,
+        surface3,
+        alpha: parseAlpha(backgroundColor),
+      };
+    });
+
+    expect(paint.backgroundColor).not.toBe(paint.surface3);
+    expect(paint.alpha).not.toBeNull();
+    expect(paint.alpha!).toBeLessThan(1);
+    expect(paint.alpha!).toBeGreaterThan(0.1);
+
+    // Drawer and underlying Positions content remain visible through the dimmer.
+    await expect(dialog).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Open analysis for AAPL Covered Call" }),
+    ).toBeVisible();
+
+    // Backdrop still closes the drawer.
+    await backdrop.click({ position: { x: 24, y: 24 } });
+    await expect(dialog).not.toBeVisible();
+  }
+
+  await assertBackdropTranslucentOnHover("dark");
+  await assertBackdropTranslucentOnHover("light");
+});
+
 test("visual contract: overview structure is stable", async ({ page }) => {
   await mockDashboardApis(page);
   const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";

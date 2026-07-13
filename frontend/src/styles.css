@@ -2461,6 +2461,15 @@ button.strategy-open-action:focus-visible {
   min-height: 0;
 }
 
+/* Win over global button:hover (and active/focus) so the dimmer stays translucent. */
+button.drawer-backdrop:hover,
+button.drawer-backdrop:active,
+button.drawer-backdrop:focus,
+button.drawer-backdrop:focus-visible {
+  background: color-mix(in oklch, black 42%, transparent);
+  border-color: transparent;
+}
+
 .drawer-panel {
   display: flex;
   flex-direction: column;
