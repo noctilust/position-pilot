@@ -14,6 +14,10 @@ from .app import WebSettings, create_app
 # Bound graceful exit so Ctrl+C cannot hang forever on long-lived SSE streams.
 GRACEFUL_SHUTDOWN_SECONDS = 5
 
+# Fixed default loopback port; override via CLI --port. Never fall back to random.
+DEFAULT_DASHBOARD_PORT = 8765
+LOOPBACK_HOST = "127.0.0.1"
+
 
 class _DashboardServer(uvicorn.Server):
     """Uvicorn server that can exit cleanly on Ctrl+C.
@@ -41,16 +45,31 @@ def _loopback_socket(host: str, port: int) -> socket.socket:
     return server_socket
 
 
-def run_web_dashboard(*, open_browser: bool = True) -> None:
-    """Run the local dashboard until the user stops the foreground process."""
+def run_web_dashboard(
+    *,
+    open_browser: bool = True,
+    port: int = DEFAULT_DASHBOARD_PORT,
+) -> None:
+    """Run the local dashboard until the user stops the foreground process.
 
-    host = "127.0.0.1"
+    Binds only to IPv4 loopback. Uses a fixed port (default 8765); if that port
+    is unavailable the launch fails clearly rather than choosing a random port.
+    """
+
+    host = LOOPBACK_HOST
     settings = WebSettings()
     app = create_app(settings)
-    server_socket = _loopback_socket(host, 0)
-    port = server_socket.getsockname()[1]
+    try:
+        server_socket = _loopback_socket(host, port)
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not bind dashboard to {host}:{port}. "
+            "The port may already be in use; free it or pass a different --port. "
+            f"({exc})"
+        ) from exc
+    bound_port = server_socket.getsockname()[1]
     query = urlencode({"launch_token": settings.launch_token})
-    dashboard_url = f"http://{host}:{port}/?{query}"
+    dashboard_url = f"http://{host}:{bound_port}/?{query}"
 
     if open_browser:
         threading.Timer(0.35, webbrowser.open, args=(dashboard_url,)).start()
@@ -60,7 +79,7 @@ def run_web_dashboard(*, open_browser: bool = True) -> None:
     config = uvicorn.Config(
         app,
         host=host,
-        port=port,
+        port=bound_port,
         log_level="warning",
         access_log=False,
         timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,

@@ -428,11 +428,18 @@ def dashboard(
         "--browser/--no-browser",
         help="Open the local web dashboard in the default browser",
     ),
+    port: int = typer.Option(
+        8765,
+        "--port",
+        min=1,
+        max=65535,
+        help="Loopback TCP port for the local dashboard (default: 8765)",
+    ),
 ):
     """Launch the local Position Pilot web dashboard (loopback only)."""
     from .web.launcher import run_web_dashboard
 
-    run_web_dashboard(open_browser=open_browser)
+    run_web_dashboard(open_browser=open_browser, port=port)
 
 
 @app.command()
