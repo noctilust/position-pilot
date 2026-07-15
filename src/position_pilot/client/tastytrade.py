@@ -2,7 +2,7 @@
 
 import logging
 import os
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -695,25 +695,9 @@ class TastytradeClient:
                     order_status = s
                     break
 
-            # Parse dates
-            created_str = item.get("created-at", "")
-            updated_str = item.get("updated-at", "")
-
-            try:
-                if created_str:
-                    created_at = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-                else:
-                    created_at = datetime.now()
-            except ValueError:
-                created_at = datetime.now()
-
-            try:
-                if updated_str:
-                    updated_at = datetime.fromisoformat(updated_str.replace("Z", "+00:00"))
-                else:
-                    updated_at = datetime.now()
-            except ValueError:
-                updated_at = datetime.now()
+            # Parse dates (ISO strings or numeric Unix timestamps)
+            created_at = self._parse_timestamp(item.get("created-at")) or datetime.now()
+            updated_at = self._parse_timestamp(item.get("updated-at")) or datetime.now()
 
             # Get leg details (for multi-leg orders)
             legs = item.get("legs", [])
@@ -726,17 +710,31 @@ class TastytradeClient:
                 symbol = item.get("symbol", "")
                 action = item.get("action", "")
 
+            # Convert ID to string (API returns numeric order IDs in JSON)
+            order_id = str(item.get("id", ""))
+
+            # Required numerics: never pass None into Order (broker may send JSON null).
+            # Prefer quantity, then total-quantity; fall back to model-safe zero.
+            quantity = self._float(item.get("quantity"))
+            if quantity is None:
+                quantity = self._float(item.get("total-quantity"))
+            if quantity is None:
+                quantity = 0.0
+            filled_quantity = self._float(item.get("filled-quantity"))
+            if filled_quantity is None:
+                filled_quantity = 0.0
+
             return Order(
-                order_id=item.get("id", ""),
+                order_id=order_id,
                 account_number=account_number,
                 symbol=symbol,
                 action=action,
-                quantity=self._float(item.get("quantity", item.get("total-quantity"))),
+                quantity=quantity,
                 order_type=item.get("type", "market"),
                 status=order_status,
                 created_at=created_at,
                 updated_at=updated_at,
-                filled_quantity=self._float(item.get("filled-quantity")),
+                filled_quantity=filled_quantity,
                 average_fill_price=self._float(item.get("average-fill-price")),
                 commissions=self._float(
                     item.get("-commissions", 0), mult=-1
@@ -746,6 +744,44 @@ class TastytradeClient:
         except Exception as e:
             logger.error(f"Error parsing order: {e}")
             return None
+
+    def _parse_timestamp(self, value: Any) -> Optional[datetime]:
+        """Parse an API timestamp into a datetime.
+
+        Accepts ISO-8601 strings and numeric Unix timestamps (seconds or
+        millisecond-scale). Booleans are rejected (``bool`` subclasses ``int``).
+        Returns None for missing or unusable values so callers can fall back.
+        """
+        if value is None or value == "":
+            return None
+
+        # bool is a subclass of int; never treat True/False as Unix time.
+        if isinstance(value, bool):
+            return None
+
+        if isinstance(value, datetime):
+            return value
+
+        if isinstance(value, (int, float)):
+            timestamp = float(value)
+            # Millisecond timestamps are ~13 digits; seconds are ~10.
+            if timestamp > 10_000_000_000:
+                timestamp /= 1000.0
+            try:
+                return datetime.fromtimestamp(timestamp, tz=UTC)
+            except (OverflowError, OSError, ValueError):
+                return None
+
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                return datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+
+        return None
 
     def _get_day_trade_count(self, status: Any) -> int:
         """Extract day trade count from status field."""
