@@ -1907,14 +1907,16 @@ button.strategy-open-action:focus-visible {
   font-weight: 700;
   letter-spacing: 0.02em;
   line-height: 1.2;
-  color: var(--pt-text-soft);
-  background: color-mix(in oklch, var(--pt-rule) 70%, var(--pt-row-bg));
-  border: 1px solid color-mix(in oklch, var(--pt-rule) 90%, transparent);
+  /* Muted cool accent — readable vs graphite strip, not good/warn/danger */
+  color: color-mix(in oklch, var(--pt-horizon-strategic) 88%, var(--pt-text-soft));
+  background: color-mix(in oklch, var(--pt-horizon-strategic) 14%, var(--pt-row-bg));
+  border: 1px solid color-mix(in oklch, var(--pt-horizon-strategic) 40%, var(--pt-rule));
   cursor: help;
 }
 
 .roll-pnl-indicator-partial {
   color: color-mix(in oklch, var(--pt-warn, #c48a1a) 90%, var(--pt-text-soft));
+  background: color-mix(in oklch, var(--pt-warn, #c48a1a) 12%, var(--pt-row-bg));
   border-color: color-mix(in oklch, var(--pt-warn, #c48a1a) 45%, var(--pt-rule));
 }
 
