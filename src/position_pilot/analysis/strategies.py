@@ -420,7 +420,11 @@ class StrategyDetector:
 
                 legs = [put, call]
                 if all(self._is_available(leg) for leg in legs):
-                    strategy_type = StrategyType.SHORT_STRADDLE if call.is_short else StrategyType.LONG_STRADDLE
+                    strategy_type = (
+                        StrategyType.SHORT_STRADDLE
+                        if call.is_short
+                        else StrategyType.LONG_STRADDLE
+                    )
                     group = StrategyGroup(
                         strategy_type=strategy_type,
                         underlying=underlying,
@@ -450,7 +454,11 @@ class StrategyDetector:
 
                 legs = [put, call]
                 if all(self._is_available(leg) for leg in legs):
-                    strategy_type = StrategyType.SHORT_STRANGLE if call.is_short else StrategyType.LONG_STRANGLE
+                    strategy_type = (
+                        StrategyType.SHORT_STRANGLE
+                        if call.is_short
+                        else StrategyType.LONG_STRANGLE
+                    )
                     group = StrategyGroup(
                         strategy_type=strategy_type,
                         underlying=underlying,

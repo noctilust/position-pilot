@@ -3,9 +3,8 @@
 import logging
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Optional
 from statistics import mean
+from typing import Optional
 
 from ..models.position import Position
 from ..models.roll import RollChain, RollEvent
@@ -13,7 +12,9 @@ from ..models.roll import RollChain, RollEvent
 logger = logging.getLogger(__name__)
 
 
-def group_rolls_by_timestamp(rolls: list[RollEvent], tolerance_seconds: int = 60) -> list[list[RollEvent]]:
+def group_rolls_by_timestamp(
+    rolls: list[RollEvent], tolerance_seconds: int = 60
+) -> list[list[RollEvent]]:
     """Group roll events that occurred within a short time window (multi-leg strategies).
 
     For strategies like short strangles, both legs are typically rolled within
@@ -391,9 +392,11 @@ def format_roll_summary(chain: RollChain, current_pnl: Optional[float] = None) -
             else:
                 # Single roll - display as before
                 roll = group[0]
+                old_leg = f"${roll.old_strike}{roll.option_indicator}"
+                new_leg = f"${roll.new_strike}{roll.option_indicator}"
                 lines.append(
                     f"  {i}. {roll.timestamp.strftime('%Y-%m-%d')}: "
-                    f"${roll.old_strike}{roll.option_indicator} → ${roll.new_strike}{roll.option_indicator} "
+                    f"{old_leg} → {new_leg} "
                     f"({roll.old_dte} → {roll.new_dte} DTE, "
                     f"Δ{roll.dte_change:+d} days) "
                     f"P/L: ${roll.roll_pnl:+,.2f} "
@@ -418,12 +421,19 @@ def format_patterns_summary(patterns: RollPatterns) -> str:
         "",
         "Timing Patterns:",
         f"  Avg DTE at roll: {patterns.avg_dte_at_roll:.1f} days",
-        f"  Typical roll targets: {patterns.typical_roll_days if patterns.typical_roll_days else 'N/A'}",
+        (
+            "  Typical roll targets: "
+            f"{patterns.typical_roll_days if patterns.typical_roll_days else 'N/A'}"
+        ),
         f"  Best DTE window: {patterns.best_dte_window[0]}-{patterns.best_dte_window[1]} DTE",
         "",
         "Strike Selection:",
         f"  Avg strike change: ${patterns.avg_strike_adjustment:+.2f}",
-        f"  Best strike range: ${patterns.best_strike_range[0]:.2f}-${patterns.best_strike_range[1]:.2f}",
+        (
+            "  Best strike range: "
+            f"${patterns.best_strike_range[0]:.2f}-"
+            f"${patterns.best_strike_range[1]:.2f}"
+        ),
         "",
         "Economics:",
         f"  Avg roll P/L: ${patterns.avg_roll_pnl:+,.2f}",

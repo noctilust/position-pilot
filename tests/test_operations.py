@@ -6,6 +6,7 @@ import io
 import json
 import sqlite3
 import zipfile
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -142,7 +143,7 @@ def ops_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> OperationsServic
     )
     database.set_setting("operations.retention", {"portfolio_snapshots_days": 365})
     # Seed broker identity + licensed full text for portable backup tests.
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection, connection:
         connection.execute(
             """
             INSERT OR REPLACE INTO account_identities(
@@ -242,7 +243,6 @@ def ops_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> OperationsServic
                 json.dumps({"action": "hold"}),
             ),
         )
-        connection.commit()
 
     gitignore = tmp_path / ".gitignore"
     gitignore.write_text(".env\n", encoding="utf-8")
@@ -405,7 +405,7 @@ def test_portable_browser_backup_strips_sentinels(ops_env: OperationsService) ->
         # Load portable DB and verify full_text null + account pseudonymized.
         tmp = ops_env.data_directory / "check-portable.sqlite3"
         tmp.write_bytes(db_bytes)
-        with sqlite3.connect(tmp) as connection:
+        with closing(sqlite3.connect(tmp)) as connection:
             full = connection.execute(
                 "SELECT full_text FROM catalyst_articles WHERE article_id = 'art-1'"
             ).fetchone()
@@ -457,12 +457,11 @@ def test_restore_rejects_newer_backup_schema(ops_env: OperationsService) -> None
     meta_path = path.with_suffix(path.suffix + ".meta.json")
     future = CURRENT_SCHEMA_VERSION + 99
     # Authoritative SQLite schema_migrations must be future; keep sidecar in sync.
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute(
             "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
             (future, datetime.now(UTC).isoformat()),
         )
-        connection.commit()
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meta["schema_version"] = future
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
@@ -479,12 +478,11 @@ def test_restore_rejects_future_db_schema_with_stale_sidecar(ops_env: Operations
     path = ops_env.backup_path(created.backup_id)
     meta_path = path.with_suffix(path.suffix + ".meta.json")
     future = CURRENT_SCHEMA_VERSION + 42
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute(
             "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
             (future, datetime.now(UTC).isoformat()),
         )
-        connection.commit()
     # Sidecar left at the original (stale) version.
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert int(meta["schema_version"]) == CURRENT_SCHEMA_VERSION
@@ -513,7 +511,7 @@ def test_retention_never_clears_audit_critical_and_compacts_snapshots(
     old = datetime.now(UTC) - timedelta(days=400)
     day_key = old.date().isoformat()
     source_snap = _snapshot()
-    with sqlite3.connect(ops_env.database.path) as connection:
+    with closing(sqlite3.connect(ops_env.database.path)) as connection, connection:
         for index in range(3):
             payload = source_snap.model_copy(
                 update={
@@ -542,7 +540,6 @@ def test_retention_never_clears_audit_critical_and_compacts_snapshots(
                     old.isoformat(),
                 ),
             )
-        connection.commit()
 
     # clear_confirmed must be rejected.
     with pytest.raises(ValueError, match="indefinite"):
@@ -565,7 +562,7 @@ def test_retention_never_clears_audit_critical_and_compacts_snapshots(
         or applied["deleted"].get("roll_chains", 0) == 0
     )
 
-    with sqlite3.connect(ops_env.database.path) as connection:
+    with closing(sqlite3.connect(ops_env.database.path)) as connection:
         rolls = connection.execute("SELECT COUNT(*) FROM roll_chains").fetchone()[0]
         audits = connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
         decisions = connection.execute("SELECT COUNT(*) FROM trader_decisions").fetchone()[0]

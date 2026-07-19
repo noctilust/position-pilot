@@ -1,12 +1,11 @@
 """Position analysis and trading signals."""
 
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from ..models.position import Position, Signal, Recommendation
-from .market import get_analyzer, IVEnvironment
+from ..models.position import Position, Recommendation, Signal
+from .market import get_analyzer
 
 
 class RiskLevel(str, Enum):
@@ -75,13 +74,17 @@ class PositionAnalyzer:
         # P/L assessment
         if position.unrealized_pnl_percent is not None:
             if position.unrealized_pnl_percent <= self.LOSS_CRITICAL_PCT:
-                health.issues.append(f"Large unrealized loss ({position.unrealized_pnl_percent:.1f}%)")
+                health.issues.append(
+                    f"Large unrealized loss ({position.unrealized_pnl_percent:.1f}%)"
+                )
                 health.pnl_risk = True
             elif position.unrealized_pnl_percent <= self.LOSS_WARNING_PCT:
                 health.issues.append(f"Significant loss ({position.unrealized_pnl_percent:.1f}%)")
                 health.pnl_risk = True
             elif position.unrealized_pnl_percent >= self.PROFIT_TARGET_PCT:
-                health.opportunities.append(f"Consider taking profits ({position.unrealized_pnl_percent:.1f}% gain)")
+                health.opportunities.append(
+                    f"Consider taking profits ({position.unrealized_pnl_percent:.1f}% gain)"
+                )
 
     def _assess_option_health(self, position: Position, health: PositionHealth):
         """Assess option position health."""
@@ -103,7 +106,9 @@ class PositionAnalyzer:
                 health.issues.append(f"Significant loss ({position.unrealized_pnl_percent:.1f}%)")
                 health.pnl_risk = True
             elif position.unrealized_pnl_percent >= self.PROFIT_TARGET_PCT:
-                health.opportunities.append(f"At profit target ({position.unrealized_pnl_percent:.1f}%)")
+                health.opportunities.append(
+                    f"At profit target ({position.unrealized_pnl_percent:.1f}%)"
+                )
 
         # Greeks assessment
         if position.greeks:
@@ -133,7 +138,8 @@ class PositionAnalyzer:
         """Calculate overall risk level."""
         critical_factors = sum([
             health.dte_risk and health.position.days_to_expiration <= self.DTE_CRITICAL,
-            health.pnl_risk and (health.position.unrealized_pnl_percent or 0) <= self.LOSS_CRITICAL_PCT,
+            health.pnl_risk
+            and (health.position.unrealized_pnl_percent or 0) <= self.LOSS_CRITICAL_PCT,
         ])
 
         warning_factors = sum([
@@ -166,7 +172,9 @@ class PositionAnalyzer:
             risk_notes="; ".join(health.issues) if health.issues else None,
         )
 
-    def _determine_signal(self, position: Position, health: PositionHealth) -> tuple[Signal, str, str, int]:
+    def _determine_signal(
+        self, position: Position, health: PositionHealth
+    ) -> tuple[Signal, str, str, int]:
         """Determine the appropriate signal for a position."""
         # Critical situations
         if health.risk_level == RiskLevel.CRITICAL:
@@ -190,7 +198,10 @@ class PositionAnalyzer:
             if position.unrealized_pnl_percent and position.unrealized_pnl_percent > 0:
                 return (
                     Signal.ROLL,
-                    f"Profitable position ({position.unrealized_pnl_percent:.1f}%) approaching expiration",
+                    (
+                        f"Profitable position ({position.unrealized_pnl_percent:.1f}%) "
+                        "approaching expiration"
+                    ),
                     "Roll to later expiration to maintain position",
                     3,
                 )

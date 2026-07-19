@@ -41,7 +41,7 @@ class RollHistory:
 
                 # Check version
                 if data.get("version") != self.VERSION:
-                    logger.warning(f"Roll history version mismatch, starting fresh")
+                    logger.warning("Roll history version mismatch, starting fresh")
                     self._data = {"version": self.VERSION, "accounts": {}}
                     return
 
@@ -78,7 +78,13 @@ class RollHistory:
         """Generate a unique key for a roll chain."""
         return f"{underlying}:{strategy_type}"
 
-    def add_roll(self, roll: RollEvent, underlying: str, strategy_type: str, account_number: str) -> None:
+    def add_roll(
+        self,
+        roll: RollEvent,
+        underlying: str,
+        strategy_type: str,
+        account_number: str,
+    ) -> None:
         """Add a roll event to history.
 
         Args:

@@ -27,7 +27,11 @@ from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from .. import __version__
-from ..persistence.sqlite import CURRENT_SCHEMA_VERSION, PositionPilotDatabase
+from ..persistence.sqlite import (
+    CURRENT_SCHEMA_VERSION,
+    PositionPilotDatabase,
+    managed_sqlite_connection,
+)
 from .portfolio import PortfolioService
 from .snapshots import PortfolioSnapshot
 
@@ -994,7 +998,7 @@ class OperationsService:
     @staticmethod
     def _verify_sqlite(path: Path) -> bool:
         try:
-            with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+            with managed_sqlite_connection(f"file:{path}?mode=ro", uri=True) as connection:
                 row = connection.execute("PRAGMA integrity_check").fetchone()
                 return bool(row and row[0] == "ok")
         except sqlite3.Error:
@@ -1111,7 +1115,7 @@ class OperationsService:
 
         db_schema: int | None = None
         try:
-            with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+            with managed_sqlite_connection(f"file:{path}?mode=ro", uri=True) as connection:
                 table = connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
                 ).fetchone()
@@ -1151,7 +1155,7 @@ class OperationsService:
         try:
             shutil.copy2(source, temp_path)
             os.chmod(temp_path, 0o600)
-            with sqlite3.connect(temp_path) as connection:
+            with managed_sqlite_connection(temp_path) as connection:
                 connection.row_factory = sqlite3.Row
                 # Pseudonymize broker account numbers.
                 if connection.execute(
@@ -1246,7 +1250,7 @@ class OperationsService:
             # VACUUM INTO rewrites a clean file so freelist pages cannot retain secrets.
             vacuumed = temp_path.with_name(temp_path.name + ".vac")
             try:
-                with sqlite3.connect(temp_path) as connection:
+                with managed_sqlite_connection(temp_path) as connection:
                     # Path must be single-quoted for SQLite; avoid injection via uuid name only.
                     connection.execute(f"VACUUM INTO '{vacuumed.as_posix()}'")
                 return vacuumed.read_bytes()

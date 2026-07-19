@@ -1,6 +1,6 @@
 """Data models for transactions and roll tracking."""
 
-from datetime import date, datetime
+from datetime import datetime
 from enum import Enum
 from typing import Optional
 

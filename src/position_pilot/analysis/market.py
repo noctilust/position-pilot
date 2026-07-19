@@ -87,12 +87,21 @@ class VolatilityAnalysis:
         if self.iv_rank is not None:
             if self.iv_rank >= 50:
                 self.favor_selling = True
-                self.suggestion = "Elevated IV favors premium selling strategies (short puts, credit spreads, iron condors)"
+                self.suggestion = (
+                    "Elevated IV favors premium selling strategies "
+                    "(short puts, credit spreads, iron condors)"
+                )
             elif self.iv_rank <= 25:
                 self.favor_buying = True
-                self.suggestion = "Low IV favors premium buying strategies (long calls/puts, debit spreads, calendars)"
+                self.suggestion = (
+                    "Low IV favors premium buying strategies "
+                    "(long calls/puts, debit spreads, calendars)"
+                )
             else:
-                self.suggestion = "Neutral IV environment - consider direction-neutral strategies or wait for better setup"
+                self.suggestion = (
+                    "Neutral IV environment - consider direction-neutral "
+                    "strategies or wait for better setup"
+                )
 
 
 class MarketAnalyzer:

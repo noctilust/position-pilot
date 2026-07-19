@@ -2,9 +2,9 @@
 
 import json
 import time
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Optional
-from datetime import datetime, timedelta
 
 
 class Cache:

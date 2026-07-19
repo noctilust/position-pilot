@@ -2,11 +2,11 @@
 
 from .position import (
     Account,
+    Greeks,
     Position,
     PositionType,
-    Greeks,
-    Signal,
     Recommendation,
+    Signal,
 )
 
 __all__ = [

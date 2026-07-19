@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 
 from position_pilot.domain.snapshots import (
@@ -103,7 +104,7 @@ def test_legacy_market_cache_is_imported_for_migration_compatibility(tmp_path) -
 
 def test_existing_schema_is_backed_up_before_versioned_migration(tmp_path) -> None:
     path = tmp_path / "position-pilot.sqlite3"
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute(
             "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
         )

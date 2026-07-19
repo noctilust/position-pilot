@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +28,34 @@ from ..domain.snapshots import (
 )
 
 CURRENT_SCHEMA_VERSION = 6
+
+
+@contextmanager
+def managed_sqlite_connection(
+    path: str | Path,
+    *,
+    uri: bool = False,
+) -> Iterator[sqlite3.Connection]:
+    """Open a SQLite connection that is always closed on exit.
+
+    ``sqlite3.Connection`` as a context manager only commits/rollbacks; it does
+    not close the underlying file descriptors. This helper commits on success,
+    rolls back on error, and closes in ``finally`` so callers cannot leak FDs.
+    It does not force WAL checkpoints — that remains SQLite's normal behavior.
+    """
+
+    connection = sqlite3.connect(path, uri=uri)
+    try:
+        yield connection
+        connection.commit()
+    except Exception:
+        try:
+            connection.rollback()
+        except sqlite3.Error:
+            pass
+        raise
+    finally:
+        connection.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,17 +90,20 @@ class PositionPilotDatabase:
         except OSError:
             pass
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        return connection
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Yield a configured connection that is closed on every exit path."""
+
+        with managed_sqlite_connection(self.path) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA journal_mode = WAL")
+            yield connection
 
     def _migrate(self) -> None:
         existing_version = 0
         if self.path.exists():
-            with sqlite3.connect(self.path) as connection:
+            with managed_sqlite_connection(self.path) as connection:
                 table = connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
                 ).fetchone()
@@ -1938,7 +1971,10 @@ class PositionPilotDatabase:
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         safe_reason = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in reason)[:40]
         destination = self.backup_directory / f"position-pilot-{safe_reason}-{timestamp}.sqlite3"
-        with sqlite3.connect(self.path) as source, sqlite3.connect(destination) as target:
+        with (
+            managed_sqlite_connection(self.path) as source,
+            managed_sqlite_connection(destination) as target,
+        ):
             source.backup(target)
         os.chmod(destination, 0o600)
         self._write_backup_sidecar(destination, reason=safe_reason)
@@ -1987,7 +2023,7 @@ class PositionPilotDatabase:
 
     def _file_integrity(self, path: Path) -> str:
         try:
-            with sqlite3.connect(path) as connection:
+            with managed_sqlite_connection(path) as connection:
                 row = connection.execute("PRAGMA integrity_check").fetchone()
             return str(row[0]) if row else "unknown"
         except sqlite3.Error as error:
@@ -2066,7 +2102,10 @@ class PositionPilotDatabase:
         staging = self.path.with_suffix(".restore-staging.sqlite3")
         if staging.exists():
             staging.unlink()
-        with sqlite3.connect(source) as src, sqlite3.connect(staging) as dst:
+        with (
+            managed_sqlite_connection(source) as src,
+            managed_sqlite_connection(staging) as dst,
+        ):
             src.backup(dst)
         staging_ok = self._file_integrity(staging)
         if staging_ok.lower() != "ok":
