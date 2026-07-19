@@ -53,6 +53,10 @@ AI recommendations use the **local Codex CLI**, authenticated through ChatGPT su
 
 Application settings and snapshots live under `~/.local/share/position-pilot/` (override with `POSITION_PILOT_DATA_DIR`). Market data cache: `~/.cache/position-pilot/` (~10 minutes).
 
+### Tasty mechanics (advisory)
+
+Strategy detail includes a **Tasty mechanics** panel driven by the versioned educational playbook `tastylive-short-premium.v1` (profit target, ~21 DTE, small size, tested-side review, credit-only roll preference). Defaults are educational presets, not guarantees. Evaluation is deterministic and offline-capable; **shadow mode defaults on** and never places orders. Settings: `GET/PUT /api/v1/settings/mechanics`. Execution remains manual in tastytrade.
+
 The app verifies that `.env` is gitignored and warns if it appears tracked or broadly readable. Credential values are never read into diagnostic payloads.
 
 ## Commands

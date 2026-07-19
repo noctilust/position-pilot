@@ -1258,7 +1258,12 @@ textarea:focus-visible,
    * Tuned so getBoundingClientRect left edges clear ~1rem after internal flex gaps.
    */
   --pt-indent-1: 3.65rem;
-  --pt-min-table: 44rem;
+  /*
+   * Floor width must fit adjacent P/L Open + P/L Opn% columns: signed currency
+   * (e.g. $1,589.50), signed percent (e.g. +100.0%), nowrap headers, and the
+   * percent bar (min-width 2rem) without cell collision at the narrow layout.
+   */
+  --pt-min-table: 48rem;
 
   width: max(100%, var(--pt-min-table));
   min-width: var(--pt-min-table);
@@ -1284,30 +1289,33 @@ textarea:focus-visible,
   font-weight: 600;
 }
 
-/* Column width system via colgroup classes */
+/* Column width system via colgroup classes (percentages sum to 100%). */
 .positions-by-symbol .positions-col-position {
-  width: 32%;
+  width: 30%;
 }
 .positions-by-symbol .positions-col-horizon {
-  width: 9%;
+  width: 8%;
 }
 .positions-by-symbol .positions-col-dte {
-  width: 6%;
+  width: 5%;
 }
 .positions-by-symbol .positions-col-strikes {
-  width: 10%;
+  width: 9%;
 }
 .positions-by-symbol .positions-col-catalyst {
-  width: 13%;
+  width: 12%;
 }
 .positions-by-symbol .positions-col-delta {
-  width: 8%;
+  width: 7%;
 }
 .positions-by-symbol .positions-col-theta {
-  width: 8%;
+  width: 7%;
 }
 .positions-by-symbol .positions-col-pnl {
-  width: 14%;
+  width: 12%;
+}
+.positions-by-symbol .positions-col-pnl-pct {
+  width: 10%;
 }
 
 /*
@@ -1816,7 +1824,7 @@ button.strategy-open-action:focus-visible {
   padding-left: 0.35rem;
 }
 
-/* Unrealized P/L: right-aligned value + full-width thin bar (percent optional). */
+/* Unrealized P/L: amount column (currency) and adjacent percent column + thin bar. */
 .pnl-metric {
   display: flex;
   flex-direction: column;
@@ -1852,10 +1860,11 @@ button.strategy-open-action:focus-visible {
 
 .positions-by-symbol .pnl-metric-percent {
   flex-shrink: 0;
-  font-size: 0.66rem;
+  font-size: 0.72rem;
   font-weight: 600;
   color: var(--pt-text-soft);
   font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .positions-by-symbol .pnl-metric-percent-positive {
@@ -1864,6 +1873,12 @@ button.strategy-open-action:focus-visible {
 
 .positions-by-symbol .pnl-metric-percent-negative {
   color: var(--pt-danger);
+}
+
+.positions-by-symbol .symbol-group-aggregate-pnl-pct {
+  padding: 0.35rem 0.45rem !important;
+  vertical-align: middle;
+  white-space: nowrap;
 }
 
 .positions-by-symbol .pnl-bar-track {
@@ -2236,6 +2251,22 @@ button.strategy-open-action:focus-visible {
 .muted.block {
   display: block;
   font-size: 0.72rem;
+}
+
+.mechanics-panel .compact-subhead {
+  margin: 0.75rem 0 0.35rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.mechanics-panel .mechanics-rules li,
+.mechanics-panel .mechanics-candidates li {
+  margin-bottom: 0.5rem;
+}
+
+.mechanics-panel .mechanics-sources a {
+  word-break: break-word;
 }
 
 .microcopy {

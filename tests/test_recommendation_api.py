@@ -37,6 +37,8 @@ class FakeCodex:
         return "configured"
 
     def complete_recommendation(self, context: dict) -> CodexInvocationResult:
+        # Deterministic HOLD. Default mechanics shadow_mode is observational and does
+        # not reject this action; non-shadow enforcement is covered in unit tests.
         return CodexInvocationResult(
             status=CodexProviderStatus.OK,
             output=CodexStructuredOutput(

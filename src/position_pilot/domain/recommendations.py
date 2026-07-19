@@ -90,6 +90,44 @@ MARKET_CONTEXT_ALLOWLIST = frozenset(
         "spread_percent",
         "provider",
         "as_of",
+        "freshness",
+    }
+)
+# Compact mechanics evaluation for strategy contexts (never account ids / article bodies).
+MECHANICS_CONTEXT_ALLOWLIST = frozenset(
+    {
+        "playbook_id",
+        "playbook_version",
+        "shadow_mode",
+        "enabled",
+        "fingerprint",
+        "risk_class",
+        "dte",
+        "profit_capture_ratio",
+        "credit_provenance",
+        "pnl_history_quality",
+        "tested_side",
+        "size_ratio",
+        "size_basis",
+        "market_value_nlv_ratio",
+        "underlying_spread_pct",
+        "option_liquidity_known",
+        "catalyst_availability",
+        "high_impact_catalyst",
+        "data_quality_flags",
+        "rule_hits",
+        "candidates",
+        "execution_boundary",
+    }
+)
+MECHANICS_RULE_HIT_ALLOWLIST = frozenset({"rule_id", "status", "reason_code"})
+MECHANICS_CANDIDATE_ALLOWLIST = frozenset(
+    {
+        "candidate_id",
+        "kind",
+        "rule_hits",
+        "missing_inputs",
+        "blocking_reasons",
     }
 )
 
@@ -108,9 +146,7 @@ _ACCOUNT_ID_VALUE = re.compile(
     r")\b"
 )
 # Pure numerical / strike / price text — never treat as account identifiers.
-_ANALYTICAL_NUMERIC = re.compile(
-    r"^[\s$€£+-]*(?:\d+(?:\.\d+)?(?:\s*/\s*\d+(?:\.\d+)?)*)\s*%?\s*$"
-)
+_ANALYTICAL_NUMERIC = re.compile(r"^[\s$€£+-]*(?:\d+(?:\.\d+)?(?:\s*/\s*\d+(?:\.\d+)?)*)\s*%?\s*$")
 
 
 class SubjectType(StrEnum):
@@ -337,6 +373,101 @@ def sanitize_market_context(market: dict[str, Any] | None) -> dict[str, Any]:
     return allowlist_dict(market, MARKET_CONTEXT_ALLOWLIST)
 
 
+def sanitize_mechanics_context(mechanics: dict[str, Any] | None) -> dict[str, Any]:
+    """Allowlisted mechanics facts/results/candidates for Codex prompts."""
+
+    if not mechanics:
+        return {}
+    base = allowlist_dict(mechanics, MECHANICS_CONTEXT_ALLOWLIST)
+    if "rule_hits" in mechanics and isinstance(mechanics["rule_hits"], list):
+        base["rule_hits"] = [
+            allowlist_dict(row, MECHANICS_RULE_HIT_ALLOWLIST)
+            for row in mechanics["rule_hits"][:20]
+            if isinstance(row, dict)
+        ]
+    if "candidates" in mechanics and isinstance(mechanics["candidates"], list):
+        base["candidates"] = [
+            allowlist_dict(row, MECHANICS_CANDIDATE_ALLOWLIST)
+            for row in mechanics["candidates"][:10]
+            if isinstance(row, dict)
+        ]
+    if "data_quality_flags" in mechanics and isinstance(mechanics["data_quality_flags"], list):
+        base["data_quality_flags"] = [
+            str(flag)[:64] for flag in mechanics["data_quality_flags"][:12]
+        ]
+    return sanitize_tree(base)
+
+
+def _candidate_is_blocked(row: dict[str, Any]) -> bool:
+    """True when missing inputs or blocking reasons prevent authorizing concrete actions."""
+
+    missing = row.get("missing_inputs") or []
+    blockers = row.get("blocking_reasons") or []
+    return bool(missing) or bool(blockers)
+
+
+def allowed_actions_from_mechanics_candidates(
+    mechanics: dict[str, Any] | None,
+) -> frozenset[str] | None:
+    """Return allowed recommendation action values when mechanics candidates constrain output.
+
+    Returns None when no mechanics candidate constraint applies (portfolio/equity/empty/shadow).
+    Mapping is conservative:
+    - hold/close/reduce only when the candidate is unblocked (no missing_inputs/blocking_reasons)
+    - blocked candidates and roll-review authorize only review
+    - never add/hedge/roll from mechanics-only candidates
+    """
+
+    if not isinstance(mechanics, dict):
+        return None
+    candidates = mechanics.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    allowed: set[str] = set()
+    for row in candidates:
+        if not isinstance(row, dict):
+            continue
+        kind = str(row.get("kind") or "").strip().lower()
+        blocked = _candidate_is_blocked(row)
+        if kind == "hold" and not blocked:
+            allowed.add(RecommendationAction.HOLD.value)
+        elif kind == "close" and not blocked:
+            allowed.add(RecommendationAction.CLOSE.value)
+        elif kind == "reduce" and not blocked:
+            allowed.add(RecommendationAction.REDUCE.value)
+        elif kind in {"hold", "close", "reduce", "manual-review", "roll-review"}:
+            # Incomplete/blocked candidates and explicit review kinds authorize review only.
+            allowed.add(RecommendationAction.REVIEW.value)
+        # Never map to add/hedge/roll from mechanics candidates.
+    return frozenset(allowed) if allowed else frozenset({RecommendationAction.REVIEW.value})
+
+
+def validate_action_against_mechanics(
+    action: RecommendationAction,
+    mechanics: dict[str, Any] | None,
+) -> str | None:
+    """Return a bounded error if action is incompatible with supplied mechanics candidates.
+
+    Shadow mode is observational: candidates remain in context/fingerprints but do not
+    reject Codex output. Enforcement applies only when shadow_mode is explicitly false.
+    """
+
+    if not isinstance(mechanics, dict):
+        return None
+    # Default/missing shadow_mode is treated as observational (shadow on).
+    if mechanics.get("shadow_mode", True):
+        return None
+    allowed = allowed_actions_from_mechanics_candidates(mechanics)
+    if allowed is None:
+        return None
+    if action.value not in allowed:
+        return (
+            f"Action '{action.value}' incompatible with supplied mechanics candidates "
+            f"(allowed: {', '.join(sorted(allowed))})"
+        )
+    return None
+
+
 def is_notification_material(
     previous: RecommendationRecord | None,
     action: RecommendationAction,
@@ -347,11 +478,7 @@ def is_notification_material(
 
     if previous is None or previous.action is None:
         return True
-    return (
-        previous.action != action
-        or previous.urgency != urgency
-        or previous.risk != risk
-    )
+    return previous.action != action or previous.urgency != urgency or previous.risk != risk
 
 
 # Back-compat alias used by monitoring/tests.
@@ -404,14 +531,29 @@ def has_audit_change(diff: dict[str, Any]) -> bool:
     return bool(diff)
 
 
+def resolve_catalyst_availability(
+    catalysts: list[dict[str, Any]] | None,
+    catalyst_availability: str | None = None,
+) -> str:
+    """Return known|unknown. Explicit availability wins; None catalysts => unknown."""
+
+    if catalyst_availability in {"known", "unknown"}:
+        return catalyst_availability
+    if catalysts is None:
+        return "unknown"
+    return "known"
+
+
 def strategy_context(
     strategy: StrategySnapshot,
     *,
     catalysts: list[dict[str, Any]] | None = None,
+    catalyst_availability: str | None = None,
     thesis: dict[str, Any] | None = None,
     trade_plan: dict[str, Any] | None = None,
     portfolio_exposure: dict[str, Any] | None = None,
     market: dict[str, Any] | None = None,
+    mechanics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Account-safe analytical context for one strategy-within-account subject."""
 
@@ -442,6 +584,8 @@ def strategy_context(
                 "unrealized_pnl": leg.unrealized_pnl,
             }
         )
+    # Empty events list is fine when availability is unknown; do not imply confirmed absence.
+    availability = resolve_catalyst_availability(catalysts, catalyst_availability)
     context = {
         "subject_type": SubjectType.STRATEGY.value,
         "symbol": strategy.underlying,
@@ -456,11 +600,13 @@ def strategy_context(
         "total_delta": strategy.total_delta,
         "total_theta": strategy.total_theta,
         "legs": legs,
-        "catalysts": sanitize_catalysts(catalysts),
+        "catalysts": sanitize_catalysts(catalysts if catalysts is not None else []),
+        "catalyst_availability": availability,
         "thesis": allowlist_dict(thesis, THESIS_ALLOWLIST),
         "trade_plan": allowlist_dict(trade_plan, TRADE_PLAN_ALLOWLIST),
         "portfolio_exposure": sanitize_exposure(portfolio_exposure),
         "market": sanitize_market_context(market),
+        "mechanics": sanitize_mechanics_context(mechanics),
     }
     return sanitize_tree(context)
 
@@ -653,10 +799,12 @@ class RecommendationService:
         strategy: StrategySnapshot,
         *,
         catalysts: list[dict[str, Any]] | None = None,
+        catalyst_availability: str | None = None,
         thesis: dict[str, Any] | None = None,
         trade_plan: dict[str, Any] | None = None,
         portfolio_exposure: dict[str, Any] | None = None,
         market: dict[str, Any] | None = None,
+        mechanics: dict[str, Any] | None = None,
         force: bool = False,
         material_event: bool = False,
     ) -> RecommendationRecord:
@@ -664,10 +812,12 @@ class RecommendationService:
         context = strategy_context(
             strategy,
             catalysts=catalysts,
+            catalyst_availability=catalyst_availability,
             thesis=thesis,
             trade_plan=trade_plan,
             portfolio_exposure=portfolio_exposure,
             market=market,
+            mechanics=mechanics,
         )
         return self._evaluate(
             subject_type=SubjectType.STRATEGY,
@@ -875,6 +1025,55 @@ class RecommendationService:
             return failure
 
         output: CodexStructuredOutput = invocation.output
+        # Fail closed: when strategy mechanics candidates are supplied, reject divergent actions.
+        mechanics_ctx = context.get("mechanics") if isinstance(context, dict) else None
+        mechanics_error = validate_action_against_mechanics(output.action, mechanics_ctx)
+        if mechanics_error is not None:
+            failure = RecommendationRecord(
+                recommendation_id=previous.recommendation_id if previous else str(uuid4()),
+                subject_type=subject_type,
+                subject_id=subject_id,
+                account_id=account_id,
+                symbol=symbol,
+                strategy_type=strategy_type,
+                horizon=horizon,
+                action=previous.action if previous else None,
+                urgency=previous.urgency if previous else None,
+                risk=previous.risk if previous else None,
+                reasoning=previous.reasoning if previous else None,
+                evidence=previous.evidence if previous else [],
+                catalyst_refs=previous.catalyst_refs if previous else [],
+                suggested_action=previous.suggested_action if previous else None,
+                input_fingerprint=fingerprint,
+                prompt_version=PROMPT_VERSION,
+                schema_version=SCHEMA_VERSION,
+                last_evaluated_at=now,
+                recommendation_updated_at=previous.recommendation_updated_at if previous else None,
+                provider=invocation.provider,
+                provider_status=CodexProviderStatus.INVALID_OUTPUT,
+                error=redact_secrets(mechanics_error),
+                codex_called=True,
+            )
+            history = RecommendationHistoryEntry(
+                history_id=str(uuid4()),
+                recommendation_id=failure.recommendation_id,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                kind=HistoryEntryKind.PROVIDER_FAILURE,
+                recorded_at=now,
+                summary=f"Provider invalid_output: {failure.error or 'mechanics mismatch'}",
+                diff={
+                    "status": CodexProviderStatus.INVALID_OUTPUT.value,
+                    "rejected_action": output.action.value,
+                },
+                input_fingerprint=fingerprint,
+                provider_status=CodexProviderStatus.INVALID_OUTPUT,
+            )
+            self.database.upsert_recommendation_atomic(
+                failure.model_dump(mode="json"),
+                history_entry=history.model_dump(mode="json"),
+            )
+            return failure
         notify_material = is_notification_material(
             previous, output.action, output.urgency, output.risk
         )
@@ -939,9 +1138,7 @@ class RecommendationService:
                 action=output.action,
                 urgency=output.urgency,
                 risk=output.risk,
-                summary=(
-                    f"{output.action.value} · urgency {output.urgency} · {output.risk.value}"
-                ),
+                summary=(f"{output.action.value} · urgency {output.urgency} · {output.risk.value}"),
                 diff=diff,
                 input_fingerprint=fingerprint,
                 provider_status=CodexProviderStatus.OK,

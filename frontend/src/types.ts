@@ -633,12 +633,106 @@ export type StrategyDetail = {
     recorded_at: string;
   }>;
   rolls: RollChain[];
+  mechanics?: MechanicsEvaluation | null;
   events: Array<{
     kind: string;
     timestamp: string;
     summary: string;
     action: string;
   }>;
+};
+
+export type MechanicsRuleResult = {
+  rule_id: string;
+  name: string;
+  status: "pass" | "watch" | "due" | "blocked" | "not_applicable";
+  reason_code: string;
+  explanation: string;
+  source_ids: string[];
+  observed?: Record<string, unknown>;
+  data_quality_notes?: string[];
+};
+
+export type MechanicsCandidate = {
+  candidate_id: string;
+  kind: "hold" | "close" | "reduce" | "roll-review" | "manual-review";
+  rule_hits: string[];
+  missing_inputs: string[];
+  blocking_reasons: string[];
+  explanation: string;
+  before_risk?: {
+    current_pnl?: number | null;
+    max_loss?: number | null;
+    max_profit?: number | null;
+    total_delta?: number | null;
+    total_theta?: number | null;
+    defined_risk?: boolean | null;
+    note?: string | null;
+  } | null;
+  after_risk?: {
+    current_pnl?: number | null;
+    max_loss?: number | null;
+    max_profit?: number | null;
+    total_delta?: number | null;
+    total_theta?: number | null;
+    defined_risk?: boolean | null;
+    note?: string | null;
+  } | null;
+};
+
+export type MechanicsSource = {
+  source_id: string;
+  title: string;
+  url: string;
+  publication_date?: string | null;
+  reviewed_at: string;
+  rule_ids?: string[];
+};
+
+export type MechanicsEvaluation = {
+  schema_version: string;
+  strategy_id: string;
+  playbook_id: string;
+  playbook_version: string;
+  shadow_mode: boolean;
+  enabled: boolean;
+  evaluated_at: string;
+  facts: {
+    strategy_type: string;
+    risk_class: string;
+    dte: number | null;
+    profit_capture_ratio: number | null;
+    tested_side: string | null;
+    data_quality_flags: string[];
+    supported: boolean;
+    underlying_spread_pct?: number | null;
+    option_liquidity_known?: boolean;
+    catalyst_availability?: "known" | "unknown";
+    high_impact_catalyst?: boolean | null;
+    market_value_nlv_ratio?: number | null;
+    size_ratio?: number | null;
+    size_basis?: string | null;
+  };
+  rules: MechanicsRuleResult[];
+  candidates: MechanicsCandidate[];
+  sources: MechanicsSource[];
+  execution_boundary: string;
+  fingerprint?: string;
+};
+
+export type MechanicsSettings = {
+  enabled: boolean;
+  advisory_only: boolean;
+  shadow_mode: boolean;
+  playbook_id: string;
+  profit_target_pct: number;
+  manage_at_dte: number;
+  tested_delta_threshold: number;
+  defined_risk_cap_pct: number;
+  undefined_bpr_cap_pct: number;
+  credit_only_rolls: boolean;
+  disclaimer?: string;
+  execution_boundary?: string;
 };
 
 export type LiveMarketTick = {

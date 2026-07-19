@@ -18,6 +18,7 @@
 - [Catalyst intelligence](tickets/050-catalysts.md) — Phase 5 delivers evidence-backed held-symbol catalysts with abstention, attribution, option-market mechanisms, feedback, retention, charts, and configuration-gated Benzinga coverage.
 - [Codex recommendations and monitoring](tickets/060-codex-monitoring.md) — Phase 6 replaces production Anthropic recommendations with a local Codex CLI provider, horizon-aware fingerprints, consent-gated monitoring, alerts, and immutable history/decisions.
 - [Hardening and TUI retirement](tickets/070-hardening-retirement.md) — Phase 7 retires the Textual dashboard and Anthropic path, ships operations (export/backup/retention/diagnostics/update readiness), accessibility and scale validation, and packaging/migration polish.
+- [Tasty mechanics](tickets/080-tasty-mechanics.md) — Versioned educational short-premium playbook, deterministic fact/rule evaluation, advisory candidates, shadow-mode UI/API, Codex context constraints, offline replay harness.
 
 ## Fog
 

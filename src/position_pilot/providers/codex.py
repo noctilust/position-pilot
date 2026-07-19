@@ -162,12 +162,36 @@ def build_recommendation_prompt(context: dict[str, Any]) -> str:
     """Build a minimized analytical prompt with no account identifiers."""
 
     payload = json.dumps(context, sort_keys=True, separators=(",", ":"), default=str)
+    mechanics = context.get("mechanics") if isinstance(context, dict) else None
+    mechanics_block = ""
+    if isinstance(mechanics, dict) and mechanics.get("enabled") is not False:
+        candidates = mechanics.get("candidates") or []
+        # Default/missing shadow_mode is observational — do not constrain action selection.
+        shadow = bool(mechanics.get("shadow_mode", True))
+        if candidates and not shadow:
+            mechanics_block = (
+                "MECHANICS_CONSTRAINTS: When mechanics.candidates is present, explain and compare "
+                "ONLY those supplied advisory candidates (by candidate_id/kind). "
+                "Do not invent strikes, expirations, quotes, order legs, hedges, or ADD actions. "
+                "If required facts are missing or candidates list blocking_reasons/missing_inputs, "
+                "prefer action=review and say what is unknown. "
+                "Mechanics is advisory decision support; execution is manual in tastytrade. "
+                "Do not claim an order was or will be placed.\n"
+            )
+        elif candidates and shadow:
+            mechanics_block = (
+                "MECHANICS_OBSERVATION: mechanics.candidates are shadow-mode context only. "
+                "You may reference them for explanation, but they must NOT change or constrain "
+                "the selected action. Do not invent strikes, expirations, quotes, or order legs. "
+                "Execution remains manual in tastytrade.\n"
+            )
     return (
         "You are Position Pilot's options-trading analyst. "
         "Return ONLY JSON matching the provided schema. "
         "Capital preservation takes priority over profit maximization. "
         "Do not invent market data. Do not request credentials or account numbers. "
-        "Use only the analytical context below.\n\n"
+        "Use only the analytical context below.\n"
+        f"{mechanics_block}\n"
         f"PROMPT_VERSION={PROMPT_VERSION}\n"
         f"SCHEMA_VERSION={SCHEMA_VERSION}\n"
         f"CONTEXT={payload}\n"

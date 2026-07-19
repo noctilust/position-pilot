@@ -283,3 +283,35 @@ def test_provider_never_reads_token_files(tmp_path: Path, monkeypatch) -> None:
     result = provider.complete_recommendation({"symbol": "AAPL"})
     assert result.status == CodexProviderStatus.OK
     assert not any("auth.json" in path for path in opened)
+
+
+def test_mechanics_prompt_shadow_vs_enforced() -> None:
+    base = {
+        "symbol": "SPY",
+        "strategy_type": "Bull Put Spread",
+        "mechanics": {
+            "enabled": True,
+            "shadow_mode": True,
+            "candidates": [
+                {
+                    "candidate_id": "close:profit-target",
+                    "kind": "close",
+                    "missing_inputs": [],
+                    "blocking_reasons": [],
+                }
+            ],
+        },
+    }
+    shadow_prompt = build_recommendation_prompt(base)
+    assert "MECHANICS_OBSERVATION" in shadow_prompt
+    assert "must NOT change or constrain" in shadow_prompt
+    assert "MECHANICS_CONSTRAINTS" not in shadow_prompt
+
+    enforced = {
+        **base,
+        "mechanics": {**base["mechanics"], "shadow_mode": False},
+    }
+    hard_prompt = build_recommendation_prompt(enforced)
+    assert "MECHANICS_CONSTRAINTS" in hard_prompt
+    assert "ONLY those supplied advisory candidates" in hard_prompt
+    assert "MECHANICS_OBSERVATION" not in hard_prompt

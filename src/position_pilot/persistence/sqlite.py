@@ -1022,6 +1022,16 @@ class PositionPilotDatabase:
                 (key, json.dumps(value), datetime.now(UTC).isoformat()),
             )
 
+    def has_setting(self, key: str) -> bool:
+        """True when a settings row exists for key (even if value is null/empty/false)."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM settings WHERE key = ?",
+                (key,),
+            ).fetchone()
+        return row is not None
+
     def get_setting(self, key: str, default: Any = None) -> Any:
         with self._connect() as connection:
             row = connection.execute(

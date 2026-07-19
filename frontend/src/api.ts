@@ -8,6 +8,8 @@ import type {
   EnvDiagnostic,
   MarketOverview,
   MarketQuote,
+  MechanicsEvaluation,
+  MechanicsSettings,
   MonitoringStatus,
   OrderRow,
   PortfolioRisk,
@@ -187,6 +189,21 @@ export function submitCatalystFeedback(payload: {
 
 export function fetchCatalystSettings() {
   return api<CatalystSettings>("/api/v1/settings/catalysts");
+}
+
+export function fetchMechanicsSettings() {
+  return api<MechanicsSettings>("/api/v1/settings/mechanics");
+}
+
+export function saveMechanicsSettings(payload: Partial<MechanicsSettings>) {
+  return api<MechanicsSettings>("/api/v1/settings/mechanics", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchStrategyMechanics(strategyId: string) {
+  return api<MechanicsEvaluation>(`/api/v1/strategies/${strategyId}/mechanics`);
 }
 
 export function saveCatalystSettings(payload: {

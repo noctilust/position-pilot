@@ -1058,6 +1058,62 @@ async function mockDashboardApis(page: Page) {
             state: "fresh",
           },
         },
+        mechanics: {
+          schema_version: "mechanics.v1",
+          strategy_id: "strat-browser",
+          playbook_id: "tastylive-short-premium.v1",
+          playbook_version: "v1",
+          shadow_mode: true,
+          enabled: true,
+          evaluated_at: "2026-07-18T15:00:00Z",
+          facts: {
+            strategy_type: "Short Put",
+            risk_class: "undefined",
+            dte: 21,
+            profit_capture_ratio: 0.55,
+            tested_side: "untested",
+            data_quality_flags: [],
+            supported: true,
+          },
+          rules: [
+            {
+              rule_id: "time.manage_at_dte",
+              name: "Time management (~21 DTE)",
+              status: "due",
+              reason_code: "dte_threshold_crossed",
+              explanation: "DTE=21 ≤ manage-at 21; stronger attention (undefined risk).",
+              source_ids: ["tl-manage-21-dte-2022"],
+            },
+            {
+              rule_id: "profit.manage_winner",
+              name: "Profit management (short premium)",
+              status: "due",
+              reason_code: "profit_target_reached",
+              explanation: "Profit capture 55% ≥ target 50%.",
+              source_ids: ["tl-key-mechanics"],
+            },
+          ],
+          candidates: [
+            {
+              candidate_id: "manual-review:dte-management",
+              kind: "manual-review",
+              rule_hits: ["time.manage_at_dte"],
+              missing_inputs: [],
+              blocking_reasons: ["undefined_risk_time_review"],
+              explanation: "Review undefined-risk short put at 21 DTE.",
+            },
+          ],
+          sources: [
+            {
+              source_id: "tl-dte-definition",
+              title: "Days to Expiration (DTE)",
+              url: "https://www.tastylive.com/definitions/days-to-expiration-dte",
+              reviewed_at: "2026-07-18",
+            },
+          ],
+          execution_boundary:
+            "Advisory only. Execution remains manual in tastytrade. Position Pilot cannot create, stage, dry-run, submit, replace, or cancel orders.",
+        },
         thesis: null,
         trade_plan: null,
         audit: [],
@@ -1517,18 +1573,23 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   await expect(page.getByRole("button", { name: /Expand legs|Collapse legs/i })).toHaveCount(0);
 
   // Explicit colgroup / column width system + numeric alignment hooks.
-  await expect(page.locator("table.positions-by-symbol > colgroup > col")).toHaveCount(8);
-  await expect(page.locator("th.positions-th-num")).toHaveCount(5);
+  await expect(page.locator("table.positions-by-symbol > colgroup > col")).toHaveCount(9);
+  await expect(page.locator("th.positions-th-num")).toHaveCount(6);
   await expect(page.locator("th.positions-th-position")).toBeVisible();
   await expect(page.locator("th.positions-th-pnl")).toHaveClass(/positions-th-num/);
+  await expect(page.locator("th.positions-th-pnl-pct")).toHaveClass(/positions-th-num/);
+  await expect(page.locator("th.positions-th-pnl")).toHaveText("P/L Open");
+  await expect(page.locator("th.positions-th-pnl-pct")).toHaveText("P/L Opn%");
 
-  // Level-0: identity spans first columns; aggregate P/L lives in the global P/L column.
+  // Level-0: identity spans first columns; aggregate P/L lives in the P/L Open column
+  // (not P/L Opn% — symbol groups have no aggregate open-percent).
   const level0Structure = await page.evaluate(() => {
     const row = document.querySelector<HTMLTableRowElement>("tr[data-level='0']");
     if (!row) return null;
     const cells = Array.from(row.querySelectorAll(":scope > th, :scope > td"));
     const identity = cells[0] as HTMLTableCellElement | undefined;
-    const pnl = cells[cells.length - 1] as HTMLTableCellElement | undefined;
+    const pnl = cells[cells.length - 2] as HTMLTableCellElement | undefined;
+    const pnlPct = cells[cells.length - 1] as HTMLTableCellElement | undefined;
     const colSpanTotal = cells.reduce(
       (sum, cell) => sum + ((cell as HTMLTableCellElement).colSpan || 1),
       0,
@@ -1538,16 +1599,21 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
       colSpanTotal,
       identityColSpan: identity?.colSpan ?? 0,
       hasAggregateClass: pnl?.classList.contains("symbol-group-aggregate-pnl") ?? false,
+      hasAggregatePctClass:
+        pnlPct?.classList.contains("symbol-group-aggregate-pnl-pct") ?? false,
       pnlText: (pnl?.textContent || "").replace(/\s+/g, " ").trim(),
+      pnlPctText: (pnlPct?.textContent || "").replace(/\s+/g, " ").trim(),
       identityHasPnlClass: identity?.querySelector(".symbol-group-pnl") != null,
     };
   });
   expect(level0Structure).not.toBeNull();
-  expect(level0Structure!.colSpanTotal).toBe(8);
+  expect(level0Structure!.colSpanTotal).toBe(9);
   expect(level0Structure!.identityColSpan).toBe(7);
   expect(level0Structure!.hasAggregateClass).toBeTruthy();
+  expect(level0Structure!.hasAggregatePctClass).toBeTruthy();
   expect(level0Structure!.identityHasPnlClass).toBeFalsy();
   expect(level0Structure!.pnlText.length).toBeGreaterThan(0);
+  expect(level0Structure!.pnlPctText).toBe("—");
 
   // Indentation hooks: level-1 exceeds level-0; level-2 matches level-1 (no extra x-indent).
   const paddingLeft = await page.evaluate(() => {
@@ -1598,22 +1664,38 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   await expect(page.locator(".strategy-legs-detail-row")).toHaveCount(0);
 
   // Positive / negative / unavailable unrealized P/L percent on strategy rows.
+  // Currency lives in P/L Open; percent + bar live in adjacent P/L Opn%.
   const spyPutRow = page
     .locator("tr[data-level='1']")
     .filter({ has: page.getByRole("button", { name: "Open SPY Short Put" }) });
-  await expect(spyPutRow.locator(".pnl-metric")).toContainText("$40.00");
-  await expect(spyPutRow.locator(".pnl-metric")).toHaveClass(/pnl-metric-positive/);
-  await expect(spyPutRow.locator(".pnl-metric-percent")).toContainText("+10.0%");
-  await expect(spyPutRow.locator(".pnl-bar-fill-positive")).toBeVisible();
+  await expect(spyPutRow.locator(".positions-td-pnl .pnl-metric")).toContainText("$40.00");
+  await expect(spyPutRow.locator(".positions-td-pnl .pnl-metric")).toHaveClass(
+    /pnl-metric-positive/,
+  );
+  await expect(spyPutRow.locator(".positions-td-pnl")).not.toContainText("%");
+  await expect(spyPutRow.locator(".positions-td-pnl-pct .pnl-metric-percent")).toContainText(
+    "+10.0%",
+  );
+  await expect(spyPutRow.locator(".positions-td-pnl-pct .pnl-bar-fill-positive")).toBeVisible();
   await expect(spyPutRow.locator(".positions-td-pnl")).toHaveCount(1);
+  await expect(spyPutRow.locator(".positions-td-pnl-pct")).toHaveCount(1);
 
   const qqqStrategyRow = page
     .locator("tr[data-level='1'].combined-strategy-row")
     .filter({ hasText: "Iron Condor" });
-  await expect(qqqStrategyRow.locator(".pnl-metric")).toContainText("$25.00");
-  await expect(qqqStrategyRow.locator(".pnl-metric")).toHaveClass(/pnl-metric-negative/);
-  await expect(qqqStrategyRow.locator(".pnl-metric-percent")).toContainText("-8.0%");
-  await expect(qqqStrategyRow.locator(".pnl-bar-fill-negative")).toBeVisible();
+  await expect(qqqStrategyRow.locator(".positions-td-pnl .pnl-metric")).toContainText(
+    "$25.00",
+  );
+  await expect(qqqStrategyRow.locator(".positions-td-pnl .pnl-metric")).toHaveClass(
+    /pnl-metric-negative/,
+  );
+  await expect(qqqStrategyRow.locator(".positions-td-pnl")).not.toContainText("%");
+  await expect(
+    qqqStrategyRow.locator(".positions-td-pnl-pct .pnl-metric-percent"),
+  ).toContainText("-8.0%");
+  await expect(
+    qqqStrategyRow.locator(".positions-td-pnl-pct .pnl-bar-fill-negative"),
+  ).toBeVisible();
 
   // Dense strategy row: name + leg count + analyze on one line; no disclosure control.
   await expect(qqqStrategyRow.locator(".strategy-label-row")).toHaveCount(1);
@@ -1753,10 +1835,12 @@ test("positions hierarchy levels, aligned leg rows, contract identity, and P/L b
   await expect(shortCallLeg.locator(".contract-type")).toHaveText("C");
   await expect(shortCallLeg.locator(".contract-strike")).toHaveText("$505");
 
-  // Unavailable leg percent: value shown, bar omitted.
-  await expect(longPutLeg.locator(".pnl-metric-value")).toBeVisible();
-  await expect(longPutLeg.locator(".pnl-bar-track")).toHaveCount(0);
-  await expect(longPutLeg.locator(".pnl-metric-percent")).toHaveCount(0);
+  // Unavailable leg percent: currency shown; percent column is em dash (no bar).
+  await expect(longPutLeg.locator(".positions-td-pnl .pnl-metric-value")).toBeVisible();
+  await expect(longPutLeg.locator(".positions-td-pnl")).not.toContainText("%");
+  await expect(longPutLeg.locator(".positions-td-pnl-pct .pnl-bar-track")).toHaveCount(0);
+  await expect(longPutLeg.locator(".positions-td-pnl-pct .pnl-metric-percent")).toHaveCount(0);
+  await expect(longPutLeg.locator(".positions-td-pnl-pct")).toContainText("—");
 
   // Level-2 shares level-1 left inset (no extra x-indent for combined legs).
   const legPad = await page.evaluate(() => {
@@ -2366,7 +2450,7 @@ test("combined strategy legs always visible: no disclosure, filters, analysis, a
   await expect(aaplLegs.nth(1)).toContainText("C");
   await expect(aaplLegs.filter({ hasText: "$220" })).toHaveCount(1);
   // Legs align under the main table columns (no nested thead).
-  await expect(page.locator("table.positions-by-symbol thead tr th")).toHaveCount(8);
+  await expect(page.locator("table.positions-by-symbol thead tr th")).toHaveCount(9);
   // No account identifiers in leg rows.
   await expect(qqqLegs.first()).not.toContainText("public-account-id");
   await expect(aaplLegs.first()).not.toContainText("public-account-id");
@@ -3754,12 +3838,20 @@ test("positions show roll-adjusted P/L Open with roll badge on option contract i
   const strangleRow = page
     .locator("tr[data-level='1'].combined-strategy-row")
     .filter({ hasText: "Short Strangle" });
-  await expect(strangleRow.locator(".pnl-metric")).toContainText("$945.00");
+  await expect(strangleRow.locator(".positions-td-pnl .pnl-metric")).toContainText("$945.00");
+  await expect(strangleRow.locator(".positions-td-pnl")).not.toContainText("%");
+  await expect(strangleRow.locator(".positions-td-pnl-pct .pnl-metric-percent")).toContainText(
+    "+18.0%",
+  );
   await expect(strangleRow.locator(".roll-pnl-indicator")).toHaveCount(0);
 
   // Rolled 1400C child: exactly one R1 immediately after the contract strip.
   const callLeg = page.locator("tr[data-level='2']").filter({ hasText: "1400" });
-  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,157.00");
+  await expect(callLeg.locator(".positions-td-pnl .pnl-metric")).toContainText("$1,157.00");
+  await expect(callLeg.locator(".positions-td-pnl")).not.toContainText("%");
+  await expect(callLeg.locator(".positions-td-pnl-pct .pnl-metric-percent")).toContainText(
+    "+25.0%",
+  );
   await expect(callLeg.locator(".positions-td-pnl .roll-pnl-indicator")).toHaveCount(0);
   await expect(callLeg.locator(".roll-pnl-indicator")).toHaveCount(1);
   await expect(callLeg.locator(".roll-pnl-indicator")).toContainText("R1");
@@ -3806,14 +3898,116 @@ test("Roll chains table shows realized carry, lifetime credit, and status badges
   );
 });
 
-test("Positions column header is P/L Open", async ({ page }) => {
+test("Positions column headers are P/L Open and P/L Opn%", async ({ page }) => {
   await mockDashboardApis(page);
   const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";
   await page.goto(`/?launch_token=${encodeURIComponent(launchToken)}`);
   await page.getByRole("button", { name: "Positions" }).click();
-  await expect(
-    page.locator("th.positions-th-pnl"),
-  ).toHaveText(/P\/L Open/);
+  await expect(page.locator("th.positions-th-pnl")).toHaveText("P/L Open");
+  await expect(page.locator("th.positions-th-pnl-pct")).toHaveText("P/L Opn%");
+  // Headers are adjacent: P/L Open immediately precedes P/L Opn%.
+  const headerOrder = await page.evaluate(() => {
+    const headers = Array.from(
+      document.querySelectorAll("table.positions-by-symbol thead th"),
+    ).map((th) => (th.textContent || "").trim());
+    const openIdx = headers.indexOf("P/L Open");
+    const pctIdx = headers.indexOf("P/L Opn%");
+    return { openIdx, pctIdx };
+  });
+  expect(headerOrder.openIdx).toBeGreaterThanOrEqual(0);
+  expect(headerOrder.pctIdx).toBe(headerOrder.openIdx + 1);
+});
+
+/**
+ * At the table's minimum width (narrow viewport → local horizontal scroll), the
+ * adjacent P/L Open and P/L Opn% columns must not overlap, and percent header /
+ * value / bar must fit without content clipping.
+ */
+test("P/L Open and P/L Opn% columns do not collide at min table width", async ({
+  page,
+}) => {
+  await mockDashboardApis(page);
+  const launchToken = process.env.POSITION_PILOT_LAUNCH_TOKEN ?? "browser-smoke-launch";
+  await page.goto(`/?launch_token=${encodeURIComponent(launchToken)}`);
+  await page.getByRole("button", { name: "Positions" }).click();
+  await expect(page.getByRole("heading", { name: "Positions", exact: true })).toBeVisible();
+
+  // Force the table into its min-width floor via a narrow shell.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator("th.positions-th-pnl-pct")).toBeVisible();
+
+  const layout = await page.evaluate(() => {
+    const table = document.querySelector<HTMLElement>("table.positions-by-symbol");
+    const thOpen = document.querySelector<HTMLElement>("th.positions-th-pnl");
+    const thPct = document.querySelector<HTMLElement>("th.positions-th-pnl-pct");
+    // Prefer a strategy row with a real percent value + bar (SPY Short Put +10.0%).
+    const strategyRow =
+      Array.from(document.querySelectorAll<HTMLElement>("tr[data-level='1']")).find((row) => {
+        const open = row.querySelector(".strategy-open-action");
+        return (open?.textContent || "").includes("Short Put");
+      }) ?? document.querySelector<HTMLElement>("tr[data-level='1']");
+    const tdOpen = strategyRow?.querySelector<HTMLElement>("td.positions-td-pnl");
+    const tdPct = strategyRow?.querySelector<HTMLElement>("td.positions-td-pnl-pct");
+    const pctText = tdPct?.querySelector<HTMLElement>(".pnl-metric-percent");
+    const bar = tdPct?.querySelector<HTMLElement>(".pnl-bar-track");
+
+    if (!table || !thOpen || !thPct || !tdOpen || !tdPct) {
+      return { ok: false as const };
+    }
+
+    const r = (el: HTMLElement) => el.getBoundingClientRect();
+    const thOpenR = r(thOpen);
+    const thPctR = r(thPct);
+    const tdOpenR = r(tdOpen);
+    const tdPctR = r(tdPct);
+    const minWidthPx = Number.parseFloat(getComputedStyle(table).minWidth || "0");
+
+    return {
+      ok: true as const,
+      minWidthPx,
+      tableWidth: r(table).width,
+      // Adjacent columns: open ends at or before pct starts (1px subpixel tol).
+      headerGap: thPctR.left - thOpenR.right,
+      cellGap: tdPctR.left - tdOpenR.right,
+      thOpenWidth: thOpenR.width,
+      thPctWidth: thPctR.width,
+      tdPctWidth: tdPctR.width,
+      // Content not clipped inside the percent column.
+      thPctClipped: thPct.scrollWidth > thPct.clientWidth + 1,
+      tdPctClipped: tdPct.scrollWidth > tdPct.clientWidth + 1,
+      pctTextClipped: pctText
+        ? pctText.scrollWidth > pctText.clientWidth + 1
+        : false,
+      barWidth: bar?.getBoundingClientRect().width ?? 0,
+      barMinWidth: bar
+        ? Number.parseFloat(getComputedStyle(bar).minWidth || "0")
+        : 0,
+      pctLabel: (pctText?.textContent || "").replace(/\s+/g, " ").trim(),
+      headerLabel: (thPct.textContent || "").replace(/\s+/g, " ").trim(),
+    };
+  });
+
+  expect(layout.ok).toBeTruthy();
+  if (!layout.ok) return;
+
+  // Table is at least its CSS min-width floor.
+  expect(layout.tableWidth).toBeGreaterThanOrEqual(layout.minWidthPx - 1);
+  // Headers/cells are adjacent without overlap.
+  expect(layout.headerGap).toBeGreaterThanOrEqual(-1);
+  expect(layout.cellGap).toBeGreaterThanOrEqual(-1);
+  // Percent column is wide enough for the nowrap header and a typical value.
+  expect(layout.thPctWidth).toBeGreaterThanOrEqual(56);
+  expect(layout.tdPctWidth).toBeGreaterThanOrEqual(56);
+  expect(layout.thPctClipped).toBeFalsy();
+  expect(layout.tdPctClipped).toBeFalsy();
+  expect(layout.pctTextClipped).toBeFalsy();
+  expect(layout.headerLabel).toBe("P/L Opn%");
+  // Fixture Short Put shows +10.0%; bar tracks within the cell (respects min-width).
+  expect(layout.pctLabel).toMatch(/\+?\d+\.\d%/);
+  if (layout.barMinWidth > 0) {
+    expect(layout.barWidth + 0.5).toBeGreaterThanOrEqual(layout.barMinWidth);
+    expect(layout.barWidth).toBeLessThanOrEqual(layout.tdPctWidth + 1);
+  }
 });
 
 /**
@@ -3860,22 +4054,22 @@ test("live market Quote SSE updates Positions P/L overlay without REST refresh",
 
   // Snapshot baseline before tick.
   const callLeg = page.locator("tr[data-level='2']").filter({ hasText: "1400" });
-  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,557.00");
+  await expect(callLeg.locator(".positions-td-pnl .pnl-metric")).toContainText("$1,557.00");
 
   await sseEmit(page, LIVE_CALL_QUOTE);
 
   // Live mark 3.725 → short raw 1601-372.5=1228.5 + carry 361 = 1589.5
   // Combined: -212 + 1589.5 = 1377.5; put sibling stays -212.
-  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,589.50", {
+  await expect(callLeg.locator(".positions-td-pnl .pnl-metric")).toContainText("$1,589.50", {
     timeout: 10_000,
   });
   const putLeg = page.locator("tr[data-level='2']").filter({ hasText: "800" });
-  await expect(putLeg.locator(".pnl-metric")).toContainText("-$212.00");
+  await expect(putLeg.locator(".positions-td-pnl .pnl-metric")).toContainText("-$212.00");
 
   const strangleRow = page
     .locator("tr[data-level='1'].combined-strategy-row")
     .filter({ hasText: "Short Strangle" });
-  await expect(strangleRow.locator(".pnl-metric")).toContainText("$1,377.50");
+  await expect(strangleRow.locator(".positions-td-pnl .pnl-metric")).toContainText("$1,377.50");
 
   const muHeader = page.locator("tr[data-level='0']").filter({ hasText: "MU" });
   await expect(muHeader.locator(".symbol-group-pnl")).toContainText("$1,377.50");
@@ -3928,10 +4122,10 @@ test("SSE transport error immediately restores snapshot Positions P/L", async ({
   const muHeader = page.locator("tr[data-level='0']").filter({ hasText: "MU" });
 
   await sseEmit(page, LIVE_CALL_QUOTE);
-  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,589.50", {
+  await expect(callLeg.locator(".positions-td-pnl .pnl-metric")).toContainText("$1,589.50", {
     timeout: 10_000,
   });
-  await expect(strangleRow.locator(".pnl-metric")).toContainText("$1,377.50");
+  await expect(strangleRow.locator(".positions-td-pnl .pnl-metric")).toContainText("$1,377.50");
   await expect(muHeader.locator(".symbol-group-pnl")).toContainText("$1,377.50");
 
   // Simulate browser SSE pipe failure while hub status remains "live".
@@ -3939,25 +4133,25 @@ test("SSE transport error immediately restores snapshot Positions P/L", async ({
 
   await expect(page.locator(".local-clock.degraded")).toBeVisible({ timeout: 5_000 });
   // Authoritative snapshot values restored for child, parent, and symbol total.
-  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,557.00");
-  await expect(putLeg.locator(".pnl-metric")).toContainText("-$212.00");
-  await expect(strangleRow.locator(".pnl-metric")).toContainText("$1,345.00");
+  await expect(callLeg.locator(".positions-td-pnl .pnl-metric")).toContainText("$1,557.00");
+  await expect(putLeg.locator(".positions-td-pnl .pnl-metric")).toContainText("-$212.00");
+  await expect(strangleRow.locator(".positions-td-pnl .pnl-metric")).toContainText("$1,345.00");
   await expect(muHeader.locator(".symbol-group-pnl")).toContainText("$1,345");
 
   // Reopen + status live without a new quote must still show snapshot (marks cleared).
   await sseReopen(page);
   await expect(page.locator(".local-clock.live")).toBeVisible({ timeout: 5_000 });
-  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,557.00");
-  await expect(strangleRow.locator(".pnl-metric")).toContainText("$1,345.00");
+  await expect(callLeg.locator(".positions-td-pnl .pnl-metric")).toContainText("$1,557.00");
+  await expect(strangleRow.locator(".positions-td-pnl .pnl-metric")).toContainText("$1,345.00");
   await expect(muHeader.locator(".symbol-group-pnl")).toContainText("$1,345");
-  await expect(callLeg.locator(".pnl-metric")).not.toContainText("$1,589.50");
+  await expect(callLeg.locator(".positions-td-pnl .pnl-metric")).not.toContainText("$1,589.50");
 
   // A *new* quote repopulates marks and restores the live overlay.
   await sseEmit(page, LIVE_CALL_QUOTE);
-  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,589.50", {
+  await expect(callLeg.locator(".positions-td-pnl .pnl-metric")).toContainText("$1,589.50", {
     timeout: 10_000,
   });
-  await expect(strangleRow.locator(".pnl-metric")).toContainText("$1,377.50");
+  await expect(strangleRow.locator(".positions-td-pnl .pnl-metric")).toContainText("$1,377.50");
   await expect(muHeader.locator(".symbol-group-pnl")).toContainText("$1,377.50");
 });
 
@@ -3997,9 +4191,9 @@ test("degraded streaming keeps snapshot Positions P/L despite market Quote SSE",
 
   // Snapshot values remain — live tick must not blank or override when degraded.
   const callLeg = page.locator("tr[data-level='2']").filter({ hasText: "1400" });
-  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,557.00");
+  await expect(callLeg.locator(".positions-td-pnl .pnl-metric")).toContainText("$1,557.00");
   const putLeg = page.locator("tr[data-level='2']").filter({ hasText: "800" });
-  await expect(putLeg.locator(".pnl-metric")).toContainText("-$212.00");
+  await expect(putLeg.locator(".positions-td-pnl .pnl-metric")).toContainText("-$212.00");
   const muHeader = page.locator("tr[data-level='0']").filter({ hasText: "MU" });
   await expect(muHeader.locator(".symbol-group-pnl")).toContainText("$1,345");
 });
@@ -4056,7 +4250,7 @@ test("new REST snapshot_id retires prior live marks", async ({ page }) => {
 
   // Mark under snapshot A → live overlay 1589.50.
   await sseEmit(page, LIVE_CALL_QUOTE);
-  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,589.50", {
+  await expect(callLeg.locator(".positions-td-pnl .pnl-metric")).toContainText("$1,589.50", {
     timeout: 10_000,
   });
 
@@ -4068,10 +4262,27 @@ test("new REST snapshot_id retires prior live marks", async ({ page }) => {
   });
 
   // Snapshot B displayed — not the pre-B live mark (1589.50).
-  await expect(callLeg.locator(".pnl-metric")).toContainText("$1,762.00", {
+  await expect(callLeg.locator(".positions-td-pnl .pnl-metric")).toContainText("$1,762.00", {
     timeout: 10_000,
   });
-  await expect(strangleRow.locator(".pnl-metric")).toContainText("$1,550.00");
+  await expect(strangleRow.locator(".positions-td-pnl .pnl-metric")).toContainText("$1,550.00");
   await expect(muHeader.locator(".symbol-group-pnl")).toContainText("$1,550");
-  await expect(callLeg.locator(".pnl-metric")).not.toContainText("$1,589.50");
+  await expect(callLeg.locator(".positions-td-pnl .pnl-metric")).not.toContainText("$1,589.50");
+});
+
+test("strategy detail shows Tasty mechanics shadow panel with sources", async ({ page }) => {
+  await mockDashboardApis(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Positions" }).click();
+  await page.getByRole("button", { name: "Open SPY Short Put" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  const mechanics = dialog.locator("section.mechanics-panel");
+  await expect(mechanics.getByRole("heading", { name: "Tasty mechanics" })).toBeVisible();
+  await expect(mechanics.getByText(/tastylive-short-premium\.v1/)).toBeVisible();
+  await expect(mechanics.getByText(/Shadow mode/i)).toBeVisible();
+  await expect(mechanics.getByRole("note")).toContainText(/Execution remains manual in tastytrade/i);
+  await expect(mechanics.getByText(/Due · Time management/i)).toBeVisible();
+  await expect(mechanics.getByRole("link", { name: "Days to Expiration (DTE)" })).toBeVisible();
+  await expect(mechanics.getByRole("button", { name: /submit|dry-?run|place order/i })).toHaveCount(0);
 });

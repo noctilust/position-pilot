@@ -341,12 +341,13 @@ class MonitoringService:
         notifications: NotificationService,
         *,
         portfolio_loader: Callable[[], PortfolioSnapshot | None] | None = None,
-        catalyst_loader: Callable[[str], list[dict[str, Any]]] | None = None,
+        catalyst_loader: Callable[[str], list[dict[str, Any]] | None] | None = None,
         catalyst_scan: Callable[[list[str]], dict[str, list[dict[str, Any]]]] | None = None,
         thesis_loader: Callable[[str], dict[str, Any] | None] | None = None,
         plan_loader: Callable[[str], dict[str, Any] | None] | None = None,
         risk_snapshot_loader: Callable[[PortfolioSnapshot], dict[str, Any] | None] | None = None,
         market_context_loader: Callable[[str], dict[str, Any] | None] | None = None,
+        mechanics_loader: Callable[..., dict[str, Any] | None] | None = None,
         news_cadence_seconds: int | Callable[[], int] | None = None,
         clock: Callable[[], datetime] | None = None,
         risk_interval_seconds: int = RISK_INTERVAL_SECONDS,
@@ -357,12 +358,14 @@ class MonitoringService:
         self.alerts = alerts
         self.notifications = notifications
         self.portfolio_loader = portfolio_loader
+        # Default is known-empty list only when no loader is wired; real loaders may return None.
         self.catalyst_loader = catalyst_loader or (lambda _symbol: [])
         self.catalyst_scan = catalyst_scan
         self.thesis_loader = thesis_loader or (lambda _sid: None)
         self.plan_loader = plan_loader or (lambda _sid: None)
         self.risk_snapshot_loader = risk_snapshot_loader
         self.market_context_loader = market_context_loader
+        self.mechanics_loader = mechanics_loader
         self._news_cadence_seconds = news_cadence_seconds
         self._clock = clock or (lambda: datetime.now(UTC))
         self.risk_interval_seconds = risk_interval_seconds
@@ -623,19 +626,32 @@ class MonitoringService:
         for strategy in snapshot.strategies:
             try:
                 catalysts = self.catalyst_loader(strategy.underlying)
-                self._raise_catalyst_alerts(strategy.underlying, catalysts, strategy.strategy_type)
-                material_event = any(bool(item.get("high_impact")) for item in catalysts)
+                catalysts_for_rec = catalysts if catalysts is not None else []
+                self._raise_catalyst_alerts(
+                    strategy.underlying, catalysts_for_rec, strategy.strategy_type
+                )
+                material_event = any(bool(item.get("high_impact")) for item in catalysts_for_rec)
                 thesis = self.thesis_loader(strategy.strategy_id)
                 plan = self.plan_loader(strategy.strategy_id)
                 market = self._market_for(strategy.underlying)
                 # Scheduled/on-demand reevaluation always uses current market context.
                 self._remember_market_baseline(strategy.underlying, market, force=True)
+                mechanics = self._mechanics_for(
+                    strategy,
+                    catalysts=catalysts,  # None stays unknown for mechanics
+                    plan=plan,
+                    market=market,
+                    portfolio=snapshot,
+                )
+                cat_availability = "unknown" if catalysts is None else "known"
                 context = strategy_context(
                     strategy,
-                    catalysts=catalysts,
+                    catalysts=catalysts_for_rec,
+                    catalyst_availability=cat_availability,
                     thesis=thesis,
                     trade_plan=plan,
                     market=market,
+                    mechanics=mechanics,
                 )
                 fingerprint = fingerprint_inputs(context)
                 previous = self.recommendations.get(SubjectType.STRATEGY, strategy.strategy_id)
@@ -666,10 +682,12 @@ class MonitoringService:
                     continue
                 result = self.recommendations.evaluate_strategy(
                     strategy,
-                    catalysts=catalysts,
+                    catalysts=catalysts_for_rec,
+                    catalyst_availability=cat_availability,
                     thesis=thesis,
                     trade_plan=plan,
                     market=market,
+                    mechanics=mechanics,
                     force=force,
                 )
                 evaluated += 1
@@ -704,12 +722,15 @@ class MonitoringService:
                 subject_id = equity_subject_id(account.account_id, position.underlying_symbol)
                 try:
                     catalysts = self.catalyst_loader(position.underlying_symbol)
+                    catalysts_for_rec = catalysts if catalysts is not None else []
                     self._raise_catalyst_alerts(
                         position.underlying_symbol.upper(),
-                        catalysts,
+                        catalysts_for_rec,
                         "Long Stock",
                     )
-                    material_event = any(bool(item.get("high_impact")) for item in catalysts)
+                    material_event = any(
+                        bool(item.get("high_impact")) for item in catalysts_for_rec
+                    )
                     from .recommendations import equity_context
 
                     market = self._market_for(position.underlying_symbol)
@@ -720,7 +741,7 @@ class MonitoringService:
                         mark_price=position.mark_price,
                         unrealized_pnl=position.unrealized_pnl,
                         unrealized_pnl_percent=position.unrealized_pnl_percent,
-                        catalysts=catalysts,
+                        catalysts=catalysts_for_rec,
                         market=market,
                     )
                     fingerprint = fingerprint_inputs(context)
@@ -740,7 +761,7 @@ class MonitoringService:
                         mark_price=position.mark_price,
                         unrealized_pnl=position.unrealized_pnl,
                         unrealized_pnl_percent=position.unrealized_pnl_percent,
-                        catalysts=catalysts,
+                        catalysts=catalysts_for_rec,
                         market=market,
                         force=force,
                     )
@@ -903,8 +924,11 @@ class MonitoringService:
                 if horizon != PositionHorizon.TACTICAL:
                     continue
                 catalysts = self.catalyst_loader(strategy.underlying)
-                self._raise_catalyst_alerts(strategy.underlying, catalysts, strategy.strategy_type)
-                material_event = any(bool(item.get("high_impact")) for item in catalysts)
+                catalysts_for_rec = catalysts if catalysts is not None else []
+                self._raise_catalyst_alerts(
+                    strategy.underlying, catalysts_for_rec, strategy.strategy_type
+                )
+                material_event = any(bool(item.get("high_impact")) for item in catalysts_for_rec)
                 market = self._market_for(strategy.underlying)
                 baseline = self._market_baselines.get(strategy.underlying.upper())
                 material_market = is_material_market_change(baseline, market)
@@ -922,12 +946,22 @@ class MonitoringService:
 
                 thesis = self.thesis_loader(strategy.strategy_id)
                 plan = self.plan_loader(strategy.strategy_id)
-                context = strategy_context(
+                mechanics = self._mechanics_for(
                     strategy,
                     catalysts=catalysts,
+                    plan=plan,
+                    market=market,
+                    portfolio=snapshot,
+                )
+                cat_availability = "unknown" if catalysts is None else "known"
+                context = strategy_context(
+                    strategy,
+                    catalysts=catalysts_for_rec,
+                    catalyst_availability=cat_availability,
                     thesis=thesis,
                     trade_plan=plan,
                     market=market,
+                    mechanics=mechanics,
                 )
                 fingerprint = fingerprint_inputs(context)
                 previous = self.recommendations.get(SubjectType.STRATEGY, strategy.strategy_id)
@@ -944,10 +978,12 @@ class MonitoringService:
                     continue
                 result = self.recommendations.evaluate_strategy(
                     strategy,
-                    catalysts=catalysts,
+                    catalysts=catalysts_for_rec,
+                    catalyst_availability=cat_availability,
                     thesis=thesis,
                     trade_plan=plan,
                     market=market,
+                    mechanics=mechanics,
                     force=False,
                 )
                 evaluated += 1
@@ -972,6 +1008,32 @@ class MonitoringService:
             "evaluated": evaluated,
             "material_market_hits": material_market_hits,
         }
+
+    def _mechanics_for(
+        self,
+        strategy: Any,
+        *,
+        catalysts: list[dict[str, Any]] | None,
+        plan: dict[str, Any] | None,
+        market: dict[str, Any] | None,
+        portfolio: PortfolioSnapshot | None,
+    ) -> dict[str, Any] | None:
+        """Compact mechanics context for fingerprints (no mechanics-only notifications)."""
+
+        if self.mechanics_loader is None:
+            return None
+        try:
+            return self.mechanics_loader(
+                strategy,
+                catalysts=catalysts,
+                trade_plan=plan,
+                market=market,
+                portfolio=portfolio,
+            )
+        except Exception:
+            sid = getattr(strategy, "strategy_id", "?")
+            logger.exception("mechanics_loader failed for %s", sid)
+            return None
 
     def _market_for(self, symbol: str) -> dict[str, Any] | None:
         if self.market_context_loader is None:

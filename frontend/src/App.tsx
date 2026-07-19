@@ -102,6 +102,7 @@ import type {
   CatalystSettings,
   LiveMarketTick,
   MarketOverview,
+  MechanicsEvaluation,
   MonitoringStatus,
   OrderRow,
   PortfolioAccount,
@@ -1406,7 +1407,7 @@ function formatPremiumEffect(value: number): { text: string; kind: "credit" | "d
   return { text: currency(0), kind: "flat" };
 }
 
-const POSITIONS_TABLE_COL_COUNT = 8;
+const POSITIONS_TABLE_COL_COUNT = 9;
 
 /**
  * Compact roll badge (R1 / R?) with realized-carry tooltip.
@@ -1500,50 +1501,54 @@ function LegContractIdentity({ leg }: { leg: PositionLeg }) {
 }
 
 /**
- * P/L Open: signed currency plus optional restrained percent bar.
+ * P/L Open: signed currency only.
  * Color is not the only signal — signed text remains in the accessibility tree.
  * Roll badges live on the option contract identity, not in this cell.
  */
-function UnrealizedPnlCell({
-  value,
-  percent,
-}: {
-  value: number;
-  percent: number | null | undefined;
-}) {
-  const hasPercent = percent != null && Number.isFinite(percent);
-  const barWidth = hasPercent ? clampPnlBarPercent(percent) : 0;
-  const tone =
-    value > 0 ? "positive" : value < 0 ? "negative" : "flat";
-  const percentTone =
-    hasPercent && percent > 0
-      ? "positive"
-      : hasPercent && percent < 0
-        ? "negative"
-        : "flat";
-  const percentLabel = hasPercent
-    ? `${percent > 0 ? "+" : ""}${percent.toFixed(1)}%`
-    : null;
-
+function UnrealizedPnlAmountCell({ value }: { value: number }) {
+  const tone = value > 0 ? "positive" : value < 0 ? "negative" : "flat";
   return (
     <div className={`pnl-metric pnl-metric-${tone}`}>
       <div className="pnl-metric-value-row">
         <span className="pnl-metric-value tabular">{currency(value)}</span>
-        {hasPercent ? (
-          <span className={`pnl-metric-percent tabular pnl-metric-percent-${percentTone}`}>
-            <span className="sr-only">P/L Open </span>
-            {percentLabel}
-          </span>
-        ) : null}
       </div>
-      {hasPercent ? (
-        <span className="pnl-bar-track" aria-hidden="true">
-          <span
-            className={`pnl-bar-fill pnl-bar-fill-${percentTone}`}
-            style={{ width: `${barWidth}%` }}
-          />
+    </div>
+  );
+}
+
+/**
+ * P/L Opn%: open-P&L percent with optional restrained bar visualization.
+ * Missing values render as an em dash (same pattern as other numeric holes).
+ */
+function UnrealizedPnlPercentCell({
+  percent,
+}: {
+  percent: number | null | undefined;
+}) {
+  const hasPercent = percent != null && Number.isFinite(percent);
+  if (!hasPercent) {
+    return <span className="muted tabular">—</span>;
+  }
+  const barWidth = clampPnlBarPercent(percent);
+  const percentTone =
+    percent > 0 ? "positive" : percent < 0 ? "negative" : "flat";
+  const percentLabel = `${percent > 0 ? "+" : ""}${percent.toFixed(1)}%`;
+
+  return (
+    <div className={`pnl-metric pnl-metric-${percentTone}`}>
+      <div className="pnl-metric-value-row">
+        <span
+          className={`pnl-metric-percent tabular pnl-metric-percent-${percentTone}`}
+        >
+          {percentLabel}
         </span>
-      ) : null}
+      </div>
+      <span className="pnl-bar-track" aria-hidden="true">
+        <span
+          className={`pnl-bar-fill pnl-bar-fill-${percentTone}`}
+          style={{ width: `${barWidth}%` }}
+        />
+      </span>
     </div>
   );
 }
@@ -1765,6 +1770,7 @@ function PositionsSection({
                   <col className="positions-col-delta" />
                   <col className="positions-col-theta" />
                   <col className="positions-col-pnl" />
+                  <col className="positions-col-pnl-pct" />
                 </colgroup>
                 <thead>
                   <tr>
@@ -1792,6 +1798,9 @@ function PositionsSection({
                     <th scope="col" className="positions-th-num positions-th-pnl">
                       P/L Open
                     </th>
+                    <th scope="col" className="positions-th-num positions-th-pnl-pct">
+                      P/L Opn%
+                    </th>
                   </tr>
                 </thead>
                 {symbolGroups.map((group) => {
@@ -1810,7 +1819,7 @@ function PositionsSection({
                         >
                           <th
                             scope="rowgroup"
-                            colSpan={POSITIONS_TABLE_COL_COUNT - 1}
+                            colSpan={POSITIONS_TABLE_COL_COUNT - 2}
                             className="symbol-group-identity-cell"
                           >
                             <button
@@ -1853,6 +1862,9 @@ function PositionsSection({
                             >
                               {currency(group.openPnl)}
                             </span>
+                          </td>
+                          <td className="positions-td-num positions-td-pnl-pct symbol-group-aggregate-pnl-pct">
+                            <span className="muted tabular">—</span>
                           </td>
                         </tr>
                       </tbody>
@@ -1965,8 +1977,12 @@ function PositionsSection({
                                   {signed(strategy.total_theta, 0)}
                                 </td>
                                 <td className="positions-td-num positions-td-pnl">
-                                  <UnrealizedPnlCell
+                                  <UnrealizedPnlAmountCell
                                     value={strategyOpenPnl(strategy)}
+                                  />
+                                </td>
+                                <td className="positions-td-num positions-td-pnl-pct">
+                                  <UnrealizedPnlPercentCell
                                     percent={strategyOpenPnlPercent(strategy)}
                                   />
                                 </td>
@@ -2013,8 +2029,12 @@ function PositionsSection({
                                             : signed(leg.theta, 2)}
                                         </td>
                                         <td className="positions-td-num positions-td-pnl">
-                                          <UnrealizedPnlCell
+                                          <UnrealizedPnlAmountCell
                                             value={legOpenPnl(leg)}
+                                          />
+                                        </td>
+                                        <td className="positions-td-num positions-td-pnl-pct">
+                                          <UnrealizedPnlPercentCell
                                             percent={legOpenPnlPercent(leg)}
                                           />
                                         </td>
@@ -3278,6 +3298,8 @@ function StrategyDetailDrawer({
 
           <CatalystDetailPanel catalyst={detail.catalyst ?? null} symbol={strategy.underlying} />
 
+          <MechanicsPanel mechanics={detail.mechanics ?? null} />
+
           <section>
             <h3>Legs</h3>
             <div className="table-wrap" tabIndex={0} role="region" aria-label="Strategy legs table">
@@ -3838,6 +3860,141 @@ function CatalystFreshness({
     <span className="section-state">
       {scan.coverage} · {asOf}
     </span>
+  );
+}
+
+function mechanicsStatusLabel(status: string): string {
+  switch (status) {
+    case "due":
+      return "Due";
+    case "watch":
+      return "Watch";
+    case "blocked":
+      return "Blocked";
+    case "pass":
+      return "Pass";
+    case "not_applicable":
+      return "N/A";
+    default:
+      return status;
+  }
+}
+
+function MechanicsPanel({ mechanics }: { mechanics: MechanicsEvaluation | null }) {
+  if (!mechanics) {
+    return (
+      <section aria-labelledby="tasty-mechanics-heading">
+        <h3 id="tasty-mechanics-heading">Tasty mechanics</h3>
+        <p className="muted">Mechanics evaluation unavailable for this strategy.</p>
+      </section>
+    );
+  }
+
+  const notableRules = mechanics.rules.filter((rule) =>
+    ["due", "watch", "blocked"].includes(rule.status),
+  );
+  const ruleRows = notableRules.length
+    ? notableRules
+    : mechanics.rules.filter((rule) => rule.status !== "not_applicable").slice(0, 4);
+
+  return (
+    <section aria-labelledby="tasty-mechanics-heading" className="mechanics-panel">
+      <h3 id="tasty-mechanics-heading">Tasty mechanics</h3>
+      <p className="microcopy">
+        <strong>{mechanics.playbook_id}</strong>
+        {mechanics.shadow_mode ? " · Shadow mode" : " · Advisory"}
+        {!mechanics.enabled ? " · Disabled" : ""}
+        {" · "}
+        {mechanics.facts.risk_class} risk
+        {mechanics.facts.dte != null ? ` · ${mechanics.facts.dte} DTE` : ""}
+      </p>
+      <p className="microcopy" role="note">
+        {mechanics.execution_boundary}
+      </p>
+      {mechanics.facts.data_quality_flags.length ? (
+        <p className="muted" role="status">
+          Data notes: {mechanics.facts.data_quality_flags.join(", ")}
+        </p>
+      ) : null}
+      {mechanics.facts.option_liquidity_known === false ? (
+        <p className="microcopy" role="status">
+          Option/complex liquidity unknown (underlying spread is not option fill quality).
+          {mechanics.facts.underlying_spread_pct != null
+            ? ` Underlying spread ${mechanics.facts.underlying_spread_pct.toFixed(2)}%.`
+            : ""}
+        </p>
+      ) : null}
+
+      <h4 className="compact-subhead">Rule hits</h4>
+      {ruleRows.length ? (
+        <ul className="plain-list mechanics-rules">
+          {ruleRows.map((rule) => (
+            <li key={rule.rule_id}>
+              <strong>
+                {mechanicsStatusLabel(rule.status)} · {rule.name}
+              </strong>
+              <span className="microcopy"> {rule.explanation}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="muted">No active rule hits.</p>
+      )}
+
+      <h4 className="compact-subhead">Advisory candidates</h4>
+      {mechanics.candidates.length ? (
+        <ul className="plain-list mechanics-candidates">
+          {mechanics.candidates.map((candidate) => (
+            <li key={candidate.candidate_id}>
+              <strong>{candidate.kind}</strong>
+              <span className="microcopy"> · {candidate.candidate_id}</span>
+              <p className="microcopy">{candidate.explanation}</p>
+              {candidate.missing_inputs.length ? (
+                <p className="muted" role="status">
+                  Missing: {candidate.missing_inputs.join(", ")}
+                </p>
+              ) : null}
+              {candidate.blocking_reasons.length ? (
+                <p className="muted" role="status">
+                  Blocked: {candidate.blocking_reasons.join(", ")}
+                </p>
+              ) : null}
+              {candidate.before_risk || candidate.after_risk ? (
+                <p className="microcopy tabular">
+                  Risk
+                  {candidate.before_risk?.max_loss != null
+                    ? ` before max loss ${currency(candidate.before_risk.max_loss)}`
+                    : ""}
+                  {candidate.after_risk?.max_loss != null
+                    ? ` → after ${currency(candidate.after_risk.max_loss)}`
+                    : candidate.after_risk?.note
+                      ? ` · ${candidate.after_risk.note}`
+                      : ""}
+                </p>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="muted">No candidates (disabled or empty evaluation).</p>
+      )}
+
+      <h4 className="compact-subhead">Sources</h4>
+      <ul className="plain-list mechanics-sources">
+        {mechanics.sources.slice(0, 8).map((source) => (
+          <li key={source.source_id}>
+            <a href={source.url} target="_blank" rel="noreferrer noopener">
+              {source.title}
+            </a>
+            <span className="microcopy"> · reviewed {source.reviewed_at}</span>
+          </li>
+        ))}
+      </ul>
+      <p className="microcopy">
+        Educational presets only — not guaranteed or universally optimal. Execution remains
+        manual in tastytrade; this panel never places orders.
+      </p>
+    </section>
   );
 }
 

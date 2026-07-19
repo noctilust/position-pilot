@@ -370,3 +370,228 @@ def test_portfolio_evaluation(tmp_path: Path) -> None:
     record = service.evaluate_portfolio(snapshot)
     assert record.subject_type == SubjectType.PORTFOLIO
     assert provider.calls == 1
+
+
+def test_mechanics_candidates_reject_add_hedge_and_roll(tmp_path: Path) -> None:
+    """Post-parse validation fails closed on actions not allowed by mechanics candidates."""
+    from position_pilot.domain.recommendations import (
+        allowed_actions_from_mechanics_candidates,
+        validate_action_against_mechanics,
+    )
+
+    mechanics = {
+        "enabled": True,
+        "shadow_mode": False,
+        "candidates": [
+            {
+                "candidate_id": "close:profit-target",
+                "kind": "close",
+                "rule_hits": ["profit.manage_winner"],
+                "missing_inputs": [],
+                "blocking_reasons": [],
+            },
+            {
+                "candidate_id": "hold:within-mechanics",
+                "kind": "hold",
+                "rule_hits": [],
+                "missing_inputs": [],
+                "blocking_reasons": [],
+            },
+            {
+                "candidate_id": "roll-review:tested-side",
+                "kind": "roll-review",
+                "rule_hits": ["tested.side_review"],
+                "missing_inputs": ["option_chain_quote"],
+                "blocking_reasons": ["roll_economics_unknown"],
+            },
+        ],
+    }
+    allowed = allowed_actions_from_mechanics_candidates(mechanics)
+    assert allowed is not None
+    assert "hold" in allowed
+    assert "close" in allowed
+    assert "review" in allowed
+    assert "roll" not in allowed
+    assert "add" not in allowed
+    assert "hedge" not in allowed
+
+    assert validate_action_against_mechanics(RecommendationAction.ADD, mechanics)
+    assert validate_action_against_mechanics(RecommendationAction.HEDGE, mechanics)
+    assert validate_action_against_mechanics(RecommendationAction.ROLL, mechanics)
+    assert validate_action_against_mechanics(RecommendationAction.CLOSE, mechanics) is None
+    assert validate_action_against_mechanics(RecommendationAction.HOLD, mechanics) is None
+    assert validate_action_against_mechanics(RecommendationAction.REVIEW, mechanics) is None
+
+    # Shadow mode is observational — never rejects.
+    shadow = {**mechanics, "shadow_mode": True}
+    assert validate_action_against_mechanics(RecommendationAction.ADD, shadow) is None
+
+    # Portfolio/equity: no mechanics constraint
+    assert validate_action_against_mechanics(RecommendationAction.ADD, None) is None
+    assert validate_action_against_mechanics(RecommendationAction.ADD, {}) is None
+
+    provider = StubProvider()
+    service = RecommendationService(_db(tmp_path), provider=provider, clock=lambda: FIXED)
+    strategy = StrategySnapshot(
+        strategy_id="strat-mech-gate",
+        account_id="acct-1",
+        underlying="SPY",
+        strategy_type="Bull Put Spread",
+        expiration_date="2026-08-21",
+        days_to_expiration=21,
+        quantity=1,
+        strikes="$490/$500",
+        unrealized_pnl=50,
+        total_delta=-0.1,
+        total_theta=0.05,
+        horizon=PositionHorizon.TACTICAL,
+        legs=[],
+    )
+
+    for bad_action in (
+        RecommendationAction.ADD,
+        RecommendationAction.HEDGE,
+        RecommendationAction.ROLL,
+    ):
+        provider.action = bad_action
+        provider.calls = 0
+        record = service.evaluate_strategy(strategy, mechanics=mechanics, force=True)
+        assert record.provider_status == CodexProviderStatus.INVALID_OUTPUT
+        assert record.action is None or record.action != bad_action
+        assert record.error is not None
+        assert "incompatible" in record.error.lower()
+        assert record.codex_called is True
+
+    provider.action = RecommendationAction.CLOSE
+    provider.calls = 0
+    ok = service.evaluate_strategy(strategy, mechanics=mechanics, force=True)
+    assert ok.provider_status == CodexProviderStatus.OK
+    assert ok.action == RecommendationAction.CLOSE
+
+    # Shadow mode bypass at service level: ADD is not rejected.
+    provider.action = RecommendationAction.ADD
+    provider.calls = 0
+    shadow_ok = service.evaluate_strategy(strategy, mechanics=shadow, force=True)
+    assert shadow_ok.provider_status == CodexProviderStatus.OK
+    assert shadow_ok.action == RecommendationAction.ADD
+
+
+def test_portfolio_path_ignores_mechanics_action_gate(tmp_path: Path) -> None:
+    provider = StubProvider()
+    provider.action = RecommendationAction.ADD
+    service = RecommendationService(_db(tmp_path), provider=provider, clock=lambda: FIXED)
+    snapshot = PortfolioSnapshot(
+        snapshot_id="snap-1",
+        captured_at=FIXED,
+        state=SnapshotState.LIVE,
+        freshness=DataFreshness(as_of=FIXED, provider="test", state=FreshnessState.FRESH),
+        accounts=[],
+        strategies=[],
+        totals=PortfolioTotals(),
+    )
+    record = service.evaluate_portfolio(snapshot, force=True)
+    assert record.provider_status == CodexProviderStatus.OK
+    assert record.action == RecommendationAction.ADD
+
+
+def test_blocked_candidates_authorize_review_only() -> None:
+    from position_pilot.domain.recommendations import (
+        allowed_actions_from_mechanics_candidates,
+        validate_action_against_mechanics,
+    )
+
+    mechanics = {
+        "enabled": True,
+        "shadow_mode": False,
+        "candidates": [
+            {
+                "candidate_id": "close:profit-target",
+                "kind": "close",
+                "missing_inputs": [],
+                "blocking_reasons": ["data_quality_block"],
+            },
+            {
+                "candidate_id": "reduce:size-cap",
+                "kind": "reduce",
+                "missing_inputs": ["strategy_bpr"],
+                "blocking_reasons": [],
+            },
+        ],
+    }
+    allowed = allowed_actions_from_mechanics_candidates(mechanics)
+    assert allowed == frozenset({"review"})
+    assert validate_action_against_mechanics(RecommendationAction.CLOSE, mechanics)
+    assert validate_action_against_mechanics(RecommendationAction.REDUCE, mechanics)
+    assert validate_action_against_mechanics(RecommendationAction.REVIEW, mechanics) is None
+
+
+def test_strategy_context_preserves_catalyst_availability_unknown() -> None:
+    strategy = StrategySnapshot(
+        strategy_id="s1",
+        account_id="a1",
+        underlying="SPY",
+        strategy_type="Bull Put Spread",
+        expiration_date="2026-08-21",
+        days_to_expiration=30,
+        quantity=1,
+        strikes="$490/$500",
+        unrealized_pnl=10,
+        total_delta=0,
+        total_theta=0,
+        horizon=PositionHorizon.TACTICAL,
+        legs=[],
+    )
+    unknown = strategy_context(
+        strategy,
+        catalysts=[],
+        catalyst_availability="unknown",
+    )
+    assert unknown["catalyst_availability"] == "unknown"
+    assert unknown["catalysts"] == []
+
+    known_empty = strategy_context(strategy, catalysts=[], catalyst_availability="known")
+    assert known_empty["catalyst_availability"] == "known"
+
+    # None catalysts without explicit availability => unknown
+    none_ctx = strategy_context(strategy, catalysts=None)
+    assert none_ctx["catalyst_availability"] == "unknown"
+
+
+def test_evaluate_strategy_loader_failure_propagates_unknown_availability(
+    tmp_path: Path,
+) -> None:
+    """When caller marks catalysts unknown, context must not look like known-empty only."""
+    provider = StubProvider()
+    service = RecommendationService(_db(tmp_path), provider=provider, clock=lambda: FIXED)
+    strategy = StrategySnapshot(
+        strategy_id="s-cat",
+        account_id="a1",
+        underlying="SPY",
+        strategy_type="Bull Put Spread",
+        expiration_date="2026-08-21",
+        days_to_expiration=30,
+        quantity=1,
+        strikes="$490/$500",
+        unrealized_pnl=10,
+        total_delta=0,
+        total_theta=0,
+        horizon=PositionHorizon.TACTICAL,
+        legs=[],
+    )
+    # Capture context via fingerprint inputs by using a wrapping provider
+    captured: dict = {}
+
+    class CaptureProvider(StubProvider):
+        def complete_recommendation(self, context: dict):
+            captured.update(context)
+            return super().complete_recommendation(context)
+
+    service.provider = CaptureProvider()
+    service.evaluate_strategy(
+        strategy,
+        catalysts=[],
+        catalyst_availability="unknown",
+        force=True,
+    )
+    assert captured.get("catalyst_availability") == "unknown"
+    assert captured.get("catalysts") == []

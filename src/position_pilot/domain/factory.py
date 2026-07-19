@@ -28,6 +28,7 @@ from .catalysts import (
     previous_regular_close,
 )
 from .market import MarketService, ProviderRoutedMarketSource
+from .mechanics import MechanicsService
 from .monitoring import MonitoringService
 from .notifications import NotificationService
 from .operations import OperationsService
@@ -179,6 +180,15 @@ def get_order_service() -> OrderService:
 @lru_cache(maxsize=1)
 def get_plans_service() -> PlansService:
     return PlansService(get_database())
+
+
+@lru_cache(maxsize=1)
+def get_mechanics_service() -> MechanicsService:
+    return MechanicsService(
+        get_database(),
+        risk_service=get_risk_service(),
+        plans_service=get_plans_service(),
+    )
 
 
 @lru_cache(maxsize=1)
@@ -556,6 +566,13 @@ def build_market_context_loader() -> Any:
         if snap is None:
             return None
         provider = snap.freshness.provider if snap.freshness else "market-service"
+        freshness_state = None
+        if snap.freshness is not None and snap.freshness.state is not None:
+            freshness_state = (
+                snap.freshness.state.value
+                if hasattr(snap.freshness.state, "value")
+                else str(snap.freshness.state)
+            )
         return {
             "price": snap.price,
             "bid": snap.bid,
@@ -566,6 +583,7 @@ def build_market_context_loader() -> Any:
             "spread_percent": snap.spread_percent,
             "provider": provider,
             "as_of": snap.freshness.as_of.isoformat() if snap.freshness else None,
+            "freshness": freshness_state,
         }
 
     return market_context_loader
@@ -627,8 +645,12 @@ def get_monitoring_service() -> MonitoringService:
         except Exception:
             return get_database().latest_portfolio_snapshot()
 
-    def catalyst_loader(symbol: str) -> list[dict]:
-        """Prefer cached held-symbol results; live scan is owned by catalyst_tick cadence."""
+    def catalyst_loader(symbol: str) -> list[dict] | None:
+        """Prefer cached held-symbol results; live scan is owned by catalyst_tick cadence.
+
+        Returns None when catalyst data is unavailable (failure), not an empty list.
+        Empty list means a known-empty scan for mechanics/recommendation consumers.
+        """
 
         try:
             service = get_catalyst_service()
@@ -638,7 +660,12 @@ def get_monitoring_service() -> MonitoringService:
             result = service.analyze_symbol(symbol)
             return [event.model_dump(mode="json") for event in result.catalysts]
         except Exception:
-            return []
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "catalyst_loader unavailable for symbol=%s", str(symbol).upper()[:32]
+            )
+            return None
 
     def catalyst_scan(symbols: list[str]) -> dict[str, list[dict]]:
         """Fresh scan of every unique held underlying for the news cadence schedule."""
@@ -683,6 +710,36 @@ def get_monitoring_service() -> MonitoringService:
         stored = get_database().get_setting("catalysts", {}) or {}
         return int(stored.get("news_cadence_seconds", 300))
 
+    def mechanics_loader(
+        strategy,
+        *,
+        catalysts=None,
+        trade_plan=None,
+        market=None,
+        portfolio=None,
+    ):
+        """Deterministic mechanics compact context for recommendation fingerprints."""
+
+        import logging
+
+        from .mechanics import compact_mechanics_context
+
+        try:
+            evaluation = get_mechanics_service().evaluate_strategy(
+                strategy,
+                portfolio=portfolio,
+                market=market,
+                trade_plan=trade_plan,
+                catalysts=catalysts,
+            )
+        except Exception:
+            sid = getattr(strategy, "strategy_id", "?")
+            logging.getLogger(__name__).exception("mechanics_loader failed for strategy_id=%s", sid)
+            return None
+        # Shadow mode still participates in fingerprints (rule crossings re-due).
+        # Notifications remain recommendation-driven only (no mechanics-specific alerts).
+        return compact_mechanics_context(evaluation)
+
     return MonitoringService(
         database=get_database(),
         recommendations=get_recommendation_service(),
@@ -695,5 +752,6 @@ def get_monitoring_service() -> MonitoringService:
         plan_loader=plan_loader,
         risk_snapshot_loader=risk_snapshot_loader,
         market_context_loader=build_market_context_loader(),
+        mechanics_loader=mechanics_loader,
         news_cadence_seconds=news_cadence_seconds,
     )

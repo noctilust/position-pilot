@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import secrets
 from contextlib import asynccontextmanager
@@ -34,6 +35,7 @@ from ..domain.factory import (
     get_database,
     get_field_router,
     get_market_service,
+    get_mechanics_service,
     get_monitoring_service,
     get_operations_service,
     get_order_service,
@@ -46,6 +48,7 @@ from ..domain.factory import (
     set_live_market_hub,
 )
 from ..domain.market import ChartSnapshot, MarketOverview, MarketSnapshot
+from ..domain.mechanics import compact_mechanics_context
 from ..domain.operations import package_diagnostic_zip
 from ..domain.orders import OrderSnapshot
 from ..domain.plans import AuditEvent, Thesis, TradePlan
@@ -61,6 +64,38 @@ from ..streaming.reconciliation import ReconciliationCoordinator, Reconciliation
 from ..streaming.service import TastytradeStreamingService
 
 STATIC_DIR = Path(__file__).with_name("static")
+logger = logging.getLogger(__name__)
+
+
+def market_snapshot_to_mechanics_payload(snapshot: Any | None) -> dict[str, Any] | None:
+    """Serialize MarketSnapshot for mechanics evaluation with full freshness fields.
+
+    Returns None when snapshot is unavailable. Never invents bid/ask/as_of.
+    """
+
+    if snapshot is None:
+        return None
+    freshness = getattr(snapshot, "freshness", None)
+    as_of = None
+    freshness_state = None
+    if freshness is not None:
+        observed = getattr(freshness, "as_of", None)
+        if observed is not None:
+            as_of = observed.isoformat() if hasattr(observed, "isoformat") else str(observed)
+        state = getattr(freshness, "state", None)
+        if state is not None:
+            freshness_state = state.value if hasattr(state, "value") else str(state)
+    return {
+        "price": getattr(snapshot, "price", None),
+        "bid": getattr(snapshot, "bid", None),
+        "ask": getattr(snapshot, "ask", None),
+        "iv": getattr(snapshot, "iv", None),
+        "iv_rank": getattr(snapshot, "iv_rank", None),
+        "iv_percentile": getattr(snapshot, "iv_percentile", None),
+        "spread_percent": getattr(snapshot, "spread_percent", None),
+        "as_of": as_of,
+        "freshness": freshness_state,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +172,18 @@ class MonitoringConsentRequest(BaseModel):
 
 class RecommendationSettingsRequest(BaseModel):
     rich_notification_preview: bool | None = None
+
+
+class MechanicsSettingsRequest(BaseModel):
+    enabled: bool | None = None
+    shadow_mode: bool | None = None
+    playbook_id: str | None = Field(default=None, max_length=80)
+    profit_target_pct: float | None = Field(default=None, ge=0.10, le=0.90)
+    manage_at_dte: int | None = Field(default=None, ge=7, le=60)
+    tested_delta_threshold: float | None = Field(default=None, ge=0.10, le=0.50)
+    defined_risk_cap_pct: float | None = Field(default=None, ge=0.005, le=0.50)
+    undefined_bpr_cap_pct: float | None = Field(default=None, ge=0.005, le=0.50)
+    credit_only_rolls: bool | None = None
 
 
 class TraderDecisionRequest(BaseModel):
@@ -743,6 +790,27 @@ def create_app(
             )
         )
         rolls = [chain for chain in all_rolls if chain.strategy_type == strategy.strategy_type]
+
+        def _mechanics_eval():
+            market_payload = market_snapshot_to_mechanics_payload(market)
+            portfolio = get_portfolio_service().latest()
+            try:
+                return get_mechanics_service().evaluate_strategy(
+                    strategy,
+                    portfolio=portfolio,
+                    risk=risk,
+                    market=market_payload,
+                    trade_plan=trade_plan.model_dump(mode="json") if trade_plan else None,
+                    catalysts=[event.model_dump(mode="json") for event in catalyst.catalysts],
+                )
+            except Exception:
+                logger.exception(
+                    "Mechanics evaluation failed for strategy_id=%s",
+                    strategy.strategy_id,
+                )
+                return None
+
+        mechanics = await run_in_threadpool(_mechanics_eval)
         return {
             "strategy": strategy.model_dump(mode="json"),
             "risk": risk.model_dump(mode="json"),
@@ -758,6 +826,7 @@ def create_app(
             "decisions": [item.model_dump(mode="json") for item in decisions],
             "audit": [event.model_dump(mode="json") for event in audit],
             "rolls": [chain.model_dump(mode="json") for chain in rolls],
+            "mechanics": mechanics.model_dump(mode="json") if mechanics else None,
             "events": [
                 {
                     "kind": "catalyst",
@@ -1008,6 +1077,84 @@ def create_app(
         updates = {key: value for key, value in payload.model_dump().items() if value is not None}
         return await run_in_threadpool(get_catalyst_service().update_settings, updates)
 
+    @app.get("/api/v1/settings/mechanics")
+    async def get_mechanics_settings(
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        return get_mechanics_service().public_settings()
+
+    @app.put("/api/v1/settings/mechanics")
+    async def put_mechanics_settings(
+        payload: MechanicsSettingsRequest,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        updates = {key: value for key, value in payload.model_dump().items() if value is not None}
+        try:
+            return await run_in_threadpool(get_mechanics_service().update_settings, updates)
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+
+    @app.get("/api/v1/strategies/{strategy_id}/mechanics")
+    async def strategy_mechanics(
+        strategy_id: str,
+        session: Annotated[
+            str | None,
+            Cookie(alias="position_pilot_session"),
+        ] = None,
+    ) -> dict[str, Any]:
+        _require_session(session, active_settings.session_token)
+        strategy = await resolve_strategy(strategy_id)
+
+        def _run():
+            try:
+                market_snap = get_market_service().snapshot(strategy.underlying)
+            except Exception:
+                logger.exception(
+                    "Market snapshot failed for strategy_id=%s",
+                    strategy.strategy_id,
+                )
+                market_snap = None
+            market_payload = market_snapshot_to_mechanics_payload(market_snap)
+            risk = get_risk_service().strategy_risk(
+                strategy,
+                underlying_price=market_snap.price if market_snap else None,
+            )
+            portfolio = get_portfolio_service().latest()
+            catalysts: list[dict[str, Any]] | None
+            try:
+                cat = get_catalyst_service().analyze_symbol(strategy.underlying)
+                catalysts = [event.model_dump(mode="json") for event in cat.catalysts]
+            except Exception:
+                logger.exception(
+                    "Catalyst analysis unavailable for strategy_id=%s; "
+                    "mechanics will treat catalysts as unknown",
+                    strategy.strategy_id,
+                )
+                catalysts = None
+            plan = get_plans_service().get_trade_plan(strategy_id)
+            return get_mechanics_service().evaluate_strategy(
+                strategy,
+                portfolio=portfolio,
+                risk=risk,
+                market=market_payload,
+                trade_plan=plan.model_dump(mode="json") if plan else None,
+                catalysts=catalysts,
+            )
+
+        evaluation = await run_in_threadpool(_run)
+        return evaluation.model_dump(mode="json")
+
     @app.get("/api/v1/recommendations")
     async def list_recommendations(
         account_id: str = "all",
@@ -1088,19 +1235,54 @@ def create_app(
         strategy = await resolve_strategy(strategy_id)
 
         def _run():
-            catalysts = []
+            catalysts: list[dict[str, Any]] | None
             try:
                 catalyst = get_catalyst_service().analyze_symbol(strategy.underlying)
                 catalysts = [event.model_dump(mode="json") for event in catalyst.catalysts]
             except Exception:
-                catalysts = []
+                logger.exception(
+                    "Catalyst analysis unavailable for strategy_id=%s; "
+                    "recommendation/mechanics will treat catalysts as unknown",
+                    strategy.strategy_id,
+                )
+                catalysts = None
             thesis = get_plans_service().get_thesis(strategy_id)
             plan = get_plans_service().get_trade_plan(strategy_id)
+            market_payload = None
+            try:
+                market_snap = get_market_service().snapshot(strategy.underlying)
+                market_payload = market_snapshot_to_mechanics_payload(market_snap)
+            except Exception:
+                logger.exception(
+                    "Market snapshot failed for strategy_id=%s",
+                    strategy.strategy_id,
+                )
+                market_payload = None
+            mechanics_ctx = None
+            try:
+                portfolio = get_portfolio_service().latest()
+                evaluation = get_mechanics_service().evaluate_strategy(
+                    strategy,
+                    portfolio=portfolio,
+                    market=market_payload,
+                    trade_plan=plan.model_dump(mode="json") if plan else None,
+                    catalysts=catalysts,
+                )
+                mechanics_ctx = compact_mechanics_context(evaluation)
+            except Exception:
+                logger.exception(
+                    "Mechanics evaluation failed for strategy_id=%s",
+                    strategy.strategy_id,
+                )
+                mechanics_ctx = None
             return get_recommendation_service().evaluate_strategy(
                 strategy,
-                catalysts=catalysts,
+                catalysts=catalysts if catalysts is not None else [],
+                catalyst_availability="unknown" if catalysts is None else "known",
                 thesis=thesis.model_dump(mode="json") if thesis else None,
                 trade_plan=plan.model_dump(mode="json") if plan else None,
+                market=market_payload,
+                mechanics=mechanics_ctx,
                 force=force,
             )
 
